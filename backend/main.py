@@ -4,6 +4,7 @@ Provides real-time system monitoring via WebSocket and REST API
 """
 import asyncio
 import concurrent.futures
+import json
 import logging
 import os
 import platform
@@ -214,6 +215,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
     asyncio.create_task(broadcast_stats())
+    await _load_ssh_configs()
     logger.info("Monitoring Dashboard started")
     yield
     # Shutdown
@@ -260,6 +262,8 @@ class SystemStats(BaseModel):
     processes: List[Dict[str, Any]]
     system: Dict[str, Any]
     vms: Optional[List[Dict[str, Any]]] = None
+    containers: Optional[List[Dict[str, Any]]] = None
+    pods: Optional[List[Dict[str, Any]]] = None
 
 
 class PingRequest(BaseModel):
@@ -285,6 +289,20 @@ class RemediateRequest(BaseModel):
 class VMActionRequest(BaseModel):
     """Optional payload for VM control endpoints (reserved for future use)."""
     confirm: bool = Field(default=False, description="Set true for destructive actions (poweroff/destroy).")
+
+
+class VMResizeRequest(BaseModel):
+    """Payload for resizing VM CPU and/or memory."""
+    vcpus: Optional[int] = Field(default=None, ge=1, le=256, description="New number of vCPUs.")
+    memory_mb: Optional[int] = Field(default=None, ge=256, le=1048576, description="New memory in MiB.")
+
+
+class SSHConfigRequest(BaseModel):
+    """Payload for setting SSH connection details for a VM."""
+    host: str = Field(min_length=1, max_length=253, description="IP or hostname of the VM.")
+    port: int = Field(default=22, ge=1, le=65535)
+    user: str = Field(min_length=1, max_length=64, description="SSH username.")
+    key_path: Optional[str] = Field(default=None, max_length=512, description="Path to SSH private key.")
 
 
 # Approved libvirt domain control actions exposed to the dashboard.
@@ -606,6 +624,268 @@ async def get_system_info() -> Dict[str, Any]:
         "uptime_str": str(uptime).split('.')[0],
         "python_version": platform.python_version()
     }
+
+
+# =============================================================================
+# DOCKER CONTAINER & KUBERNETES POD MONITORING
+# =============================================================================
+
+async def get_docker_containers() -> Optional[List[Dict[str, Any]]]:
+    """List all Docker containers on the host using the docker CLI."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "ps", "-a", "--no-trunc",
+            "--format", "{{json .}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode != 0:
+            return None
+        containers = []
+        for line in stdout.decode(errors="replace").strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                raw = json.loads(line)
+                containers.append({
+                    "id": raw.get("ID", "")[:12],
+                    "name": raw.get("Name", ""),
+                    "image": raw.get("Image", ""),
+                    "status": raw.get("Status", ""),
+                    "state": raw.get("State", ""),
+                    "ports": raw.get("Ports", ""),
+                    "created": raw.get("CreatedAt", ""),
+                    "size": raw.get("Size", ""),
+                    "running": raw.get("State", "").lower() == "running",
+                })
+            except json.JSONDecodeError:
+                continue
+        return containers if containers else []
+    except FileNotFoundError:
+        return None
+    except asyncio.TimeoutError:
+        return None
+    except Exception as e:
+        logger.warning("Error listing Docker containers: %s", e)
+        return None
+
+
+async def get_docker_container_logs(container_id: str, lines: int = 100) -> Optional[str]:
+    """Fetch recent logs from a Docker container."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "logs", "--tail", str(lines), container_id,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        output = stdout.decode(errors="replace")
+        err = stderr.decode(errors="replace")
+        return output + ("\n" + err if err else "")
+    except Exception:
+        return None
+
+
+async def get_docker_container_stats() -> Optional[List[Dict[str, Any]]]:
+    """Get live resource usage for running Docker containers."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "stats", "--no-stream",
+            "--format", "{{json .}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode != 0:
+            return None
+        stats = []
+        for line in stdout.decode(errors="replace").strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                raw = json.loads(line)
+                cpu_str = raw.get("CPUPerc", "0%").replace("%", "").strip()
+                stats.append({
+                    "id": raw.get("ID", "")[:12],
+                    "name": raw.get("Name", ""),
+                    "cpu_percent": float(cpu_str) if cpu_str else 0.0,
+                    "mem_usage": raw.get("MemUsage", ""),
+                    "net_io": raw.get("NetIO", ""),
+                    "block_io": raw.get("BlockIO", ""),
+                    "pids": raw.get("PIDs", "0"),
+                })
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return stats if stats else []
+    except FileNotFoundError:
+        return None
+    except asyncio.TimeoutError:
+        return None
+    except Exception as e:
+        logger.warning("Error getting Docker container stats: %s", e)
+        return None
+
+
+async def get_kubernetes_pods() -> Optional[List[Dict[str, Any]]]:
+    """List Kubernetes pods if kubectl is available and configured."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "kubectl", "get", "pods", "-A", "-o", "json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode != 0:
+            return None
+        data = json.loads(stdout.decode(errors="replace"))
+        pods = []
+        for item in data.get("items", []):
+            metadata = item.get("metadata", {})
+            spec = item.get("spec", {})
+            status = item.get("status", {})
+            container_statuses = status.get("containerStatuses", [])
+            total_restarts = sum(c.get("restartCount", 0) for c in container_statuses)
+            pod_phase = status.get("phase", "Unknown")
+            containers = [c.get("name", "") for c in spec.get("containers", [])]
+            restart_reasons = []
+            for cs in container_statuses:
+                state = cs.get("state", {})
+                if "waiting" in state:
+                    reason = state["waiting"].get("reason", "")
+                    if reason:
+                        restart_reasons.append(f"{cs.get('name','')}: {reason}")
+            pods.append({
+                "name": metadata.get("name", ""),
+                "namespace": metadata.get("namespace", "default"),
+                "status": pod_phase,
+                "restarts": total_restarts,
+                "node": spec.get("nodeName", ""),
+                "pod_ip": status.get("podIP", ""),
+                "containers": containers,
+                "container_count": len(containers),
+                "age": metadata.get("creationTimestamp", ""),
+                "waiting_reasons": restart_reasons,
+            })
+        return pods if pods else []
+    except FileNotFoundError:
+        return None
+    except asyncio.TimeoutError:
+        return None
+    except Exception as e:
+        logger.warning("Error listing Kubernetes pods: %s", e)
+        return None
+
+
+# =============================================================================
+# PER-VM CONTAINER MONITORING (SSH-BASED)
+# =============================================================================
+
+_vm_ssh_configs: Dict[str, Dict[str, Any]] = {}
+_vm_ssh_configs_lock = asyncio.Lock()
+_SSH_CONFIG_PATH = Path(__file__).resolve().parent.parent / ".vm-ssh-config.json"
+
+
+async def _load_ssh_configs():
+    """Load SSH configs from disk on startup."""
+    global _vm_ssh_configs
+    try:
+        if _SSH_CONFIG_PATH.exists():
+            data = json.loads(_SSH_CONFIG_PATH.read_text())
+            _vm_ssh_configs = data if isinstance(data, dict) else {}
+    except Exception:
+        _vm_ssh_configs = {}
+
+
+async def _save_ssh_configs():
+    """Persist SSH configs to disk."""
+    try:
+        _SSH_CONFIG_PATH.write_text(json.dumps(_vm_ssh_configs, indent=2))
+    except Exception as e:
+        logger.warning("Could not save SSH configs: %s", e)
+
+
+async def _ssh_exec(config: Dict[str, Any], command: str, timeout: float = 15.0) -> Optional[str]:
+    """Execute a command on a remote VM via SSH. Returns stdout or None on failure."""
+    ssh_bin = shutil.which("ssh")
+    if not ssh_bin:
+        return None
+    cmd = [
+        ssh_bin, "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+        "-p", str(config.get("port", 22)),
+    ]
+    key = config.get("key_path", "")
+    if key and os.path.isfile(key):
+        cmd.extend(["-i", key])
+    user = config.get("user", "root")
+    host = config.get("host", "")
+    if not host:
+        return None
+    cmd.extend([f"{user}@{host}", command])
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode != 0:
+            return None
+        return stdout.decode(errors="replace")
+    except Exception:
+        return None
+
+
+async def get_vm_containers(vm_id: str) -> Optional[Dict[str, Any]]:
+    """Get Docker containers running inside a VM via SSH."""
+    async with _vm_ssh_configs_lock:
+        config = _vm_ssh_configs.get(vm_id)
+    if not config:
+        return None
+    output = await _ssh_exec(config, "docker ps -a --no-trunc --format '{{json .}}'")
+    if output is None:
+        return {"vm_id": vm_id, "containers": [], "total": 0, "running": 0,
+                "error": "SSH connection failed. Check SSH configuration."}
+    containers = []
+    for line in output.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            raw = json.loads(line)
+            containers.append({
+                "id": raw.get("ID", "")[:12],
+                "name": raw.get("Name", ""),
+                "image": raw.get("Image", ""),
+                "status": raw.get("Status", ""),
+                "state": raw.get("State", ""),
+                "ports": raw.get("Ports", ""),
+                "running": raw.get("State", "").lower() == "running",
+            })
+        except json.JSONDecodeError:
+            continue
+    stats_output = await _ssh_exec(config, "docker stats --no-stream --format '{{json .}}'", timeout=20)
+    if stats_output:
+        stats_map = {}
+        for line in stats_output.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                raw = json.loads(line)
+                stats_map[raw.get("Name", "")] = {
+                    "cpu_percent": float(raw.get("CPUPerc", "0%").replace("%", "").strip() or 0),
+                    "mem_usage": raw.get("MemUsage", ""),
+                    "net_io": raw.get("NetIO", ""),
+                }
+            except (json.JSONDecodeError, ValueError):
+                continue
+        for c in containers:
+            if c["name"] in stats_map:
+                c["stats"] = stats_map[c["name"]]
+    return {"vm_id": vm_id, "containers": containers, "total": len(containers),
+            "running": sum(1 for c in containers if c.get("running"))}
 
 
 def _virsh_present() -> bool:
@@ -1083,6 +1363,203 @@ async def vm_action_log(limit: int = Query(20, ge=1, le=_VM_ACTION_LOG_LIMIT)):
     return {"entries": recent, "total": len(_vm_action_log)}
 
 
+# =============================================================================
+# VM SSH CONFIGURATION ENDPOINTS
+# =============================================================================
+
+@app.get("/api/vms/{vm_id}/ssh-config")
+async def get_vm_ssh_config(vm_id: str):
+    """Get SSH configuration for a VM."""
+    async with _vm_ssh_configs_lock:
+        config = _vm_ssh_configs.get(vm_id, {})
+    return {"vm_id": vm_id, "configured": bool(config), **config}
+
+
+@app.post("/api/vms/{vm_id}/ssh-config")
+async def set_vm_ssh_config(vm_id: str, payload: SSHConfigRequest):
+    """Set SSH configuration for a VM to enable container monitoring."""
+    config = {"host": payload.host, "port": payload.port,
+              "user": payload.user, "key_path": payload.key_path or ""}
+    async with _vm_ssh_configs_lock:
+        _vm_ssh_configs[vm_id] = config
+    await _save_ssh_configs()
+    return {"success": True, "message": f"SSH config saved for VM '{vm_id}'.", **config}
+
+
+@app.delete("/api/vms/{vm_id}/ssh-config")
+async def delete_vm_ssh_config(vm_id: str):
+    """Remove SSH configuration for a VM."""
+    async with _vm_ssh_configs_lock:
+        removed = _vm_ssh_configs.pop(vm_id, None)
+    await _save_ssh_configs()
+    if removed:
+        return {"success": True, "message": f"SSH config removed for VM '{vm_id}'."}
+    raise HTTPException(status_code=404, detail=f"No SSH config for VM '{vm_id}'.")
+
+
+@app.get("/api/vms/{vm_id}/containers")
+async def get_vm_container_list(vm_id: str):
+    """Get Docker containers running inside a VM via SSH."""
+    result = await get_vm_containers(vm_id)
+    if result is None:
+        raise HTTPException(status_code=404,
+                            detail=f"SSH not configured for VM '{vm_id}'. Set up SSH config first.")
+    return result
+
+
+# =============================================================================
+# VM RESIZE ENDPOINT
+# =============================================================================
+
+@app.post("/api/vms/{vm_id}/resize")
+async def resize_vm(vm_id: str, payload: VMResizeRequest):
+    """Resize VM CPU and/or memory via libvirt API.
+
+    Only running or paused VMs can be resized. The change takes effect
+    immediately for CPU and on next boot for memory (unless the VM supports
+    hot-plug).
+    """
+    if not LIBVIRT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="libvirt is not installed on this host.")
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        raise HTTPException(status_code=400, detail="Invalid VM identifier.")
+    if payload.vcpus is None and payload.memory_mb is None:
+        raise HTTPException(status_code=400,
+                            detail="Provide at least one of: vcpus, memory_mb.")
+
+    domain, lookup_error = await _resolve_domain(vm_id)
+    if lookup_error:
+        raise HTTPException(status_code=404, detail=lookup_error)
+
+    # Use read-write connection for modification
+    conn, conn_error = await _ensure_libvirt_rw_conn()
+    if conn is None:
+        # Try virsh fallback
+        errors = []
+        if payload.vcpus is not None:
+            cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus))
+            if cmd:
+                err = await _run_virsh_modify(cmd)
+                if err:
+                    errors.append(f"vCPUs: {err}")
+            else:
+                errors.append("vCPUs: virsh/sudo not available")
+        if payload.memory_mb is not None:
+            mem_kib = payload.memory_mb * 1024
+            cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), "--config")
+            if cmd:
+                err = await _run_virsh_modify(cmd)
+                if err:
+                    errors.append(f"Memory: {err}")
+            else:
+                errors.append("Memory: virsh/sudo not available")
+        if errors:
+            raise HTTPException(status_code=502, detail="; ".join(errors))
+        # Re-resolve on the rw connection for the domain info read below
+        domain2, err2 = await _resolve_domain(vm_id, conn=conn if conn else None)
+        if domain2:
+            domain = domain2
+
+    messages = []
+
+    if payload.vcpus is not None:
+        try:
+            target_domain = domain
+            if conn:
+                target_domain, _ = await _resolve_domain(vm_id, conn=conn)
+                if not target_domain:
+                    target_domain = domain
+            await _run_libvirt(
+                lambda: target_domain.setVcpusFlags(payload.vcpus,
+                                                     libvirt.VIR_DOMAIN_AFFECT_CURRENT),
+                timeout=10.0,
+            )
+            messages.append(f"vCPUs set to {payload.vcpus}")
+        except libvirt.libvirtError as exc:
+            msg = str(exc)
+            if "read only" in msg.lower() or "denied" in msg.lower():
+                # Fallback to virsh
+                cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus))
+                if cmd:
+                    err = await _run_virsh_modify(cmd)
+                    if err:
+                        messages.append(f"vCPUs: {err}")
+                    else:
+                        messages.append(f"vCPUs set to {payload.vcpus} (via virsh)")
+                else:
+                    messages.append(f"vCPUs: permission denied and virsh unavailable")
+            else:
+                messages.append(f"vCPUs: {msg}")
+        except Exception as exc:
+            messages.append(f"vCPUs: {exc}")
+
+    if payload.memory_mb is not None:
+        mem_kib = payload.memory_mb * 1024
+        try:
+            target_domain = domain
+            if conn:
+                target_domain, _ = await _resolve_domain(vm_id, conn=conn)
+                if not target_domain:
+                    target_domain = domain
+            await _run_libvirt(
+                lambda: target_domain.setMemoryFlags(mem_kib,
+                                                      libvirt.VIR_DOMAIN_AFFECT_CURRENT),
+                timeout=10.0,
+            )
+            messages.append(f"Memory set to {payload.memory_mb} MiB")
+        except libvirt.libvirtError as exc:
+            msg = str(exc)
+            if "read only" in msg.lower() or "denied" in msg.lower():
+                cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), "--config")
+                if cmd:
+                    err = await _run_virsh_modify(cmd)
+                    if err:
+                        messages.append(f"Memory: {err}")
+                    else:
+                        messages.append(f"Memory set to {payload.memory_mb} MiB (via virsh)")
+                else:
+                    messages.append(f"Memory: permission denied and virsh unavailable")
+            else:
+                messages.append(f"Memory: {msg}")
+        except Exception as exc:
+            messages.append(f"Memory: {exc}")
+
+    await _record_vm_action(vm_id, "resize", True, "; ".join(messages) or "Resize requested")
+    return {"success": True, "message": "; ".join(messages), "vm_id": vm_id}
+
+
+def _build_virsh_modify_command(subcmd: str, vm_id: str, *args) -> List[str]:
+    """Build a virsh command for domain modification via the fallback path."""
+    base = [VIRSH_BIN, "--quiet", "--no-pkttyagent", "--connect", LIBVIRT_URI,
+            subcmd, "--", vm_id, *args]
+    if os.geteuid() == 0:
+        return base
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return []
+    return [sudo, "-n", *base]
+
+
+async def _run_virsh_modify(command: List[str]) -> Optional[str]:
+    """Run a virsh modify command and return error string or None on success."""
+    if not command:
+        return "sudo/virsh not available"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *command, stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        err = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+        if proc.returncode != 0:
+            return err or f"virsh command failed (exit code {proc.returncode})"
+        return None
+    except asyncio.TimeoutError:
+        return "virsh command timed out"
+    except Exception as e:
+        return str(e)
+
+
 
 async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
     """Return libvirt domain inventory and live metrics for running KVM guests.
@@ -1233,9 +1710,12 @@ async def collect_all_stats() -> SystemStats:
         processes = await get_process_stats()
         system = await get_system_info()
         vms = await get_vm_stats()
+        containers = await get_docker_containers()
+        pods = await get_kubernetes_pods()
         return SystemStats(
             timestamp=datetime.now().isoformat(), cpu=cpu, memory=memory, disk=disk,
-            network=network, gpu=gpu, processes=processes, system=system, vms=vms
+            network=network, gpu=gpu, processes=processes, system=system, vms=vms,
+            containers=containers, pods=pods
         )
 
 
@@ -1341,6 +1821,158 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
+
+
+# =============================================================================
+# VM CONSOLE WEBSOCKET PROXY
+# =============================================================================
+
+@app.websocket("/ws/vm-console/{vm_id}")
+async def vm_console_ws(websocket: WebSocket, vm_id: str):
+    """WebSocket proxy for VM console access.
+
+    Tries VNC first (graphical), then falls back to serial console via virsh.
+    The frontend connects with xterm.js or noVNC.
+    """
+    await websocket.accept()
+
+    if not LIBVIRT_AVAILABLE:
+        await websocket.close(code=1011, reason="libvirt is not installed")
+        return
+
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        await websocket.close(code=1011, reason="Invalid VM identifier")
+        return
+
+    domain, error = await _resolve_domain(vm_id)
+    if error:
+        await websocket.close(code=1011, reason=error)
+        return
+
+    # Try VNC console first
+    try:
+        xml_desc = await _run_libvirt(domain.XMLDesc, timeout=5.0)
+        root = ET.fromstring(xml_desc)
+        graphics = root.find("./devices/graphics[@type='vnc']")
+        if graphics is not None:
+            vnc_port = int(graphics.get("port", 5900))
+            vnc_host = graphics.get("listen", "127.0.0.1")
+            if vnc_host in ("0.0.0.0", ""):
+                vnc_host = "127.0.0.1"
+
+            # Send VNC connection info to the client
+            await websocket.send_json({
+                "type": "vnc",
+                "host": vnc_host,
+                "port": vnc_port,
+            })
+
+            # Proxy raw VNC bytes between WebSocket and TCP
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(vnc_host, vnc_port),
+                    timeout=5.0,
+                )
+            except Exception as e:
+                await websocket.send_json({"type": "error",
+                                           "message": f"Cannot connect to VNC port {vnc_port}: {e}"})
+                await websocket.close(code=1011, reason=str(e))
+                return
+
+            async def ws_to_vnc():
+                try:
+                    while True:
+                        data = await websocket.receive_bytes()
+                        writer.write(data)
+                        await writer.drain()
+                except Exception:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+
+            async def vnc_to_ws():
+                try:
+                    while True:
+                        data = await reader.read(65536)
+                        if not data:
+                            break
+                        await websocket.send_bytes(data)
+                except Exception:
+                    pass
+
+            try:
+                await asyncio.gather(ws_to_vnc(), vnc_to_ws())
+            except Exception:
+                pass
+            finally:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+            return
+    except Exception:
+        pass
+
+    # Fallback: serial console via virsh subprocess
+    await websocket.send_json({"type": "serial"})
+
+    cmd = [VIRSH_BIN, "--connect", LIBVIRT_URI, "console", vm_id]
+    if os.geteuid() != 0:
+        sudo = shutil.which("sudo")
+        if sudo:
+            cmd = [sudo, "-n", *cmd]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as e:
+        await websocket.send_json({"type": "error", "message": str(e)})
+        await websocket.close(code=1011, reason=str(e))
+        return
+
+    async def read_console():
+        try:
+            while True:
+                data = await proc.stdout.read(4096)
+                if not data:
+                    break
+                await websocket.send_bytes(data)
+        except Exception:
+            pass
+
+    async def write_console():
+        try:
+            while True:
+                data = await websocket.receive_bytes()
+                if proc.stdin:
+                    proc.stdin.write(data)
+                    await proc.stdin.drain()
+        except Exception:
+            pass
+
+    async def read_stderr():
+        try:
+            while True:
+                data = await proc.stderr.read(4096)
+                if not data:
+                    break
+        except Exception:
+            pass
+
+    try:
+        await asyncio.gather(read_console(), write_console(), read_stderr())
+    except Exception:
+        pass
+    finally:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
 
 
 # Process management endpoints
@@ -2256,6 +2888,50 @@ async def run_command(request: Request):
     except Exception as e:
         logger.exception("Diagnostic command failed")
         raise HTTPException(status_code=500, detail="Diagnostic command could not be executed.")
+
+
+# =============================================================================
+# DOCKER & CONTAINER REST API ENDPOINTS
+# =============================================================================
+
+@app.get("/api/stats/containers")
+async def get_containers():
+    """List all Docker containers on the host."""
+    containers = await get_docker_containers()
+    if containers is None:
+        raise HTTPException(status_code=404,
+                            detail="Docker is not installed or not running on this host.")
+    return containers
+
+
+@app.get("/api/stats/containers/stats")
+async def get_container_stats():
+    """Get live resource usage for running Docker containers."""
+    stats = await get_docker_container_stats()
+    if stats is None:
+        raise HTTPException(status_code=404,
+                            detail="Docker stats unavailable.")
+    return stats
+
+
+@app.get("/api/stats/containers/{container_id}/logs")
+async def get_container_logs(container_id: str, lines: int = Query(100, ge=1, le=5000)):
+    """Fetch recent logs from a Docker container."""
+    logs = await get_docker_container_logs(container_id, lines)
+    if logs is None:
+        raise HTTPException(status_code=404,
+                            detail=f"Cannot fetch logs for container '{container_id}'.")
+    return {"container_id": container_id, "lines": lines, "logs": logs}
+
+
+@app.get("/api/stats/pods")
+async def get_pods():
+    """List Kubernetes pods if kubectl is available."""
+    pods = await get_kubernetes_pods()
+    if pods is None:
+        raise HTTPException(status_code=404,
+                            detail="kubectl is not installed or not configured on this host.")
+    return pods
 
 
 if __name__ == "__main__":

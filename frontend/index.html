@@ -9,6 +9,11 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/styles.css">
+    <!-- xterm.js for VM Console -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 </head>
 <body>
     <div class="app-container">
@@ -162,6 +167,32 @@
                             <h2>System Metadata</h2>
                         </div>
                         <div class="system-info" id="system-info"></div>
+                    </div>
+                </div>
+
+                <!-- Docker Containers Panel -->
+                <div class="containers-panel" id="containers-panel">
+                    <div class="card-header">
+                        <h2>🐳 Docker Containers</h2>
+                        <div class="container-header-actions">
+                            <span class="badge" id="container-count">0 Containers</span>
+                            <span class="badge" id="pod-count">0 Pods</span>
+                            <button class="btn btn-sm btn-secondary" id="refresh-containers-btn">↻ Refresh</button>
+                        </div>
+                    </div>
+                    <div id="containers-content">
+                        <p class="no-data">Checking Docker availability...</p>
+                    </div>
+                </div>
+
+                <!-- Kubernetes Pods Panel -->
+                <div class="pods-panel" id="pods-panel" style="display:none;">
+                    <div class="card-header">
+                        <h2>☸️ Kubernetes Pods</h2>
+                        <button class="btn btn-sm btn-secondary" id="refresh-pods-btn">↻ Refresh</button>
+                    </div>
+                    <div id="pods-content">
+                        <p class="no-data">Checking Kubernetes availability...</p>
                     </div>
                 </div>
 
@@ -583,6 +614,116 @@
                     <button class="btn btn-outline" id="confirm-modal-cancel">Cancel</button>
                     <button class="btn btn-danger" id="confirm-modal-confirm">Confirm</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- VM Console Modal -->
+    <div class="modal" id="console-modal">
+        <div class="modal-content" style="max-width: 95vw; width: 1200px; height: 85vh;">
+            <div class="modal-header">
+                <h3>🖥️ VM Console — <span id="console-vm-name"></span></h3>
+                <div class="console-header-actions">
+                    <select id="console-font-size" class="filter-select" title="Font size">
+                        <option value="12">12px</option>
+                        <option value="14" selected>14px</option>
+                        <option value="16">16px</option>
+                        <option value="18">18px</option>
+                    </select>
+                    <button class="btn btn-sm btn-outline" id="console-clear">Clear</button>
+                    <button class="modal-close" id="console-modal-close">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body console-body">
+                <div id="console-terminal"></div>
+                <div id="console-status-bar" class="console-status-bar">
+                    <span id="console-conn-status">Connecting...</span>
+                    <span id="console-type-badge"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- VM Resize Modal -->
+    <div class="modal" id="resize-modal">
+        <div class="modal-content" style="max-width: 520px;">
+            <div class="modal-header">
+                <h3>⚙️ Resize VM — <span id="resize-vm-name"></span></h3>
+                <button class="modal-close" id="resize-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="resize-form">
+                    <div class="resize-field">
+                        <label>Virtual CPUs (vCPUs)</label>
+                        <div class="resize-input-row">
+                            <input type="range" id="resize-vcpu-slider" min="1" max="64" value="2" class="resize-slider">
+                            <input type="number" id="resize-vcpu-input" min="1" max="256" value="2" class="resize-number-input">
+                        </div>
+                        <small class="resize-hint" id="resize-current-vcpus">Current: —</small>
+                    </div>
+                    <div class="resize-field">
+                        <label>Memory (MiB)</label>
+                        <div class="resize-input-row">
+                            <input type="range" id="resize-mem-slider" min="256" max="65536" step="256" value="2048" class="resize-slider">
+                            <input type="number" id="resize-mem-input" min="256" max="1048576" step="256" value="2048" class="resize-number-input">
+                        </div>
+                        <small class="resize-hint" id="resize-current-mem">Current: —</small>
+                    </div>
+                    <div class="resize-actions">
+                        <button class="btn btn-outline" id="resize-cancel">Cancel</button>
+                        <button class="btn btn-primary" id="resize-apply">Apply Resize</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- VM SSH Config Modal -->
+    <div class="modal" id="ssh-config-modal">
+        <div class="modal-content" style="max-width: 520px;">
+            <div class="modal-header">
+                <h3>🔑 SSH Config — <span id="ssh-vm-name"></span></h3>
+                <button class="modal-close" id="ssh-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="ssh-info-text">Configure SSH access to this VM to enable Docker container monitoring inside the VM.</p>
+                <div class="resize-form">
+                    <div class="resize-field">
+                        <label>SSH Host (IP or hostname)</label>
+                        <input type="text" id="ssh-host" class="search-input" placeholder="e.g. 192.168.122.100">
+                    </div>
+                    <div class="resize-field">
+                        <label>SSH Port</label>
+                        <input type="number" id="ssh-port" class="search-input" value="22" min="1" max="65535">
+                    </div>
+                    <div class="resize-field">
+                        <label>SSH User</label>
+                        <input type="text" id="ssh-user" class="search-input" placeholder="e.g. root" value="root">
+                    </div>
+                    <div class="resize-field">
+                        <label>SSH Key Path (optional)</label>
+                        <input type="text" id="ssh-key-path" class="search-input" placeholder="e.g. ~/.ssh/id_rsa">
+                    </div>
+                    <div class="resize-actions">
+                        <button class="btn btn-danger btn-sm" id="ssh-remove-config">Remove Config</button>
+                        <div style="flex:1"></div>
+                        <button class="btn btn-outline" id="ssh-cancel">Cancel</button>
+                        <button class="btn btn-primary" id="ssh-save">Save SSH Config</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Container Logs Modal -->
+    <div class="modal" id="container-logs-modal">
+        <div class="modal-content" style="max-width: 800px;">
+            <div class="modal-header">
+                <h3>📋 Container Logs — <span id="logs-container-name"></span></h3>
+                <button class="modal-close" id="container-logs-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <pre id="container-logs-output" class="cmd-output" style="max-height: 500px;"></pre>
             </div>
         </div>
     </div>

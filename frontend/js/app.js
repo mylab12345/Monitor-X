@@ -34,12 +34,21 @@ const state = {
     vmRefreshMs: 2000,
     vmAutoTimer: null,
     vmCapabilities: null,
-    // VMs with an action in flight. Rendering is suppressed while non-empty so
-    // the DOM cannot be swapped out from under a click.
     vmPending: new Set(),
-    // Guests whose state we optimistically expect to change, so a stale poll
-    // arriving mid-transition does not flip the card back.
-    vmLastAction: new Map()
+    vmLastAction: new Map(),
+    // Console state
+    consoleTerminal: null,
+    consoleWs: null,
+    consoleAddonFit: null,
+    consoleVmId: null,
+    // Resize state
+    resizeVmId: null,
+    resizeVcpus: 2,
+    resizeMemMb: 2048,
+    // SSH config state
+    sshVmId: null,
+    // Container stats cache
+    containerStats: {},
 };
 
 /* Format Helpers */
@@ -125,6 +134,13 @@ function updateDashboard(data) {
 
     if (state.currentTab === 'processes') filterProcesses();
     if (state.currentTab === 'vms' && data.vms) renderVms(data.vms);
+    if (state.currentTab === 'dashboard') {
+        if (data.containers) renderContainers(data.containers);
+        if (data.pods) {
+            document.getElementById('pods-panel').style.display = data.pods.length > 0 ? 'block' : 'none';
+            renderPods(data.pods);
+        }
+    }
 }
 
 function updateCpu(cpu) {
@@ -1024,21 +1040,13 @@ const VM_STATE_META = {
 
 function vmActionButtons(vm) {
     const vmState = vm.state;
-    // A guest is "off" in shutoff/crashed; libvirt can start it from either.
     const startable = vmState === 'shutoff' || vmState === 'crashed';
-    // Graceful verbs need a genuinely running guest.
     const stoppable = vmState === 'running';
     const suspendable = vmState === 'running';
     const resumable = vmState === 'paused' || vmState === 'pmsuspended';
     const rebootable = vmState === 'running';
-    // Force-stop must stay reachable for every non-off state, including
-    // 'blocked' and a guest wedged mid-'shutdown' — precisely the cases where
-    // an operator needs it most and the old matrix hid the button.
     const poweroffable = !startable && vmState !== 'no_state';
 
-    // Address the guest by UUID when available: it is stable and unambiguous,
-    // whereas a name can contain characters that broke the previous
-    // encodeURIComponent/decodeURIComponent round-trip through the DOM.
     const id = escapeHtml(vm.uuid || vm.name);
     const btn = (action, label, klass) => `<button type="button" class="btn ${klass}" data-vm-action="${action}" data-vm-id="${id}">${label}</button>`;
     let html = '';
@@ -1048,6 +1056,27 @@ function vmActionButtons(vm) {
     if (suspendable)  html += btn('suspend',  '⏸ Suspend',    'btn-outline');
     if (rebootable)   html += btn('reboot',   '↻ Reboot',     'btn-primary');
     if (poweroffable) html += btn('poweroff', '⏻ Poweroff',   'btn-danger');
+    return html;
+}
+
+function vmExtraButtons(vm) {
+    const running = vm.active && vm.state === 'running';
+    const id = escapeHtml(vm.uuid || vm.name);
+    const name = escapeHtml(vm.name);
+    let html = '';
+
+    // Console button - available for running VMs
+    if (running) {
+        html += `<button type="button" class="btn btn-sm btn-accent vm-console-btn" data-vm-console="${id}" data-vm-console-name="${name}" title="Open VM Console">🖥️ Console</button>`;
+    }
+
+    // Resize button - available for running or stopped VMs
+    const currentMemMb = Math.round((vm.memory_total || vm.max_memory || 0) / 1024);
+    html += `<button type="button" class="btn btn-sm btn-outline vm-resize-btn" data-vm-resize="${id}" data-vm-resize-name="${name}" data-vm-vcpus="${vm.vcpus || 1}" data-vm-mem="${currentMemMb}" title="Resize CPU/RAM">⚙️ Resize</button>`;
+
+    // SSH Config button
+    html += `<button type="button" class="btn btn-sm btn-outline vm-ssh-btn" data-vm-ssh="${id}" data-vm-ssh-name="${name}" title="SSH Config for Container Monitoring">🔑 SSH</button>`;
+
     return html;
 }
 
@@ -1147,6 +1176,7 @@ function renderVms(vms) {
                     <div class="vm-stat"><span>Domain ID</span><span>${vm.id >= 0 ? vm.id : '—'}</span></div>
                     <div class="vm-stat"><span>Disks / NICs</span><span>${(vm.disks || []).length} / ${(vm.interfaces || []).length}</span></div>
                 </div>
+                ${vm._vm_containers ? renderVmContainers(vm._vm_containers) : ''}
                 ${rateStatus ? `<p class="vm-rate-status">${rateStatus}</p>` : ''}
                 ${renderVmActions(vm, canControl)}
             </article>`;
@@ -1165,11 +1195,51 @@ function initVmDelegation(container) {
     container.dataset.vmDelegated = '1';
 
     container.addEventListener('click', (e) => {
+        // Handle VM lifecycle actions (start, shutdown, etc.)
         const btn = e.target.closest('[data-vm-action]');
-        if (!btn || !container.contains(btn)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        triggerVmAction(btn.dataset.vmId, btn.dataset.vmAction);
+        if (btn && container.contains(btn)) {
+            e.preventDefault();
+            e.stopPropagation();
+            triggerVmAction(btn.dataset.vmId, btn.dataset.vmAction);
+            return;
+        }
+        // Handle Console button
+        const consoleBtn = e.target.closest('[data-vm-console]');
+        if (consoleBtn && container.contains(consoleBtn)) {
+            e.preventDefault();
+            e.stopPropagation();
+            openConsole(consoleBtn.dataset.vmConsole, consoleBtn.dataset.vmConsoleName);
+            return;
+        }
+        // Handle Resize button
+        const resizeBtn = e.target.closest('[data-vm-resize]');
+        if (resizeBtn && container.contains(resizeBtn)) {
+            e.preventDefault();
+            e.stopPropagation();
+            openResizeModal(
+                resizeBtn.dataset.vmResize,
+                resizeBtn.dataset.vmResizeName,
+                parseInt(resizeBtn.dataset.vmVcpus) || 2,
+                parseInt(resizeBtn.dataset.vmMem) || 2048
+            );
+            return;
+        }
+        // Handle SSH Config button
+        const sshBtn = e.target.closest('[data-vm-ssh]');
+        if (sshBtn && container.contains(sshBtn)) {
+            e.preventDefault();
+            e.stopPropagation();
+            openSshConfigModal(sshBtn.dataset.vmSsh, sshBtn.dataset.vmSshName);
+            return;
+        }
+        // Handle Container Logs button
+        const logsBtn = e.target.closest('[data-container-logs]');
+        if (logsBtn && container.contains(logsBtn)) {
+            e.preventDefault();
+            e.stopPropagation();
+            showContainerLogs(logsBtn.dataset.containerLogs, logsBtn.dataset.containerLogsName);
+            return;
+        }
     });
 
     container.addEventListener('change', (e) => {
@@ -1184,15 +1254,17 @@ function initVmDelegation(container) {
 }
 
 function renderVmActions(vm, canControl) {
-    if (!canControl) {
-        // Surface the backend's specific reason instead of always blaming the
-        // installer (libvirtd down, virsh missing, no authorization, ...).
+    let actionsHtml = '';
+    if (canControl) {
+        const buttons = vmActionButtons(vm);
+        if (buttons) actionsHtml = buttons;
+    } else {
         const reason = state.vmCapabilities?.message
             || 'VM controls disabled — run systemd/install-service.sh to enable.';
-        return `<div class="vm-actions"><span class="text-muted" style="font-size:.75rem;">${escapeHtml(reason)}</span></div>`;
+        actionsHtml = `<span class="text-muted" style="font-size:.75rem;">${escapeHtml(reason)}</span>`;
     }
-    const buttons = vmActionButtons(vm);
-    return buttons ? `<div class="vm-actions">${buttons}</div>` : '';
+    const extraHtml = vmExtraButtons(vm);
+    return `<div class="vm-actions">${actionsHtml}</div>${extraHtml ? `<div class="vm-extra-actions">${extraHtml}</div>` : ''}`;
 }
 
 function updateBulkBar() {
@@ -1480,10 +1552,6 @@ async function bulkVmAction(action) {
 }
 
 function setVmAutoRefresh(intervalSeconds) {
-    // The <select> supplies SECONDS ("2", "5", "10", "30"). Feeding those
-    // straight into setInterval() scheduled a refresh every 2 milliseconds,
-    // which hammered the API and re-rendered the VM list mid-click so buttons
-    // were destroyed before their handler could fire.
     const seconds = parseInt(intervalSeconds, 10);
     state.vmRefreshMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
     if (state.vmAutoTimer) {
@@ -1492,10 +1560,475 @@ function setVmAutoRefresh(intervalSeconds) {
     }
     if (state.vmRefreshMs > 0) {
         state.vmAutoTimer = setInterval(() => {
-            // Never re-render while an action is in flight: replacing innerHTML
-            // under the user's cursor is what made clicks "do nothing".
             if (state.currentTab === 'vms' && state.vmPending.size === 0) fetchVms();
         }, state.vmRefreshMs);
+    }
+}
+
+
+/* ==========================================================================
+   VM CONSOLE (xterm.js + WebSocket)
+   ========================================================================== */
+
+function openConsole(vmId, vmName) {
+    state.consoleVmId = vmId;
+    document.getElementById('console-vm-name').textContent = vmName || vmId;
+    document.getElementById('console-conn-status').textContent = 'Connecting...';
+    document.getElementById('console-conn-status').style.color = 'var(--warning)';
+    document.getElementById('console-type-badge').textContent = '';
+
+    const modal = document.getElementById('console-modal');
+    modal.classList.add('show');
+
+    // Initialize xterm.js
+    if (state.consoleTerminal) {
+        state.consoleTerminal.dispose();
+        state.consoleTerminal = null;
+    }
+    const container = document.getElementById('console-terminal');
+    container.innerHTML = '';
+
+    const fontSize = parseInt(document.getElementById('console-font-size').value) || 14;
+    const term = new Terminal({
+        fontSize: fontSize,
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+        theme: {
+            background: '#0a0e1a',
+            foreground: '#e2e8f0',
+            cursor: '#38bdf8',
+            selectionBackground: 'rgba(56, 189, 248, 0.3)',
+        },
+        cursorBlink: true,
+        allowProposedApi: true,
+    });
+    state.consoleTerminal = term;
+
+    const fitAddon = new FitAddon.FitAddon();
+    state.consoleAddonFit = fitAddon;
+    term.loadAddon(fitAddon);
+    term.open(container);
+
+    setTimeout(() => {
+        fitAddon.fit();
+    }, 100);
+
+    // Connect WebSocket
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${protocol}://${window.location.host}/ws/vm-console/${encodeURIComponent(vmId)}`;
+    const ws = new WebSocket(wsUrl);
+    state.consoleWs = ws;
+
+    ws.onopen = () => {
+        document.getElementById('console-conn-status').textContent = 'Connected';
+        document.getElementById('console-conn-status').style.color = 'var(--success)';
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'vnc') {
+                document.getElementById('console-type-badge').textContent = `VNC :${data.port}`;
+                document.getElementById('console-type-badge').className = 'badge badge-success';
+                document.getElementById('console-conn-status').textContent = `VNC connected to ${data.host}:${data.port}`;
+            } else if (data.type === 'serial') {
+                document.getElementById('console-type-badge').textContent = 'Serial Console';
+                document.getElementById('console-type-badge').className = 'badge badge-warning';
+                document.getElementById('console-conn-status').textContent = 'Serial console connected';
+            } else if (data.type === 'error') {
+                document.getElementById('console-conn-status').textContent = `Error: ${data.message}`;
+                document.getElementById('console-conn-status').style.color = 'var(--danger)';
+            }
+        } catch (e) {
+            // Binary data from VNC
+            if (event.data instanceof ArrayBuffer) {
+                term.write(new Uint8Array(event.data));
+            } else if (event.data instanceof Blob) {
+                event.data.arrayBuffer().then(buf => term.write(new Uint8Array(buf)));
+            } else {
+                term.write(event.data);
+            }
+        }
+    };
+
+    ws.onclose = () => {
+        document.getElementById('console-conn-status').textContent = 'Disconnected';
+        document.getElementById('console-conn-status').style.color = 'var(--danger)';
+    };
+
+    ws.onerror = () => {
+        document.getElementById('console-conn-status').textContent = 'Connection error';
+        document.getElementById('console-conn-status').style.color = 'var(--danger)';
+    };
+
+    // Terminal input -> WebSocket
+    term.onData(data => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(new TextEncoder().encode(data));
+        }
+    });
+
+    // Handle resize
+    const resizeObserver = new ResizeObserver(() => {
+        if (state.consoleAddonFit) {
+            state.consoleAddonFit.fit();
+        }
+    });
+    resizeObserver.observe(container);
+}
+
+function closeConsole() {
+    if (state.consoleWs) {
+        state.consoleWs.close();
+        state.consoleWs = null;
+    }
+    if (state.consoleTerminal) {
+        state.consoleTerminal.dispose();
+        state.consoleTerminal = null;
+        state.consoleAddonFit = null;
+    }
+    document.getElementById('console-modal').classList.remove('show');
+    state.consoleVmId = null;
+}
+
+
+/* ==========================================================================
+   VM RESIZE
+   ========================================================================== */
+
+function openResizeModal(vmId, vmName, currentVcpus, currentMemMb) {
+    state.resizeVmId = vmId;
+    state.resizeVcpus = currentVcpus || 2;
+    state.resizeMemMb = currentMemMb || 2048;
+
+    document.getElementById('resize-vm-name').textContent = vmName || vmId;
+    document.getElementById('resize-current-vcpus').textContent = `Current: ${currentVcpus || '?'} vCPU(s)`;
+    document.getElementById('resize-current-mem').textContent = `Current: ${currentMemMb ? formatBytes(currentMemMb * 1024 * 1024) : '?'}`;
+
+    const vcpuInput = document.getElementById('resize-vcpu-input');
+    const vcpuSlider = document.getElementById('resize-vcpu-slider');
+    const memInput = document.getElementById('resize-mem-input');
+    const memSlider = document.getElementById('resize-mem-slider');
+
+    vcpuInput.value = state.resizeVcpus;
+    vcpuSlider.value = Math.min(state.resizeVcpus, 64);
+    memInput.value = state.resizeMemMb;
+    memSlider.value = Math.min(state.resizeMemMb, 65536);
+
+    document.getElementById('resize-modal').classList.add('show');
+}
+
+async function applyResize() {
+    if (!state.resizeVmId) return;
+    const vcpus = parseInt(document.getElementById('resize-vcpu-input').value) || null;
+    const memMb = parseInt(document.getElementById('resize-mem-input').value) || null;
+
+    if (!vcpus && !memMb) {
+        showToast('Provide at least one value to resize.', 'warning');
+        return;
+    }
+
+    const btn = document.getElementById('resize-apply');
+    btn.disabled = true;
+    btn.textContent = 'Applying...';
+
+    try {
+        const body = {};
+        if (vcpus) body.vcpus = vcpus;
+        if (memMb) body.memory_mb = memMb;
+
+        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(state.resizeVmId)}/resize`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.detail || 'Resize failed');
+
+        showToast(result.message || 'VM resized successfully', 'success');
+        closeResizeModal();
+        fetchVms();
+    } catch (e) {
+        showToast(`Resize failed: ${e.message}`, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Apply Resize';
+    }
+}
+
+function closeResizeModal() {
+    document.getElementById('resize-modal').classList.remove('show');
+    state.resizeVmId = null;
+}
+
+
+/* ==========================================================================
+   SSH CONFIG PER VM
+   ========================================================================== */
+
+async function openSshConfigModal(vmId, vmName) {
+    state.sshVmId = vmId;
+    document.getElementById('ssh-vm-name').textContent = vmName || vmId;
+
+    // Load existing config
+    document.getElementById('ssh-host').value = '';
+    document.getElementById('ssh-port').value = '22';
+    document.getElementById('ssh-user').value = 'root';
+    document.getElementById('ssh-key-path').value = '';
+
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/ssh-config`);
+        if (res.ok) {
+            const config = await res.json();
+            if (config.configured) {
+                document.getElementById('ssh-host').value = config.host || '';
+                document.getElementById('ssh-port').value = config.port || 22;
+                document.getElementById('ssh-user').value = config.user || 'root';
+                document.getElementById('ssh-key-path').value = config.key_path || '';
+            }
+        }
+    } catch (e) {}
+
+    document.getElementById('ssh-config-modal').classList.add('show');
+}
+
+async function saveSshConfig() {
+    if (!state.sshVmId) return;
+    const host = document.getElementById('ssh-host').value.trim();
+    const port = parseInt(document.getElementById('ssh-port').value) || 22;
+    const user = document.getElementById('ssh-user').value.trim() || 'root';
+    const keyPath = document.getElementById('ssh-key-path').value.trim() || null;
+
+    if (!host) {
+        showToast('SSH host is required.', 'warning');
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(state.sshVmId)}/ssh-config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host, port, user, key_path: keyPath }),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.detail || 'Save failed');
+        showToast(result.message || 'SSH config saved', 'success');
+        document.getElementById('ssh-config-modal').classList.remove('show');
+        fetchVms();
+    } catch (e) {
+        showToast(`SSH config save failed: ${e.message}`, 'error');
+    }
+}
+
+async function removeSshConfig() {
+    if (!state.sshVmId) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(state.sshVmId)}/ssh-config`, {
+            method: 'DELETE',
+        });
+        if (res.ok || res.status === 404) {
+            showToast('SSH config removed', 'info');
+            document.getElementById('ssh-config-modal').classList.remove('show');
+            fetchVms();
+        }
+    } catch (e) {
+        showToast(`Error: ${e.message}`, 'error');
+    }
+}
+
+
+/* ==========================================================================
+   DOCKER CONTAINERS
+   ========================================================================== */
+
+async function fetchContainers() {
+    const panel = document.getElementById('containers-panel');
+    const content = document.getElementById('containers-content');
+    if (!content) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/stats/containers`);
+        if (res.status === 404) {
+            content.innerHTML = '<p class="no-data">Docker is not installed on this host. Install Docker to monitor containers.</p>';
+            document.getElementById('container-count').textContent = 'Docker N/A';
+            return;
+        }
+        if (!res.ok) throw new Error(await readApiError(res));
+        const containers = await res.json();
+        renderContainers(containers);
+    } catch (e) {
+        content.innerHTML = `<p class="no-data">Error: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function renderContainers(containers) {
+    const content = document.getElementById('containers-content');
+    if (!content) return;
+
+    const running = containers.filter(c => c.running);
+    const stopped = containers.filter(c => !c.running);
+
+    document.getElementById('container-count').textContent = `${containers.length} Containers (${running.length} running)`;
+
+    if (containers.length === 0) {
+        content.innerHTML = '<p class="no-data">No Docker containers found on this host.</p>';
+        return;
+    }
+
+    let html = '<div class="container-grid">';
+
+    // Running containers first
+    running.forEach(c => {
+        html += renderContainerCard(c);
+    });
+    // Then stopped
+    stopped.forEach(c => {
+        html += renderContainerCard(c);
+    });
+
+    html += '</div>';
+    content.innerHTML = html;
+}
+
+function renderContainerCard(c) {
+    const stateClass = c.running ? 'running' : 'stopped';
+    const stateLabel = c.running ? 'RUNNING' : 'STOPPED';
+    return `
+        <div class="container-card ${stateClass}">
+            <div class="container-card-header">
+                <div>
+                    <strong>${escapeHtml(c.name)}</strong>
+                    <div class="container-id">${escapeHtml(c.id)}</div>
+                </div>
+                <span class="vm-state ${stateClass}">${stateLabel}</span>
+            </div>
+            <div class="container-details">
+                <div><span>Image:</span><b>${escapeHtml(c.image)}</b></div>
+                <div><span>Status:</span><b>${escapeHtml(c.status)}</b></div>
+                ${c.ports ? `<div><span>Ports:</span><b>${escapeHtml(c.ports)}</b></div>` : ''}
+                ${c.size ? `<div><span>Size:</span><b>${escapeHtml(c.size)}</b></div>` : ''}
+            </div>
+            <div class="container-actions">
+                <button class="btn btn-sm btn-outline" onclick="showContainerLogs('${escapeHtml(c.id)}', '${escapeHtml(c.name)}')">📋 Logs</button>
+            </div>
+        </div>
+    `;
+}
+
+async function showContainerLogs(containerId, containerName) {
+    document.getElementById('logs-container-name').textContent = containerName || containerId;
+    const output = document.getElementById('container-logs-output');
+    output.textContent = 'Loading logs...';
+    document.getElementById('container-logs-modal').classList.add('show');
+
+    try {
+        const res = await fetch(`${API_BASE}/api/stats/containers/${containerId}/logs?lines=200`);
+        if (!res.ok) throw new Error(await readApiError(res));
+        const data = await res.json();
+        output.textContent = data.logs || 'No logs available.';
+    } catch (e) {
+        output.textContent = `Error: ${e.message}`;
+    }
+}
+
+
+/* ==========================================================================
+   KUBERNETES PODS
+   ========================================================================== */
+
+async function fetchPods() {
+    const panel = document.getElementById('pods-panel');
+    const content = document.getElementById('pods-content');
+    if (!content) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/stats/pods`);
+        if (res.status === 404) {
+            panel.style.display = 'none';
+            document.getElementById('pod-count').textContent = 'K8s N/A';
+            return;
+        }
+        if (!res.ok) throw new Error(await readApiError(res));
+        const pods = await res.json();
+        panel.style.display = 'block';
+        renderPods(pods);
+    } catch (e) {
+        panel.style.display = 'none';
+    }
+}
+
+function renderPods(pods) {
+    const content = document.getElementById('pods-content');
+    if (!content) return;
+
+    const running = pods.filter(p => p.status === 'Running');
+    document.getElementById('pod-count').textContent = `${pods.length} Pods (${running.length} running)`;
+
+    if (pods.length === 0) {
+        content.innerHTML = '<p class="no-data">No Kubernetes pods found.</p>';
+        return;
+    }
+
+    let html = '<div class="pod-grid">';
+    pods.forEach(p => {
+        const stateClass = p.status === 'Running' ? 'running' : (p.status === 'Failed' ? 'crashed' : 'paused');
+        const stateLabel = p.status.toUpperCase();
+        html += `
+            <div class="container-card ${stateClass}">
+                <div class="container-card-header">
+                    <div>
+                        <strong>${escapeHtml(p.name)}</strong>
+                        <div class="container-id">${escapeHtml(p.namespace)} / ${escapeHtml(p.node)}</div>
+                    </div>
+                    <span class="vm-state ${stateClass}">${stateLabel}</span>
+                </div>
+                <div class="container-details">
+                    <div><span>IP:</span><b>${escapeHtml(p.pod_ip || '—')}</b></div>
+                    <div><span>Containers:</span><b>${p.container_count}</b></div>
+                    <div><span>Restarts:</span><b class="${p.restarts > 5 ? 'text-danger' : ''}">${p.restarts}</b></div>
+                    ${p.waiting_reasons.length ? `<div><span>Issues:</span><b class="text-danger">${escapeHtml(p.waiting_reasons.join(', '))}</b></div>` : ''}
+                </div>
+            </div>
+        `;
+    });
+    html += '</div>';
+    content.innerHTML = html;
+}
+
+
+/* ==========================================================================
+   PER-VM CONTAINER DISPLAY
+   ========================================================================== */
+
+function renderVmContainers(containerData) {
+    if (!containerData || !containerData.containers || containerData.containers.length === 0) {
+        return `<div class="vm-containers-section">
+            <span class="vm-containers-label">🐳 Containers: <b>0</b></span>
+        </div>`;
+    }
+    const running = containerData.running || 0;
+    const total = containerData.total || 0;
+    let html = `<div class="vm-containers-section">
+        <span class="vm-containers-label">🐳 Containers: <b>${running}</b> running / <b>${total}</b> total</span>
+        <div class="vm-containers-list">`;
+    containerData.containers.forEach(c => {
+        const stateClass = c.running ? 'running' : 'stopped';
+        html += `<div class="vm-container-chip ${stateClass}">
+            <span class="vm-container-dot ${stateClass}"></span>
+            <span>${escapeHtml(c.name)}</span>
+            ${c.stats ? `<span class="vm-container-stats">${c.stats.cpu_percent}% CPU</span>` : ''}
+        </div>`;
+    });
+    html += `</div></div>`;
+    return html;
+}
+
+async function fetchVmContainers(vmId) {
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/containers`);
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (e) {
+        return null;
     }
 }
 
@@ -1776,11 +2309,76 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('service-search')?.addEventListener('input', fetchServices);
     document.getElementById('refresh-services-btn')?.addEventListener('click', () => fetchServices(true));
 
-    // Modal Close
+    // Console Modal
+    document.getElementById('console-modal-close')?.addEventListener('click', closeConsole);
+    document.getElementById('console-modal')?.addEventListener('click', (e) => {
+        if (e.target === document.getElementById('console-modal')) closeConsole();
+    });
+    document.getElementById('console-clear')?.addEventListener('click', () => {
+        if (state.consoleTerminal) state.consoleTerminal.clear();
+    });
+    document.getElementById('console-font-size')?.addEventListener('change', (e) => {
+        if (state.consoleTerminal) {
+            state.consoleTerminal.options.fontSize = parseInt(e.target.value) || 14;
+            if (state.consoleAddonFit) state.consoleAddonFit.fit();
+        }
+    });
+
+    // Resize Modal
+    document.getElementById('resize-modal-close')?.addEventListener('click', closeResizeModal);
+    document.getElementById('resize-modal')?.addEventListener('click', (e) => {
+        if (e.target === document.getElementById('resize-modal')) closeResizeModal();
+    });
+    document.getElementById('resize-cancel')?.addEventListener('click', closeResizeModal);
+    document.getElementById('resize-apply')?.addEventListener('click', applyResize);
+
+    // Resize slider <-> number sync
+    document.getElementById('resize-vcpu-slider')?.addEventListener('input', (e) => {
+        document.getElementById('resize-vcpu-input').value = e.target.value;
+    });
+    document.getElementById('resize-vcpu-input')?.addEventListener('input', (e) => {
+        document.getElementById('resize-vcpu-slider').value = Math.min(parseInt(e.target.value) || 1, 64);
+    });
+    document.getElementById('resize-mem-slider')?.addEventListener('input', (e) => {
+        document.getElementById('resize-mem-input').value = e.target.value;
+    });
+    document.getElementById('resize-mem-input')?.addEventListener('input', (e) => {
+        document.getElementById('resize-mem-slider').value = Math.min(parseInt(e.target.value) || 256, 65536);
+    });
+
+    // SSH Config Modal
+    document.getElementById('ssh-modal-close')?.addEventListener('click', () => {
+        document.getElementById('ssh-config-modal').classList.remove('show');
+    });
+    document.getElementById('ssh-config-modal')?.addEventListener('click', (e) => {
+        if (e.target === document.getElementById('ssh-config-modal')) {
+            e.target.classList.remove('show');
+        }
+    });
+    document.getElementById('ssh-cancel')?.addEventListener('click', () => {
+        document.getElementById('ssh-config-modal').classList.remove('show');
+    });
+    document.getElementById('ssh-save')?.addEventListener('click', saveSshConfig);
+    document.getElementById('ssh-remove-config')?.addEventListener('click', removeSshConfig);
+
+    // Container Logs Modal
+    document.getElementById('container-logs-close')?.addEventListener('click', () => {
+        document.getElementById('container-logs-modal').classList.remove('show');
+    });
+    document.getElementById('container-logs-modal')?.addEventListener('click', (e) => {
+        if (e.target === document.getElementById('container-logs-modal')) {
+            e.target.classList.remove('show');
+        }
+    });
+
+    // Container & Pod refresh buttons
+    document.getElementById('refresh-containers-btn')?.addEventListener('click', fetchContainers);
+    document.getElementById('refresh-pods-btn')?.addEventListener('click', fetchPods);
+
+    // Process Modal Close (original)
     document.getElementById('close-modal')?.addEventListener('click', () => {
         document.getElementById('process-modal').classList.remove('show');
     });
-
     document.getElementById('process-modal')?.addEventListener('click', (e) => {
         if (e.target === document.getElementById('process-modal')) {
             e.target.classList.remove('show');
@@ -1790,8 +2388,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Startup initialization
     connectWebSocket();
     fetchStats();
-    // Preload capabilities so the VM tab renders controls immediately.
     fetchVmCapabilities();
-    // Value is in SECONDS, matching the <select> options.
     setVmAutoRefresh(document.getElementById('vm-refresh-select')?.value ?? 2);
+    // Fetch containers and pods on startup
+    fetchContainers();
+    fetchPods();
 });
