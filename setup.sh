@@ -23,6 +23,24 @@ for file in /usr/lib/python3/dist-packages/libvirt.py /usr/lib/python3/dist-pack
     [[ -f "$file" ]] && ln -sf "$file" "$VENV_SITE/" 2>/dev/null || true
 done
 
+# Grant read-write libvirt access so the VM tab's Start/Shutdown/Reboot controls
+# work when MonitorX is started manually via ./launch.sh. Without this the
+# dashboard can only ever open a read-only connection, and every lifecycle
+# operation is refused by libvirtd.
+CURRENT_USER="$(id -un)"
+for group in libvirt libvirtd kvm; do
+    if getent group "$group" > /dev/null 2>&1; then
+        if id -nG "$CURRENT_USER" | tr ' ' '\n' | grep -qx "$group"; then
+            echo "      $CURRENT_USER is already in the '$group' group."
+        else
+            echo "      Adding $CURRENT_USER to the '$group' group for VM controls..."
+            sudo usermod -aG "$group" "$CURRENT_USER" || true
+            echo "      NOTE: log out and back in (or run 'newgrp $group') for this to take effect."
+        fi
+        break
+    fi
+done
+
 cat <<EOF2
 
 === Setup complete ===

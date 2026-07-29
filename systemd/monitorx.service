@@ -14,6 +14,12 @@ StandardOutput=journal
 StandardError=journal
 Environment="HOME=%h"
 Environment="PATH=%h/MonitorX/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Hypervisor URI used for both VM metrics and VM lifecycle controls.
+Environment="MONITORX_LIBVIRT_URI=qemu:///system"
+# Grants the dashboard read-write access to libvirt so the VM tab's
+# Start/Shutdown/Reboot/Poweroff controls work without sudo.
+# systemd/install-service.sh sets this automatically for the detected group.
+SupplementaryGroups=libvirt
 
 [Install]
 WantedBy=multi-user.target
