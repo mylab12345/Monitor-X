@@ -279,42 +279,117 @@ function updateTopProcesses(processes) {
 }
 
 function checkOSIssues(data) {
-    const critical = [];
-    const warning = [];
+    const issues = [];
 
-    if (data.cpu && data.cpu.percent_total > 85) critical.push(`Critical CPU load: ${data.cpu.percent_total.toFixed(1)}%`);
-    else if (data.cpu && data.cpu.percent_total > 70) warning.push(`Elevated CPU usage: ${data.cpu.percent_total.toFixed(1)}%`);
+    const addIssue = (severity, message, action) => {
+        issues.push({ severity, message, action });
+    };
 
-    if (data.memory && data.memory.percent > 90) critical.push(`RAM usage critically high: ${data.memory.percent}%`);
-    else if (data.memory && data.memory.percent > 80) warning.push(`RAM usage elevated: ${data.memory.percent}%`);
+    if (data.cpu && data.cpu.percent_total > 85) {
+        addIssue('critical', `Critical CPU load: ${data.cpu.percent_total.toFixed(1)}%`, {
+            label: 'Open Bottlenecks',
+            kind: 'subtab',
+            target: 'bottlenecks'
+        });
+    } else if (data.cpu && data.cpu.percent_total > 70) {
+        addIssue('warning', `Elevated CPU usage: ${data.cpu.percent_total.toFixed(1)}%`, {
+            label: 'Investigate Processes',
+            kind: 'tab',
+            target: 'processes'
+        });
+    }
+
+    if (data.memory && data.memory.percent > 90) {
+        addIssue('critical', `RAM usage critically high: ${data.memory.percent}%`, {
+            label: 'Fix Now: Clear RAM Cache',
+            kind: 'remediate',
+            action: 'clear_pagecache'
+        });
+    } else if (data.memory && data.memory.percent > 80) {
+        addIssue('warning', `RAM usage elevated: ${data.memory.percent}%`, {
+            label: 'Clear RAM Cache',
+            kind: 'remediate',
+            action: 'clear_pagecache'
+        });
+    }
 
     if (data.disk && data.disk.partitions) {
         data.disk.partitions.forEach(p => {
-            if (p.percent > 90) critical.push(`Partition ${p.mountpoint} is nearly full: ${p.percent.toFixed(1)}%`);
-            else if (p.percent > 80) warning.push(`Partition ${p.mountpoint} storage high: ${p.percent.toFixed(1)}%`);
+            if (p.percent > 90) {
+                addIssue('critical', `Partition ${p.mountpoint} is nearly full: ${p.percent.toFixed(1)}%`, {
+                    label: 'Fix Now: Vacuum Logs',
+                    kind: 'remediate',
+                    action: 'vacuum_journal'
+                });
+            } else if (p.percent > 80) {
+                addIssue('warning', `Partition ${p.mountpoint} storage high: ${p.percent.toFixed(1)}%`, {
+                    label: 'Vacuum Logs',
+                    kind: 'remediate',
+                    action: 'vacuum_journal'
+                });
+            }
         });
     }
 
     if (data.processes) {
         const zombies = data.processes.filter(p => p.status === 'zombie' || p.status === 'uninterruptible sleep');
-        if (zombies.length > 0) warning.push(`${zombies.length} process(es) in zombie or disk-sleep state.`);
+        if (zombies.length > 0) {
+            addIssue('warning', `${zombies.length} process(es) in zombie or disk-sleep state.`, {
+                label: 'Open Stuck Processes',
+                kind: 'subtab',
+                target: 'bottlenecks'
+            });
+        }
     }
 
-    document.getElementById('issues-count-critical').textContent = `${critical.length} Critical`;
-    document.getElementById('issues-count-warning').textContent = `${warning.length} Warnings`;
+    const criticalCount = issues.filter(i => i.severity === 'critical').length;
+    const warningCount = issues.filter(i => i.severity === 'warning').length;
+    document.getElementById('issues-count-critical').textContent = `${criticalCount} Critical`;
+    document.getElementById('issues-count-warning').textContent = `${warningCount} Warnings`;
 
     const list = document.getElementById('issues-list');
     list.innerHTML = '';
 
-    if (critical.length === 0 && warning.length === 0) {
+    if (issues.length === 0) {
         list.innerHTML = '<div class="issue-item success">✓ All core system monitors report healthy status.</div>';
-    } else {
-        critical.forEach(msg => {
-            list.innerHTML += `<div class="issue-item danger"><span>🚨 <b>CRITICAL:</b> ${msg}</span><button class="btn btn-sm btn-danger" onclick="switchToTroubleshoot()">Fix in Troubleshoot →</button></div>`;
-        });
-        warning.forEach(msg => {
-            list.innerHTML += `<div class="issue-item warning"><span>⚠️ <b>WARNING:</b> ${msg}</span><button class="btn btn-sm btn-warning" onclick="switchToTroubleshoot()">Investigate →</button></div>`;
-        });
+        return;
+    }
+
+    issues.forEach(issue => {
+        list.appendChild(createDashboardIssueItem(issue));
+    });
+}
+
+function createDashboardIssueItem(issue) {
+    const item = document.createElement('div');
+    const isCritical = issue.severity === 'critical';
+    item.className = `issue-item ${isCritical ? 'danger' : 'warning'}`;
+
+    const msg = document.createElement('span');
+    msg.innerHTML = `${isCritical ? '🚨 <b>CRITICAL:</b>' : '⚠️ <b>WARNING:</b>'} ${escapeHtml(issue.message)}`;
+    item.appendChild(msg);
+
+    if (!issue.action) return item;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `btn btn-sm ${isCritical ? 'btn-danger' : 'btn-warning'}`;
+    button.textContent = issue.action.label || (isCritical ? 'Fix Now' : 'Investigate');
+    button.addEventListener('click', () => runDashboardIssueAction(issue.action));
+    item.appendChild(button);
+
+    return item;
+}
+
+function runDashboardIssueAction(action) {
+    if (!action) return;
+    if (action.kind === 'remediate') {
+        remediateAction(action.action, action.target || null);
+    } else if (action.kind === 'tab') {
+        switchTab(action.target);
+    } else if (action.kind === 'subtab') {
+        switchToTroubleshoot();
+        switchSubTab(action.target);
     }
 }
 
@@ -599,7 +674,11 @@ async function remediateAction(action, target = null) {
         const result = await res.json();
         if (result.success) {
             showToast(`Action success: ${result.message}`, 'success');
-            runFullHealthScan();
+            if (state.currentTab === 'troubleshoot') {
+                runFullHealthScan();
+            } else {
+                fetchStats();
+            }
         } else {
             showToast(`Action failed: ${result.message}`, 'error');
         }
