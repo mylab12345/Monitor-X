@@ -7,9 +7,10 @@
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Orbitron:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/styles.css">
     <link rel="stylesheet" href="/static/css/modern-overrides.css">
+    <link rel="stylesheet" href="/static/css/nasa-theme.css">
     <!-- xterm.js for VM Console -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
@@ -17,6 +18,23 @@
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 </head>
 <body>
+    <!-- NASA Mission-Control overlays (scanlines + star/grid field) -->
+    <div class="nasa-overlay" aria-hidden="true">
+        <div class="nasa-grid"></div>
+        <div class="nasa-scanline"></div>
+        <div class="nasa-vignette"></div>
+    </div>
+
+    <!-- Flight-control boot sequence -->
+    <div class="nasa-boot" id="nasa-boot" aria-hidden="true">
+        <div class="nasa-boot-inner">
+            <div class="nasa-boot-emblem">⬡</div>
+            <div class="nasa-boot-logo">MONITORX · FLIGHT CONTROL</div>
+            <div class="nasa-boot-bar"><i id="nasa-boot-fill"></i></div>
+            <div class="nasa-boot-status" id="nasa-boot-status">INITIALIZING SUBSYSTEMS…</div>
+        </div>
+    </div>
+
     <div class="app-container">
         <!-- Modern Header -->
         <header class="app-header">
@@ -24,7 +42,7 @@
                 <div class="logo-box">
                     <span class="logo-icon">⚡</span>
                     <h1 class="logo">MonitorX</h1>
-                    <span class="version-tag">v2.0 PRO</span>
+                    <span class="version-tag">v2.2 FLIGHT</span>
                 </div>
                 <div class="host-badge">
                     <span class="host-dot"></span>
@@ -32,6 +50,10 @@
                 </div>
             </div>
             <div class="header-right">
+                <div class="mission-readout" aria-hidden="true">
+                    <div class="met-clock"><span class="met-label">MET</span><span id="met-clock">T+ 00:00:00</span></div>
+                    <div class="utc-clock"><span class="utc-label">UTC</span><span id="utc-clock">--:--:--</span></div>
+                </div>
                 <div class="status-indicator" id="ws-status">
                     <span class="status-dot connected"></span>
                     <span id="ws-status-text">Live WebSocket</span>
@@ -63,6 +85,14 @@
 
         <!-- Main Workspace -->
         <main class="main-content">
+            <!-- Live Telemetry Ticker (mission-control readout strip) -->
+            <div class="nasa-ticker" aria-hidden="true">
+                <span class="nasa-ticker-tag">◀ TELEMETRY</span>
+                <div class="nasa-ticker-viewport">
+                    <div class="nasa-ticker-track" id="nasa-ticker-track"></div>
+                </div>
+            </div>
+
             <!-- TAB 1: DASHBOARD -->
             <div class="tab-content active" id="tab-dashboard">
                 <!-- Sparkline Trend Charts Banner -->
@@ -579,7 +609,7 @@
 
         <!-- Footer -->
         <footer class="app-footer">
-            <span>MonitorX PRO v2.0</span>
+            <span>MONITORX · FLIGHT CONTROL v2.2</span>
             <span>|</span>
             <span>WebSocket Live Updates (2s)</span>
             <span>|</span>
@@ -695,6 +725,7 @@
     <!-- Toast Notifications -->
     <div class="toast-container" id="toast-container"></div>
 
+    <script src="/static/js/nasa-enhance.js?v=20260729"></script>
     <script src="/static/js/app.js?v=20260729"></script>
 </body>
 </html>
