@@ -437,10 +437,75 @@
             <div class="tab-content" id="tab-vms">
                 <div class="vms-header">
                     <h2>Virtual Machines (Libvirt / KVM)</h2>
-                    <div class="vm-header-actions"><span class="badge" id="vm-count">0 VMs</span><button class="btn btn-secondary btn-sm" id="refresh-vms-btn">↻ Refresh</button></div>
+                    <div class="vm-header-actions">
+                        <span class="badge" id="vm-count">0 VMs</span>
+                        <select id="vm-refresh-select" class="filter-select vm-refresh-select" title="Auto-refresh interval">
+                            <option value="0">Manual</option>
+                            <option value="2" selected>Live · 2s</option>
+                            <option value="5">5s</option>
+                            <option value="10">10s</option>
+                            <option value="30">30s</option>
+                        </select>
+                        <button class="btn btn-secondary btn-sm" id="refresh-vms-btn">↻ Refresh</button>
+                    </div>
                 </div>
+
+                <!-- VM KPI cards -->
+                <div class="vm-kpi-row" id="vm-kpi-row">
+                    <div class="vm-kpi"><span class="vm-kpi-label">Total</span><b id="vm-kpi-total">0</b></div>
+                    <div class="vm-kpi kpi-running"><span class="vm-kpi-label">Running</span><b id="vm-kpi-running">0</b></div>
+                    <div class="vm-kpi kpi-stopped"><span class="vm-kpi-label">Stopped</span><b id="vm-kpi-stopped">0</b></div>
+                    <div class="vm-kpi kpi-paused"><span class="vm-kpi-label">Paused</span><b id="vm-kpi-paused">0</b></div>
+                    <div class="vm-kpi kpi-other"><span class="vm-kpi-label">Other</span><b id="vm-kpi-other">0</b></div>
+                </div>
+
+                <div id="vm-permission-notice" class="service-permission-notice" role="status">
+                    Checking VM-control permissions…
+                </div>
+
+                <div class="service-controls vm-controls-bar">
+                    <input type="text" id="vm-search" placeholder="🔍 Search VM name, UUID, or state..." class="search-input">
+                    <select id="vm-state-filter" class="filter-select">
+                        <option value="all">All States</option>
+                        <option value="running">Running</option>
+                        <option value="shutoff">Stopped</option>
+                        <option value="paused">Paused</option>
+                        <option value="pmsuspended">Suspended (Host)</option>
+                        <option value="crashed">Crashed</option>
+                    </select>
+                    <select id="vm-sort" class="filter-select">
+                        <option value="name">Sort: Name</option>
+                        <option value="state">Sort: State</option>
+                        <option value="cpu">Sort: CPU %</option>
+                        <option value="memory">Sort: RAM %</option>
+                    </select>
+                </div>
+
+                <!-- Sticky bulk-action toolbar (shown when ≥1 VM is selected) -->
+                <div class="vm-bulk-bar" id="vm-bulk-bar" hidden>
+                    <span><b id="vm-selected-count">0</b> selected</span>
+                    <div class="vm-bulk-actions">
+                        <button class="btn btn-sm btn-success" id="vm-bulk-start" disabled>▶ Start</button>
+                        <button class="btn btn-sm btn-warning" id="vm-bulk-shutdown" disabled>⏹ Shutdown</button>
+                        <button class="btn btn-sm btn-danger" id="vm-bulk-poweroff" disabled>⏻ Poweroff</button>
+                        <button class="btn btn-sm btn-outline" id="vm-bulk-reboot" disabled>↻ Reboot</button>
+                        <button class="btn btn-sm btn-outline" id="vm-bulk-clear">✕ Clear</button>
+                    </div>
+                </div>
+
                 <div id="vm-list">
                     <p class="no-data">Loading VMs...</p>
+                </div>
+
+                <!-- Recent VM control actions -->
+                <div class="vm-audit-panel">
+                    <div class="card-header">
+                        <h3>🕓 Recent VM Control Actions</h3>
+                        <button class="btn btn-sm btn-outline" id="vm-audit-refresh">↻ Refresh</button>
+                    </div>
+                    <div id="vm-audit-list">
+                        <p class="no-data">No VM control actions recorded yet.</p>
+                    </div>
                 </div>
             </div>
 
@@ -498,6 +563,27 @@
                 <button class="modal-close" id="close-modal">&times;</button>
             </div>
             <div class="modal-body" id="modal-body"></div>
+        </div>
+    </div>
+
+    <!-- Confirmation Modal (used for destructive VM actions) -->
+    <div class="modal" id="confirm-modal">
+        <div class="modal-content" style="max-width: 460px;">
+            <div class="modal-header">
+                <h3 id="confirm-modal-title">⚠️ Confirm Action</h3>
+                <button class="modal-close" id="confirm-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-modal-message" style="font-size: 0.92rem; color: var(--text-muted); margin-bottom: 16px;">
+                    Are you sure?
+                </p>
+                <p id="confirm-modal-target" style="font-size: 0.82rem; color: var(--text-dim); margin-bottom: 18px;">
+                </p>
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button class="btn btn-outline" id="confirm-modal-cancel">Cancel</button>
+                    <button class="btn btn-danger" id="confirm-modal-confirm">Confirm</button>
+                </div>
+            </div>
         </div>
     </div>
 

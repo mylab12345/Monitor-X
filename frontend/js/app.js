@@ -26,7 +26,14 @@ const state = {
     logLines: 100,
     logAutoTail: false,
     cmdHistory: [],
-    cmdHistoryIndex: -1
+    cmdHistoryIndex: -1,
+    vmSearch: '',
+    vmStateFilter: 'all',
+    vmSort: 'name',
+    vmSelected: new Set(),
+    vmRefreshMs: 2000,
+    vmAutoTimer: null,
+    vmCapabilities: null
 };
 
 /* Format Helpers */
@@ -867,7 +874,7 @@ function switchTab(tabId) {
     state.currentTab = tabId;
 
     if (tabId === 'processes') fetchStats();
-    if (tabId === 'vms') fetchVms();
+    if (tabId === 'vms') { fetchVmCapabilities(); fetchVms(); fetchVmAuditLog(); }
     if (tabId === 'services') fetchServices();
     if (tabId === 'troubleshoot') switchSubTab(state.currentSubTab || 'health-hub');
 }
@@ -914,24 +921,110 @@ function filterProcesses() {
 }
 
 /* VMs */
+const VM_STATE_META = {
+    running:      { label: 'RUNNING',       row: 'kpi-running' },
+    shutoff:      { label: 'SHUTOFF',       row: 'kpi-stopped' },
+    paused:       { label: 'PAUSED',        row: 'kpi-paused'  },
+    pmsuspended:  { label: 'PMSUSPENDED',   row: 'kpi-paused'  },
+    shutdown:     { label: 'SHUTTING DOWN', row: 'kpi-paused'  },
+    crashed:      { label: 'CRASHED',       row: 'kpi-stopped' },
+    blocked:      { label: 'BLOCKED',       row: 'kpi-other'   },
+    no_state:     { label: 'NO STATE',      row: 'kpi-other'   },
+    unknown:      { label: 'UNKNOWN',       row: 'kpi-other'   }
+};
+
+function vmActionButtons(vm) {
+    const vmState = vm.state;
+    const startable = vmState === 'shutoff' || vmState === 'crashed';
+    const stoppable = vmState === 'running';
+    const suspendable = vmState === 'running';
+    const resumable = vmState === 'paused' || vmState === 'pmsuspended';
+    const rebootable = vmState === 'running';
+    const poweroffable = vmState === 'running' || vmState === 'paused' || vmState === 'pmsuspended';
+
+    const id = encodeURIComponent(vm.name);
+    const btn = (action, label, klass) => `<button class="btn ${klass}" data-vm-action="${action}" data-vm-id="${id}">${label}</button>`;
+    let html = '';
+    if (startable)    html += btn('start',    '▶ Start',      'btn-success');
+    if (resumable)    html += btn('resume',   '▶ Resume',     'btn-success');
+    if (stoppable)    html += btn('shutdown', '⏹ Shutdown',   'btn-warning');
+    if (suspendable)  html += btn('suspend',  '⏸ Suspend',    'btn-outline');
+    if (rebootable)   html += btn('reboot',   '↻ Reboot',     'btn-primary');
+    if (poweroffable) html += btn('poweroff', '⏻ Poweroff',   'btn-danger');
+    return html;
+}
+
+function vmFilterSort(vms) {
+    const search = state.vmSearch.toLowerCase();
+    const stateFilter = state.vmStateFilter;
+    let list = vms.filter(vm => {
+        if (stateFilter !== 'all' && vm.state !== stateFilter) return false;
+        if (!search) return true;
+        return (vm.name || '').toLowerCase().includes(search)
+            || (vm.uuid || '').toLowerCase().includes(search)
+            || (vm.state || '').toLowerCase().includes(search);
+    });
+    const sortKey = state.vmSort;
+    list.sort((a, b) => {
+        if (sortKey === 'state') return (a.state || '').localeCompare(b.state || '');
+        if (sortKey === 'cpu') return (b.cpu_percent || 0) - (a.cpu_percent || 0);
+        if (sortKey === 'memory') return (b.memory_percent || 0) - (a.memory_percent || 0);
+        return (a.name || '').localeCompare(b.name || '');
+    });
+    return list;
+}
+
 function renderVms(vms) {
     const container = document.getElementById('vm-list');
     if (!container) return;
     document.getElementById('vm-count').textContent = `${vms.length} VM${vms.length === 1 ? '' : 's'}`;
+
+    // KPI counts
+    const counts = { total: vms.length, running: 0, stopped: 0, paused: 0, other: 0 };
+    vms.forEach(vm => {
+        const meta = VM_STATE_META[vm.state] || VM_STATE_META.unknown;
+        if (vm.state === 'running') counts.running++;
+        else if (vm.state === 'shutoff' || vm.state === 'crashed') counts.stopped++;
+        else if (vm.state === 'paused' || vm.state === 'pmsuspended' || vm.state === 'shutdown') counts.paused++;
+        else counts.other++;
+    });
+    document.getElementById('vm-kpi-total').textContent = counts.total;
+    document.getElementById('vm-kpi-running').textContent = counts.running;
+    document.getElementById('vm-kpi-stopped').textContent = counts.stopped;
+    document.getElementById('vm-kpi-paused').textContent = counts.paused;
+    document.getElementById('vm-kpi-other').textContent = counts.other;
+
     if (!vms.length) {
-        container.innerHTML = '<p class="no-data">No libvirt/KVM guests found.</p>';
+        container.innerHTML = `
+            <div class="vm-empty-state">
+                <div class="icon">🐳</div>
+                <h3>No libvirt/KVM guests found</h3>
+                <p>This host has no defined virtual machines. New guests can be created with
+                <code>virt-install</code> or via the <code>cockpit-machines</code> web UI.</p>
+            </div>`;
         return;
     }
-    container.innerHTML = vms.map(vm => {
+
+    const visible = vmFilterSort(vms);
+    if (!visible.length) {
+        container.innerHTML = `<div class="vm-empty-state"><div class="icon">🔍</div><h3>No matching VMs</h3><p>Adjust the search query or state filter to see more guests.</p></div>`;
+        return;
+    }
+
+    const canControl = state.vmCapabilities?.can_control ?? false;
+    container.innerHTML = visible.map(vm => {
         const running = vm.active && vm.state === 'running';
         const rateStatus = running && !vm.rates_available ? 'Collecting live rates…' : '';
         const cpu = Number(vm.cpu_percent || 0);
         const memory = Number(vm.memory_percent || 0);
+        const meta = VM_STATE_META[vm.state] || VM_STATE_META.unknown;
+        const selected = state.vmSelected.has(vm.uuid) ? 'selected' : '';
         return `
-            <article class="vm-card ${running ? 'vm-running' : ''}">
+            <article class="vm-card ${running ? 'vm-running' : ''} ${selected}" data-vm-uuid="${escapeHtml(vm.uuid)}" data-vm-name="${escapeHtml(vm.name)}">
                 <div class="vm-card-header">
+                    <label class="vm-checkbox-cell"><input type="checkbox" class="vm-checkbox" data-vm-select="${escapeHtml(vm.uuid)}" ${selected ? 'checked' : ''}></label>
                     <div><strong>${escapeHtml(vm.name)}</strong><div class="vm-uuid">${escapeHtml(vm.uuid || '')}</div></div>
-                    <span class="vm-state ${escapeHtml(vm.state)}">${escapeHtml(String(vm.state).toUpperCase())}</span>
+                    <span class="vm-state ${escapeHtml(vm.state)}">${escapeHtml(meta.label)}</span>
                 </div>
                 <div class="vm-utilization">
                     <div class="vm-meter"><div><span>CPU</span><b>${cpu.toFixed(1)}%</b></div><div class="vm-progress"><i style="width:${Math.min(cpu, 100)}%"></i></div><small>of ${vm.vcpus || 0} vCPU(s)</small></div>
@@ -948,8 +1041,56 @@ function renderVms(vms) {
                     <div class="vm-stat"><span>Disks / NICs</span><span>${(vm.disks || []).length} / ${(vm.interfaces || []).length}</span></div>
                 </div>
                 ${rateStatus ? `<p class="vm-rate-status">${rateStatus}</p>` : ''}
+                ${renderVmActions(vm, canControl)}
             </article>`;
     }).join('');
+
+    // Wire individual action buttons
+    container.querySelectorAll('[data-vm-action]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const vmId = decodeURIComponent(btn.dataset.vmId);
+            const action = btn.dataset.vmAction;
+            triggerVmAction(vmId, action);
+            e.stopPropagation();
+        });
+    });
+    // Wire selection checkboxes
+    container.querySelectorAll('[data-vm-select]').forEach(cb => {
+        cb.addEventListener('change', () => {
+            if (cb.checked) state.vmSelected.add(cb.dataset.vmSelect);
+            else state.vmSelected.delete(cb.dataset.vmSelect);
+            updateBulkBar();
+            const card = cb.closest('.vm-card');
+            if (card) card.classList.toggle('selected', cb.checked);
+        });
+    });
+}
+
+function renderVmActions(vm, canControl) {
+    if (!canControl) {
+        return `<div class="vm-actions"><span class="text-muted" style="font-size:.75rem;">VM controls disabled — run systemd/install-service.sh to enable.</span></div>`;
+    }
+    const buttons = vmActionButtons(vm);
+    return buttons ? `<div class="vm-actions">${buttons}</div>` : '';
+}
+
+function updateBulkBar() {
+    const bar = document.getElementById('vm-bulk-bar');
+    const countEl = document.getElementById('vm-selected-count');
+    const n = state.vmSelected.size;
+    countEl.textContent = n;
+    bar.hidden = n === 0;
+    document.getElementById('vm-bulk-start').disabled    = n === 0;
+    document.getElementById('vm-bulk-shutdown').disabled = n === 0;
+    document.getElementById('vm-bulk-poweroff').disabled = n === 0;
+    document.getElementById('vm-bulk-reboot').disabled   = n === 0;
+}
+
+function clearVmSelection() {
+    state.vmSelected.clear();
+    updateBulkBar();
+    document.querySelectorAll('.vm-checkbox').forEach(cb => { cb.checked = false; });
+    document.querySelectorAll('.vm-card.selected').forEach(c => c.classList.remove('selected'));
 }
 
 async function fetchVms() {
@@ -957,13 +1098,184 @@ async function fetchVms() {
     try {
         const res = await fetch(`${API_BASE}/api/stats/vms`);
         if (res.status === 404) {
-            container.innerHTML = '<p class="no-data">VM monitoring unavailable (libvirt daemon not running or not installed).</p>';
+            container.innerHTML = `
+                <div class="vm-empty-state">
+                    <div class="icon">⚠️</div>
+                    <h3>VM monitoring unavailable</h3>
+                    <p>The libvirt daemon is not running on this host, or the <code>python3-libvirt</code> package is not installed. Start the service and reload MonitorX to enable.</p>
+                </div>`;
             return;
         }
         if (!res.ok) throw new Error(await readApiError(res));
         renderVms(await res.json());
     } catch (e) {
-        container.innerHTML = `<p class="issue-item danger">Error: ${escapeHtml(e.message)}</p>`;
+        container.innerHTML = `<div class="issue-item danger">Error: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function fetchVmCapabilities() {
+    const notice = document.getElementById('vm-permission-notice');
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/capabilities`);
+        if (!res.ok) throw new Error(await readApiError(res));
+        state.vmCapabilities = await res.json();
+        if (notice) {
+            notice.textContent = state.vmCapabilities.message;
+            notice.className = `service-permission-notice ${state.vmCapabilities.can_control ? 'ready' : 'blocked'}`;
+        }
+    } catch (e) {
+        state.vmCapabilities = { can_control: false, can_list: false };
+        if (notice) {
+            notice.textContent = `Could not verify VM-control permissions: ${e.message}`;
+            notice.className = 'service-permission-notice blocked';
+        }
+    }
+}
+
+async function fetchVmAuditLog() {
+    const list = document.getElementById('vm-audit-list');
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/log?limit=20`);
+        if (!res.ok) throw new Error(await readApiError(res));
+        const data = await res.json();
+        if (!data.entries || data.entries.length === 0) {
+            list.innerHTML = '<p class="no-data">No VM control actions recorded yet.</p>';
+            return;
+        }
+        list.innerHTML = data.entries.map(e => {
+            const ts = new Date(e.timestamp);
+            const time = ts.toLocaleTimeString();
+            const date = ts.toLocaleDateString();
+            const cls = e.success ? 'success' : 'failed';
+            return `<div class="vm-audit-entry ${cls}">
+                <time title="${escapeHtml(date)} ${escapeHtml(time)}">${escapeHtml(time)}</time>
+                <span><span class="vm-audit-vm">${escapeHtml(e.vm)}</span> <span class="vm-audit-action">${escapeHtml(e.action)}</span> <span class="vm-audit-msg">${escapeHtml(e.message)}</span></span>
+                <span>${e.success ? '✓' : '✗'}</span>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        list.innerHTML = `<p class="issue-item danger">Error: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function confirmAction({ title, message, target, confirmLabel = 'Confirm', confirmClass = 'btn-danger' }) {
+    return new Promise(resolve => {
+        const modal = document.getElementById('confirm-modal');
+        const titleEl = document.getElementById('confirm-modal-title');
+        const msgEl = document.getElementById('confirm-modal-message');
+        const targetEl = document.getElementById('confirm-modal-target');
+        const cancelBtn = document.getElementById('confirm-modal-cancel');
+        const confirmBtn = document.getElementById('confirm-modal-confirm');
+        const closeBtn = document.getElementById('confirm-modal-close');
+
+        titleEl.textContent = title;
+        msgEl.textContent = message;
+        targetEl.textContent = target || '';
+        targetEl.style.display = target ? 'block' : 'none';
+        confirmBtn.textContent = confirmLabel;
+        confirmBtn.className = `btn ${confirmClass}`;
+
+        const cleanup = (result) => {
+            modal.classList.remove('show');
+            confirmBtn.onclick = null;
+            cancelBtn.onclick = null;
+            closeBtn.onclick = null;
+            resolve(result);
+        };
+        confirmBtn.onclick = () => cleanup(true);
+        cancelBtn.onclick = () => cleanup(false);
+        closeBtn.onclick = () => cleanup(false);
+        modal.classList.add('show');
+    });
+}
+
+function markCardPending(vmId, pending) {
+    const card = document.querySelector(`.vm-card[data-vm-name="${cssEscape(vmId)}"]`);
+    if (card) card.classList.toggle('pending', pending);
+}
+
+function cssEscape(s) {
+    if (window.CSS && CSS.escape) return CSS.escape(s);
+    return String(s).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c);
+}
+
+async function triggerVmAction(vmId, action, opts = {}) {
+    if (state.vmCapabilities && state.vmCapabilities.can_control === false) {
+        showToast('VM controls are not authorized. Run systemd/install-service.sh.', 'error');
+        return;
+    }
+
+    const destructive = ['poweroff', 'destroy'];
+    let confirmed = opts.skipConfirm === true;
+    if (!confirmed && destructive.includes(action)) {
+        confirmed = await confirmAction({
+            title: `⚠️ Confirm ${action.toUpperCase()}`,
+            message: `The "${action}" action immediately terminates the guest without graceful shutdown. Unsaved data inside the VM will be lost.`,
+            target: `Target: ${vmId}`,
+            confirmLabel: `Yes, ${action.toUpperCase()}`,
+            confirmClass: 'btn-danger'
+        });
+        if (!confirmed) return;
+    }
+
+    markCardPending(vmId, true);
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/${action}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: confirmed })
+        });
+        const result = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+        if (!res.ok) throw new Error(result.detail || `Action failed (${res.status})`);
+        const msg = result.noop ? `No change: ${result.message}` : result.message;
+        showToast(msg, result.noop ? 'info' : 'success');
+        // Refresh metrics + audit log shortly after the request.
+        setTimeout(() => { fetchVms(); fetchVmAuditLog(); }, 1500);
+    } catch (e) {
+        showToast(`Could not ${action} ${vmId}: ${e.message}`, 'error');
+    } finally {
+        markCardPending(vmId, false);
+        fetchVmAuditLog();
+    }
+}
+
+async function bulkVmAction(action) {
+    if (state.vmSelected.size === 0) return;
+    const ids = Array.from(state.vmSelected).map(uuid => {
+        const card = document.querySelector(`.vm-card[data-vm-uuid="${cssEscape(uuid)}"]`);
+        return card ? card.dataset.vmName : null;
+    }).filter(Boolean);
+    if (ids.length === 0) return;
+
+    const destructive = ['poweroff', 'destroy'];
+    if (destructive.includes(action)) {
+        const confirmed = await confirmAction({
+            title: `⚠️ Bulk ${action.toUpperCase()}`,
+            message: `You are about to ${action} ${ids.length} guest(s). This cannot be undone for running VMs.`,
+            target: `Targets: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? `, +${ids.length - 5} more` : ''}`,
+            confirmLabel: `Yes, ${action.toUpperCase()} all`,
+            confirmClass: 'btn-danger'
+        });
+        if (!confirmed) return;
+    }
+    showToast(`Dispatching ${action} to ${ids.length} VM(s)…`, 'info');
+    for (const id of ids) {
+        // Sequential dispatch keeps virsh from overloading the libvirt socket.
+        await triggerVmAction(id, action, { skipConfirm: true });
+    }
+    fetchVmAuditLog();
+}
+
+function setVmAutoRefresh(intervalMs) {
+    state.vmRefreshMs = parseInt(intervalMs, 10) || 0;
+    if (state.vmAutoTimer) {
+        clearInterval(state.vmAutoTimer);
+        state.vmAutoTimer = null;
+    }
+    if (state.vmRefreshMs > 0) {
+        state.vmAutoTimer = setInterval(() => {
+            if (state.currentTab === 'vms') fetchVms();
+        }, state.vmRefreshMs);
     }
 }
 
@@ -1160,7 +1472,42 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('run-port-btn')?.addEventListener('click', runPortTest);
     document.getElementById('run-dns-btn')?.addEventListener('click', runDnsTest);
     document.getElementById('refresh-ports-btn')?.addEventListener('click', fetchListeningPorts);
-    document.getElementById('refresh-vms-btn')?.addEventListener('click', fetchVms);
+    document.getElementById('refresh-vms-btn')?.addEventListener('click', async () => {
+        await fetchVmCapabilities();
+        fetchVms();
+        fetchVmAuditLog();
+    });
+
+    // VM controls: search, filter, sort, bulk, auto-refresh
+    document.getElementById('vm-search')?.addEventListener('input', (e) => {
+        state.vmSearch = e.target.value;
+        if (statsData?.vms) renderVms(statsData.vms);
+    });
+    document.getElementById('vm-state-filter')?.addEventListener('change', (e) => {
+        state.vmStateFilter = e.target.value;
+        if (statsData?.vms) renderVms(statsData.vms);
+    });
+    document.getElementById('vm-sort')?.addEventListener('change', (e) => {
+        state.vmSort = e.target.value;
+        if (statsData?.vms) renderVms(statsData.vms);
+    });
+    document.getElementById('vm-refresh-select')?.addEventListener('change', (e) => {
+        setVmAutoRefresh(e.target.value);
+    });
+    document.getElementById('vm-bulk-start')?.addEventListener('click', () => bulkVmAction('start'));
+    document.getElementById('vm-bulk-shutdown')?.addEventListener('click', () => bulkVmAction('shutdown'));
+    document.getElementById('vm-bulk-poweroff')?.addEventListener('click', () => bulkVmAction('poweroff'));
+    document.getElementById('vm-bulk-reboot')?.addEventListener('click', () => bulkVmAction('reboot'));
+    document.getElementById('vm-bulk-clear')?.addEventListener('click', clearVmSelection);
+    document.getElementById('vm-audit-refresh')?.addEventListener('click', fetchVmAuditLog);
+
+    // Keyboard shortcut: '/' to focus the VM search input on the VMs tab.
+    document.addEventListener('keydown', (e) => {
+        if (e.key === '/' && state.currentTab === 'vms' && document.activeElement.tagName !== 'INPUT') {
+            e.preventDefault();
+            document.getElementById('vm-search')?.focus();
+        }
+    });
 
     // Terminal Command Runner
     document.getElementById('run-cmd')?.addEventListener('click', () => executeCommand());
@@ -1216,4 +1563,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Startup initialization
     connectWebSocket();
     fetchStats();
+    // Preload capabilities so the VM tab renders controls immediately.
+    fetchVmCapabilities();
+    setVmAutoRefresh(document.getElementById('vm-refresh-select')?.value || 2000);
 });

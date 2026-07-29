@@ -15,6 +15,7 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 - **Safe Diagnostic Console** — Approved read-only diagnostic presets (`df -h`, `free -h`, `ss -tulpn`, `systemctl --failed`, `dmesg -T`, `uname -a`) with command history. Arbitrary shell execution is intentionally disabled.
 - **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections).
 - **Service & VM Management** — Start, stop, restart, and reload systemd services, with an in-UI authorization status and actionable errors. Running libvirt/KVM guests show live vCPU, RAM, disk I/O, and network throughput metrics.
+- **KVM Guest Lifecycle Controls** — `Start`, `Shutdown`, `Reboot`, `Suspend`, `Resume`, and a destructive `Poweroff` for every libvirt domain discovered on the host, with a state-aware action matrix, bulk operations on multiple guests, KPI counters (Total / Running / Stopped / Paused / Other), search/filter/sort, an auto-refresh interval selector, and a built-in audit log of the last 50 control actions.
 - **No Authentication Required** — Plug-and-play local/internal server monitoring.
 
 ---
@@ -45,6 +46,8 @@ To run MonitorX as a background systemd service that starts automatically on boo
 ### Dashboard service controls
 
 A dashboard process runs as your regular user, so plain `systemctl restart …` is normally rejected by systemd/polkit. The installer now creates a **limited passwordless sudo policy** only for MonitorX’s `start`, `stop`, `restart`, `reload`, `enable`, and `disable` actions on `.service` units, plus the two explicit remediation commands used by the Troubleshoot Hub (drop page cache and vacuum journals). It does **not** grant shell access.
+
+When `virsh` is detected, the installer additionally writes a separate `/etc/sudoers.d/monitorx-virsh` policy granting the dashboard’s user non-interactive `virsh --no-ask-password` access for `start`, `shutdown`, `reboot`, `poweroff`, `destroy`, `suspend`, and `resume` actions. The **VMs (Libvirt)** tab shows whether this policy is available, disables controls if it is not, and surfaces the exact `virsh` error rather than reporting a false success.
 
 After updating an existing installation, run the installer once more and reload MonitorX:
 
