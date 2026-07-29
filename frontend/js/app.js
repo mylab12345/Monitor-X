@@ -870,7 +870,7 @@ function switchSubTab(subtabId) {
     if (subtabId === 'bottlenecks') fetchBottlenecks();
 }
 
-function switchTab(tabId) {
+async function switchTab(tabId) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
 
@@ -880,7 +880,11 @@ function switchTab(tabId) {
     state.currentTab = tabId;
 
     if (tabId === 'processes') fetchStats();
-    if (tabId === 'vms') { fetchVmCapabilities(); fetchVms(); fetchVmAuditLog(); }
+    if (tabId === 'vms') {
+        await fetchVmCapabilities();
+        fetchVms();
+        fetchVmAuditLog();
+    }
     if (tabId === 'services') fetchServices();
     if (tabId === 'troubleshoot') switchSubTab(state.currentSubTab || 'health-hub');
 }
@@ -1161,6 +1165,13 @@ async function fetchVmCapabilities() {
             notice.textContent = state.vmCapabilities.message;
             notice.className = `service-permission-notice ${state.vmCapabilities.can_control ? 'ready' : 'blocked'}`;
         }
+        // Capabilities just landed; re-render VMs so action buttons appear.
+        // Without this, a race in switchTab() may have rendered the cards
+        // before the capabilities fetch finished, leaving them disabled.
+        if (state.currentTab === 'vms') {
+            const vms = state.vmLastData || statsData?.vms;
+            if (vms) renderVms(vms);
+        }
     } catch (e) {
         state.vmCapabilities = { can_control: false, can_list: false };
         if (notice) {
@@ -1273,40 +1284,66 @@ async function triggerVmAction(vmId, action, opts = {}) {
 
     markCardPending(vmId, true);
     const label = vmDisplayName(vmId);
+    const url = `${API_BASE}/api/vms/${encodeURIComponent(vmId)}/${action}`;
+    const body = JSON.stringify({ confirm: confirmed || destructive.includes(action) });
     let succeeded = false;
-    try {
-        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/${action}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            // Always send confirm for destructive actions; the backend rejects
-            // them otherwise. Graceful actions ignore the flag.
-            body: JSON.stringify({ confirm: confirmed || destructive.includes(action) })
-        });
-        const result = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        if (!res.ok) throw new Error(result.detail || `Action failed (${res.status})`);
 
-        let msg = result.message || `${action} completed.`;
-        let tone = 'success';
-        if (result.noop) { msg = `No change: ${msg}`; tone = 'info'; }
-        else if (result.pending) { tone = 'info'; }
-        if (!opts.bulk) showToast(msg, tone);
-        state.vmLastAction.set(vmId, { action, at: Date.now() });
-        succeeded = true;
-    } catch (e) {
-        showToast(`Could not ${action} ${label}: ${e.message}`, 'error');
-    } finally {
-        markCardPending(vmId, false);
-        // Re-check authorization in case the operator just installed the policy.
-        if (state.vmCapabilities && !state.vmCapabilities.can_control) fetchVmCapabilities();
-        // Refresh immediately, then again once the guest has had time to settle
-        // (graceful shutdown/reboot are asynchronous inside the guest).
-        // During bulk runs the caller refreshes once at the end instead.
-        if (!opts.bulk) {
-            await fetchVms();
-            fetchVmAuditLog();
-            scheduleVmSettleRefresh();
+    // Retry transient network failures once with a brief backoff.
+    // "Failed to fetch" is a browser TypeError thrown when the TCP
+    // connection is refused, reset, or times out — often caused by a
+    // temporary exec backlog in the libvirt thread pool.
+    let lastError = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) {
+            await new Promise(r => setTimeout(r, 500));
+        }
+        try {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: body,
+            });
+            const result = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+            if (!res.ok) throw new Error(result.detail || `Action failed (${res.status})`);
+
+            let msg = result.message || `${action} completed.`;
+            let tone = 'success';
+            if (result.noop) { msg = `No change: ${msg}`; tone = 'info'; }
+            else if (result.pending) { tone = 'info'; }
+            if (!opts.bulk) showToast(msg, tone);
+            state.vmLastAction.set(vmId, { action, at: Date.now() });
+            succeeded = true;
+            break; // success — exit the retry loop
+        } catch (e) {
+            lastError = e;
+            // Only retry on network/TypeError (e.g. "Failed to fetch"),
+            // not on application-level 4xx/5xx errors.
+            if (e instanceof TypeError || e.message === 'Failed to fetch' || e.name === 'TypeError') {
+                continue; // retry
+            }
+            break; // application error — do not retry
         }
     }
+
+    if (!succeeded && lastError) {
+        const hint = lastError instanceof TypeError
+            ? 'Network error — the server may be busy. Please try again.'
+            : '';
+        showToast(`Could not ${action} ${label}: ${lastError.message}${hint ? ' (' + hint + ')' : ''}`, 'error');
+    }
+
+    markCardPending(vmId, false);
+    // Re-check authorization in case the operator just installed the policy.
+    if (state.vmCapabilities && !state.vmCapabilities.can_control) fetchVmCapabilities();
+    // Refresh immediately, then again once the guest has had time to settle
+    // (graceful shutdown/reboot are asynchronous inside the guest).
+    // During bulk runs the caller refreshes once at the end instead.
+    if (!opts.bulk) {
+        await fetchVms();
+        fetchVmAuditLog();
+        scheduleVmSettleRefresh();
+    }
+
     return succeeded;
 }
 

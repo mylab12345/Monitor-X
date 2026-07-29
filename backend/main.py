@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 import psutil
 
@@ -100,32 +101,43 @@ def _get_libvirt_executor():
     global _libvirt_executor
     if _libvirt_executor is None:
         _libvirt_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="libvirt"
+            max_workers=10, thread_name_prefix="libvirt"
         )
     return _libvirt_executor
 
 
 async def _run_libvirt(func, timeout: float = 10.0):
-    """Run a blocking libvirt call in the executor with a hard timeout."""
+    """Run a blocking libvirt call in the executor with a hard timeout.
+
+    The connection health checks, domain lookups, and lifecycle operations
+    all share this executor so that no libvirt call ever runs on the event
+    loop thread — the python3-libvirt bindings are not thread-safe.
+    """
     loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
         loop.run_in_executor(_get_libvirt_executor(), func), timeout=timeout
     )
 
 
-def _conn_alive(conn) -> bool:
-    """Return True when a libvirt connection object is usable."""
+async def _conn_alive_async(conn) -> bool:
+    """Async check whether a libvirt connection is usable.
+
+    ``_conn_alive`` calls ``conn.isAlive()`` which touches the libvirt
+    connection object.  Because python3-libvirt is **not** thread-safe the
+    check must run in the executor alongside every other libvirt call,
+    never directly on the event-loop thread.
+    """
     if not conn:
         return False
     try:
-        return conn.isAlive() == 1
+        return await _run_libvirt(lambda: conn.isAlive(), timeout=5.0) == 1
     except Exception:
         return False
 
 
-def _libvirt_conn_alive():
-    """Check if the read-only libvirt connection is alive and usable."""
-    return _conn_alive(libvirt_conn)
+async def _libvirt_conn_alive_async():
+    """Check if the read-only libvirt connection is alive (async safe)."""
+    return await _conn_alive_async(libvirt_conn)
 
 
 async def _ensure_libvirt_conn() -> bool:
@@ -136,12 +148,12 @@ async def _ensure_libvirt_conn() -> bool:
     global libvirt_conn, _libvirt_last_error
     if not LIBVIRT_AVAILABLE:
         return False
-    if _conn_alive(libvirt_conn):
+    if await _conn_alive_async(libvirt_conn):
         return True
 
     async with _libvirt_connect_lock:
         # Another waiter may have reconnected while we waited for the lock.
-        if _conn_alive(libvirt_conn):
+        if await _conn_alive_async(libvirt_conn):
             return True
         if libvirt_conn is not None:
             try:
@@ -174,11 +186,11 @@ async def _ensure_libvirt_rw_conn():
     global libvirt_rw_conn
     if not LIBVIRT_AVAILABLE:
         return None, "libvirt Python bindings are not installed on this host."
-    if _conn_alive(libvirt_rw_conn):
+    if await _conn_alive_async(libvirt_rw_conn):
         return libvirt_rw_conn, None
 
     async with _libvirt_connect_lock:
-        if _conn_alive(libvirt_rw_conn):
+        if await _conn_alive_async(libvirt_rw_conn):
             return libvirt_rw_conn, None
         if libvirt_rw_conn is not None:
             try:
@@ -731,7 +743,7 @@ async def _resolve_domain(vm_id: str, conn=None):
         if not await _ensure_libvirt_conn():
             return None, "libvirt connection is not available. Check that libvirtd is running."
         conn = libvirt_conn
-    if not _conn_alive(conn):
+    if not await _conn_alive_async(conn):
         return None, "libvirt connection is not available. Check that libvirtd is running."
 
     lookups = []
@@ -1243,7 +1255,12 @@ async def broadcast_stats():
 async def root():
     """Serve the main dashboard page"""
     with open(str(FRONTEND_DIR / "index.html"), "r") as f:
-        return f.read()
+        html = f.read()
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
 
 
 @app.get("/api/stats", response_model=SystemStats)
