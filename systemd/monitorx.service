@@ -1,0 +1,19 @@
+[Unit]
+Description=MonitorX System Monitoring & Troubleshooting Dashboard
+After=network.target libvirtd.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=%U
+WorkingDirectory=%h/MonitorX/backend
+ExecStart=%h/MonitorX/.venv/bin/python3 main.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+Environment="HOME=%h"
+Environment="PATH=%h/MonitorX/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target

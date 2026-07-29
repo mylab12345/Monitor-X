@@ -1,57 +1,86 @@
-# System Monitoring Dashboard (MonitorX)
+# MonitorX - System Monitoring & Troubleshooting Dashboard
 
-Real-time monitoring dashboard for Linux Mint servers with CPU, RAM, GPU, Disk, I/O, VM, and troubleshooting features.
+Real-time, modern monitoring and automated troubleshooting dashboard for Linux servers (CPU, RAM, Storage, Network, GPU, VMs, Systemd Services, and Logs).
+
+![MonitorX UI](https://img.shields.shields.gradient)
 
 ## Features
 
-- **Live Dashboard** — CPU (per-core), RAM, Disk, GPU, Network, System info
-- **Process Manager** — View, search, filter, and kill processes; full detail modal
-- **VM Monitoring** — See all VMs running on libvirt/VMM with state, memory, vCPUs
-- **Troubleshooting** — System health checks, error log viewer, network diagnostics, command runner
-- **Service Management** — Start/stop/restart systemd services
-- **OS Issue Detection** — Auto alerts for high CPU, memory, disk, swap, zombie processes, GPU overheating
-- **Real-time Updates** — WebSocket push every 2 seconds
+- **Ultra-Modern Glassmorphism UI** — High-tech dark slate interface with neon accent glows, live sparklines, and dark/light mode toggle.
+- **Real-Time Canvas Sparklines** — Live 30s trend graphs for CPU, Memory, and Network Bandwidth.
+- **Troubleshoot Mode Hub** — Automated 7-point diagnostic scan calculating a **System Health Index (0-100)** score with **1-Click Remediation Fixes**.
+- **Live Log Inspector** — Auto-tail streaming for system logs and `dmesg` with level filtering (`ALL`, `🔴 ERROR`, `⚠️ WARN`, `ℹ️ INFO`) and regex search.
+- **Network Diagnostic Suite** — Interactive ICMP Ping latency tester, TCP Port connectivity checker, DNS resolver benchmark, and active listening ports table.
+- **Resource Bottleneck Finder** — Identifies top CPU, RAM, and thread consumers alongside stuck/zombie process killers.
+- **Terminal Shell Console** — Quick diagnostic preset buttons (`df -h`, `free -h`, `ss -tulpn`, `systemctl --failed`, `dmesg -T`, `uname -a`) with interactive command execution history.
+- **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections).
+- **Service & VM Management** — Start, stop, and restart systemd services and inspect libvirt/KVM Virtual Machines.
+- **No Authentication Required** — Plug-and-play local/internal server monitoring.
+
+---
 
 ## Quick Start
 
 ```bash
+# 1. Setup Python Virtual Environment and dependencies
 ./setup.sh
+
+# 2. Launch dashboard directly
 ./launch.sh
 ```
 
-Then open **http://localhost:8080**
+Open **http://localhost:8080** in your browser.
 
-## Tabs
+---
 
-| Tab | Description |
-|-----|-------------|
-| Dashboard | Real-time metrics with WebSocket |
-| Processes | Full process list with kill capability |
-| Troubleshoot | System checks, error logs, resource analysis, command runner |
-| VMs | Virtual machines from libvirt |
-| Services | Systemd services with start/stop/restart |
+## Systemd Service Setup (Run on Boot)
 
-## System Requirements
+To run MonitorX as a background systemd service that starts automatically on boot:
 
-- Linux Mint (or any Linux with systemd)
-- Python 3.12+
-- libvirt (for VM monitoring)
-- NVIDIA GPU + py3nvml (for GPU monitoring, optional)
+```bash
+# Run installer script (creates and enables /etc/systemd/system/monitorx.service)
+./systemd/install-service.sh
+```
 
-## Project Structure
+### Useful Service Commands
+
+```bash
+sudo systemctl status monitorx
+sudo systemctl restart monitorx
+sudo systemctl stop monitorx
+journalctl -u monitorx -f
+```
+
+---
+
+## Workspace Structure
 
 ```
-monitoring-dashboard/
+MonitorX/
 ├── backend/
-│   ├── main.py           # FastAPI application
-│   └── requirements.txt  # Python deps
+│   ├── main.py               # FastAPI application with REST & WebSocket APIs
+│   └── requirements.txt      # Python dependencies
 ├── frontend/
-│   ├── index.html        # Dashboard HTML
-│   ├── css/styles.css    # Styling
-│   └── js/app.js         # Real-time logic
+│   ├── index.html            # Dashboard HTML structure
+│   ├── css/styles.css        # Modern Glassmorphic CSS Theme
+│   └── js/app.js             # Real-time WebSocket logic & Canvas charts
 ├── systemd/
-│   └── monitoring-dashboard.service
-├── launch.sh
-├── setup.sh
-└── README.md
+│   ├── monitorx.service      # Systemd service unit template
+│   └── install-service.sh    # Automated service installer script
+├── launch.sh                 # Launcher script
+├── setup.sh                  # Setup script
+└── README.md                 # Project documentation
 ```
+
+---
+
+## Suggested Future Improvements
+
+1. **Persistent Time-Series Storage**:
+   - Connect an embedded SQLite, TimescaleDB, or Prometheus exporter to store historical metrics over days/weeks for long-term trend analysis.
+2. **Automated Notification Webhooks**:
+   - Send instant alerts (Slack, Discord, Telegram, or Email) when the System Health Index drops below a threshold (e.g. `< 70`).
+3. **Docker & Container Monitoring**:
+   - Add a dedicated Container tab integrating with the Docker daemon API to monitor container CPU/RAM usage, status, and logs.
+4. **Custom Dashboard Widgets**:
+   - Allow users to pin, drag, and resize metric cards or custom command outputs to create personalized monitoring views.
