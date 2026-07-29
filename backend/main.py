@@ -3,6 +3,7 @@ Monitoring Dashboard Backend - FastAPI Application
 Provides real-time system monitoring via WebSocket and REST API
 """
 import asyncio
+import concurrent.futures
 import logging
 import os
 import platform
@@ -73,6 +74,56 @@ if LIBVIRT_AVAILABLE:
         logger.warning(f"Libvirt connection failed: {e}")
         LIBVIRT_AVAILABLE = False
 
+# Thread executor for blocking libvirt operations
+_libvirt_executor = None
+
+
+def _get_libvirt_executor():
+    """Get or create the thread executor for libvirt operations."""
+    global _libvirt_executor
+    if _libvirt_executor is None:
+        _libvirt_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="libvirt"
+        )
+    return _libvirt_executor
+
+
+def _libvirt_conn_alive():
+    """Check if the libvirt connection is alive and usable."""
+    global libvirt_conn
+    if not libvirt_conn:
+        return False
+    try:
+        # isAlive() returns 1 if connection is alive, 0 otherwise
+        return libvirt_conn.isAlive() == 1
+    except Exception:
+        return False
+
+
+async def _ensure_libvirt_conn():
+    """Ensure the libvirt connection is alive, reconnect if necessary.
+
+    Returns True if connection is available, False otherwise.
+    """
+    global libvirt_conn, LIBVIRT_AVAILABLE
+    if _libvirt_conn_alive():
+        return True
+    # Connection is dead or stale, try to reconnect
+    try:
+        if libvirt_conn:
+            try:
+                libvirt_conn.close()
+            except Exception:
+                pass
+        libvirt_conn = libvirt.openReadOnly("qemu:///system")
+        logger.info("Libvirt reconnected successfully")
+        return True
+    except Exception as e:
+        logger.warning(f"Libvirt reconnection failed: {e}")
+        LIBVIRT_AVAILABLE = False
+        libvirt_conn = None
+        return False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -92,6 +143,10 @@ async def lifespan(app: FastAPI):
             libvirt_conn.close()
         except Exception:
             pass
+    global _libvirt_executor
+    if _libvirt_executor:
+        _libvirt_executor.shutdown(wait=False)
+        _libvirt_executor = None
     logger.info("Monitoring Dashboard stopped")
 
 
@@ -463,18 +518,19 @@ async def vm_capabilities():
             "message": "libvirt is not installed on this host. Install python3-libvirt and start libvirtd to enable VM monitoring.",
         }
 
+    # Check if connection is alive - attempt reconnect if stale
+    conn_alive = await _ensure_libvirt_conn()
+
     # Listing domains is possible through the read-only connection.
-    if libvirt_conn and getattr(libvirt_conn, "getURI", lambda: "")() == "qemu:///system":
-        list_ok = True
-    else:
-        list_ok = bool(libvirt_conn)
+    list_ok = conn_alive
 
     if os.geteuid() == 0:
         return {
-            "can_control": True,
+            "can_control": conn_alive,
             "can_list": list_ok,
             "mode": "root",
-            "message": "VM controls are available (running as root).",
+            "message": "VM controls are available (running as root)." if conn_alive
+            else "libvirt connection is unavailable. Check that libvirtd is running.",
         }
 
     sudo = shutil.which("sudo")
@@ -502,47 +558,62 @@ async def vm_capabilities():
     )
 
     return {
-        "can_control": allowed,
+        "can_control": allowed and conn_alive,
         "can_list": list_ok,
         "mode": "sudo" if allowed else "unconfigured",
-        "message": "VM controls are available." if allowed
+        "message": "VM controls are available." if (allowed and conn_alive)
         else "Controls need the MonitorX sudo policy. Run systemd/install-service.sh, then restart MonitorX.",
     }
 
 
-def _resolve_domain(vm_id: str):
+async def _resolve_domain(vm_id: str):
     """Look up a libvirt domain by id (UUID, numeric ID, or name).
 
     Returns ``(domain, error_message)``. ``error_message`` is ``None`` on success.
+    Runs blocking libvirt calls in a thread executor to avoid blocking the event loop.
     """
-    if not libvirt_conn:
-        return None, "libvirt connection is not available."
+    if not LIBVIRT_AVAILABLE:
+        return None, "libvirt is not installed on this host."
+    if not _libvirt_conn_alive():
+        return None, "libvirt connection is not available. Check that libvirtd is running."
     if not VM_ID_PATTERN.fullmatch(vm_id):
         return None, "Invalid VM identifier."
+
+    loop = asyncio.get_running_loop()
+    executor = _get_libvirt_executor()
 
     # 1. Try as a numeric domain id (only valid for active domains).
     if vm_id.isdigit():
         try:
-            domain = libvirt_conn.lookupById(int(vm_id))
+            domain = await asyncio.wait_for(
+                loop.run_in_executor(executor, lambda: libvirt_conn.lookupById(int(vm_id))),
+                timeout=5.0
+            )
             if domain:
                 return domain, None
-        except libvirt.libvirtError:
+        except (libvirt.libvirtError, asyncio.TimeoutError):
             pass
 
     # 2. Try as a domain UUID.
     try:
-        domain = libvirt_conn.lookupByUUIDString(vm_id)
+        domain = await asyncio.wait_for(
+            loop.run_in_executor(executor, lambda: libvirt_conn.lookupByUUIDString(vm_id)),
+            timeout=5.0
+        )
         if domain:
             return domain, None
-    except libvirt.libvirtError:
+    except (libvirt.libvirtError, asyncio.TimeoutError):
         pass
 
     # 3. Try as a domain name.
     try:
-        domain = libvirt_conn.lookupByName(vm_id)
+        domain = await asyncio.wait_for(
+            loop.run_in_executor(executor, lambda: libvirt_conn.lookupByName(vm_id)),
+            timeout=5.0
+        )
         if domain:
             return domain, None
-    except libvirt.libvirtError:
+    except (libvirt.libvirtError, asyncio.TimeoutError):
         pass
 
     return None, f"VM '{vm_id}' was not found."
@@ -619,7 +690,7 @@ async def control_vm(vm_id: str, action: str, payload: Optional[VMActionRequest]
 
     # Sanity check: surface libvirt state so the UI can decide before sending
     # graceful vs. destructive commands (e.g. "shutdown" is a no-op on a stopped VM).
-    domain, lookup_error = _resolve_domain(vm_id)
+    domain, lookup_error = await _resolve_domain(vm_id)
     if lookup_error:
         await _record_vm_action(vm_id, action, False, lookup_error)
         raise HTTPException(status_code=404, detail=lookup_error)
@@ -678,8 +749,15 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
 
     Libvirt exposes CPU time and I/O counters cumulatively, therefore rates are
     derived from two successive samples. Values are zero on the first poll.
+
+    Libvirt operations are blocking, so they run in a thread executor with a
+    timeout to prevent the async event loop from hanging.
     """
-    if not LIBVIRT_AVAILABLE or not libvirt_conn:
+    if not LIBVIRT_AVAILABLE:
+        return None
+
+    # Ensure connection is alive before attempting operations
+    if not await _ensure_libvirt_conn():
         return None
 
     state_map = {
@@ -688,13 +766,24 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
         libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown", libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
         libvirt.VIR_DOMAIN_CRASHED: "crashed", libvirt.VIR_DOMAIN_PMSUSPENDED: "pmsuspended",
     }
+
+    # Run blocking libvirt call in thread executor with timeout
+    try:
+        loop = asyncio.get_running_loop()
+        executor = _get_libvirt_executor()
+        domains = await asyncio.wait_for(
+            loop.run_in_executor(executor, lambda: libvirt_conn.listAllDomains(0)),
+            timeout=10.0
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Timed out listing libvirt domains")
+        return None
+    except Exception as exc:
+        logger.warning("Could not list libvirt domains: %s", exc)
+        return None
+
     async with vm_metrics_lock:
         now = time.monotonic()
-        try:
-            domains = libvirt_conn.listAllDomains(0)
-        except Exception as exc:
-            logger.warning("Could not list libvirt domains: %s", exc)
-            return None
 
         vms: List[Dict[str, Any]] = []
         active_domain_ids = set()
