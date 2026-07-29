@@ -964,11 +964,17 @@ function switchSubTab(subtabId) {
 }
 
 async function switchTab(tabId) {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => {
+        b.classList.remove('active');
+        b.removeAttribute('aria-current');
+    });
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
 
     const btn = document.querySelector(`[data-tab="${tabId}"]`);
-    if (btn) btn.classList.add('active');
+    if (btn) {
+        btn.classList.add('active');
+        btn.setAttribute('aria-current', 'page');
+    }
     document.getElementById(`tab-${tabId}`).classList.add('active');
     state.currentTab = tabId;
 
@@ -1996,7 +2002,34 @@ async function controlService(name, action, button) {
 }
 
 /* Event Listeners Initialization */
+function applySavedTheme() {
+    const savedTheme = localStorage.getItem('monitorx-theme');
+    const prefersLight = window.matchMedia?.('(prefers-color-scheme: light)').matches;
+    if (savedTheme === 'light' || (!savedTheme && prefersLight)) {
+        document.body.classList.add('light-theme');
+    }
+    const themeButton = document.getElementById('theme-toggle');
+    if (themeButton) {
+        const isLight = document.body.classList.contains('light-theme');
+        themeButton.textContent = isLight ? '☀️' : '🌙';
+        themeButton.setAttribute('aria-label', isLight ? 'Switch to dark theme' : 'Switch to light theme');
+    }
+}
+
+function focusActiveTabSearch() {
+    const searchByTab = {
+        processes: 'proc-search',
+        vms: 'vm-search',
+        services: 'service-search',
+        troubleshoot: 'cmd-input'
+    };
+    const target = document.getElementById(searchByTab[state.currentTab] || 'proc-search');
+    target?.focus();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    applySavedTheme();
+
     // Tab switching
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => switchTab(btn.dataset.tab));
@@ -2023,6 +2056,25 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.classList.toggle('light-theme');
         const isLight = document.body.classList.contains('light-theme');
         document.getElementById('theme-toggle').textContent = isLight ? '☀️' : '🌙';
+        document.getElementById('theme-toggle').setAttribute('aria-label', isLight ? 'Switch to dark theme' : 'Switch to light theme');
+        localStorage.setItem('monitorx-theme', isLight ? 'light' : 'dark');
+    });
+
+    // Lightweight keyboard shortcuts: navigation only, never intercept typing.
+    document.addEventListener('keydown', (event) => {
+        const target = event.target;
+        const isTyping = target.matches('input, textarea, select, [contenteditable="true"]');
+        if (isTyping) return;
+        if (event.key === '/') {
+            event.preventDefault();
+            focusActiveTabSearch();
+        } else if (event.key.toLowerCase() === 'r') {
+            event.preventDefault();
+            document.getElementById('refresh-btn')?.click();
+        } else if (/^[1-5]$/.test(event.key)) {
+            const tabs = ['dashboard', 'processes', 'troubleshoot', 'vms', 'services'];
+            switchTab(tabs[Number(event.key) - 1]);
+        }
     });
 
     // View All Procs button
