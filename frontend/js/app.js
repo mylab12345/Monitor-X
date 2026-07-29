@@ -110,9 +110,8 @@ function updateDashboard(data) {
     checkOSIssues(data);
     updateCharts(data);
 
-    if (state.currentTab === 'processes') {
-        filterProcesses();
-    }
+    if (state.currentTab === 'processes') filterProcesses();
+    if (state.currentTab === 'vms' && data.vms) renderVms(data.vms);
 }
 
 function updateCpu(cpu) {
@@ -915,41 +914,60 @@ function filterProcesses() {
 }
 
 /* VMs */
+function renderVms(vms) {
+    const container = document.getElementById('vm-list');
+    if (!container) return;
+    document.getElementById('vm-count').textContent = `${vms.length} VM${vms.length === 1 ? '' : 's'}`;
+    if (!vms.length) {
+        container.innerHTML = '<p class="no-data">No libvirt/KVM guests found.</p>';
+        return;
+    }
+    container.innerHTML = vms.map(vm => {
+        const running = vm.active && vm.state === 'running';
+        const rateStatus = running && !vm.rates_available ? 'Collecting live rates…' : '';
+        const cpu = Number(vm.cpu_percent || 0);
+        const memory = Number(vm.memory_percent || 0);
+        return `
+            <article class="vm-card ${running ? 'vm-running' : ''}">
+                <div class="vm-card-header">
+                    <div><strong>${escapeHtml(vm.name)}</strong><div class="vm-uuid">${escapeHtml(vm.uuid || '')}</div></div>
+                    <span class="vm-state ${escapeHtml(vm.state)}">${escapeHtml(String(vm.state).toUpperCase())}</span>
+                </div>
+                <div class="vm-utilization">
+                    <div class="vm-meter"><div><span>CPU</span><b>${cpu.toFixed(1)}%</b></div><div class="vm-progress"><i style="width:${Math.min(cpu, 100)}%"></i></div><small>of ${vm.vcpus || 0} vCPU(s)</small></div>
+                    <div class="vm-meter memory"><div><span>RAM</span><b>${memory.toFixed(1)}%</b></div><div class="vm-progress"><i style="width:${Math.min(memory, 100)}%"></i></div><small>${formatBytes((vm.memory_used || 0) * 1024)} / ${formatBytes((vm.memory_total || vm.max_memory || 0) * 1024)}</small></div>
+                </div>
+                <div class="vm-live-grid">
+                    <div><span>Disk read</span><b>↓ ${formatSpeed(vm.disk_read_bytes_sec)}</b></div>
+                    <div><span>Disk write</span><b>↑ ${formatSpeed(vm.disk_write_bytes_sec)}</b></div>
+                    <div><span>Network RX</span><b>↓ ${formatSpeed(vm.network_rx_bytes_sec)}</b></div>
+                    <div><span>Network TX</span><b>↑ ${formatSpeed(vm.network_tx_bytes_sec)}</b></div>
+                </div>
+                <div class="vm-stats">
+                    <div class="vm-stat"><span>Domain ID</span><span>${vm.id >= 0 ? vm.id : '—'}</span></div>
+                    <div class="vm-stat"><span>Disks / NICs</span><span>${(vm.disks || []).length} / ${(vm.interfaces || []).length}</span></div>
+                </div>
+                ${rateStatus ? `<p class="vm-rate-status">${rateStatus}</p>` : ''}
+            </article>`;
+    }).join('');
+}
+
 async function fetchVms() {
     const container = document.getElementById('vm-list');
     try {
         const res = await fetch(`${API_BASE}/api/stats/vms`);
         if (res.status === 404) {
-            container.innerHTML = '<p class="no-data">VM monitoring unavailable (libvirt daemon not running or not installed)</p>';
+            container.innerHTML = '<p class="no-data">VM monitoring unavailable (libvirt daemon not running or not installed).</p>';
             return;
         }
         if (!res.ok) throw new Error(await readApiError(res));
-        const vms = await res.json();
-        document.getElementById('vm-count').textContent = vms.length + ' VMs';
-
-        if (vms.length === 0) {
-            container.innerHTML = '<p class="no-data">No active or defined VMs found on hypervisor.</p>';
-            return;
-        }
-
-        container.innerHTML = vms.map(vm => `
-            <div class="vm-card">
-                <div class="vm-card-header">
-                    <strong>${escapeHtml(vm.name)}</strong>
-                    <span class="vm-state ${vm.state}">${escapeHtml(vm.state.toUpperCase())}</span>
-                </div>
-                <div class="vm-stats">
-                    <div class="vm-stat"><span>VM ID</span><span>${vm.id}</span></div>
-                    <div class="vm-stat"><span>vCPUs</span><span>${vm.vcpus}</span></div>
-                    <div class="vm-stat"><span>Allocated Memory</span><span>${formatBytes(vm.memory * 1024)}</span></div>
-                    <div class="vm-stat"><span>Max Memory</span><span>${formatBytes(vm.max_memory * 1024)}</span></div>
-                </div>
-            </div>
-        `).join('');
+        renderVms(await res.json());
     } catch (e) {
         container.innerHTML = `<p class="issue-item danger">Error: ${escapeHtml(e.message)}</p>`;
     }
 }
+
+
 
 /* Services */
 async function readApiError(res) {
@@ -1142,6 +1160,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('run-port-btn')?.addEventListener('click', runPortTest);
     document.getElementById('run-dns-btn')?.addEventListener('click', runDnsTest);
     document.getElementById('refresh-ports-btn')?.addEventListener('click', fetchListeningPorts);
+    document.getElementById('refresh-vms-btn')?.addEventListener('click', fetchVms);
 
     // Terminal Command Runner
     document.getElementById('run-cmd')?.addEventListener('click', () => executeCommand());

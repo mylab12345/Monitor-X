@@ -14,7 +14,7 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 - **Resource Bottleneck Finder** — Identifies top CPU, RAM, and thread consumers alongside stuck/zombie process killers.
 - **Safe Diagnostic Console** — Approved read-only diagnostic presets (`df -h`, `free -h`, `ss -tulpn`, `systemctl --failed`, `dmesg -T`, `uname -a`) with command history. Arbitrary shell execution is intentionally disabled.
 - **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections).
-- **Service & VM Management** — Start, stop, restart, and reload systemd services, with an in-UI authorization status and actionable errors; inspect libvirt/KVM Virtual Machines.
+- **Service & VM Management** — Start, stop, restart, and reload systemd services, with an in-UI authorization status and actionable errors. Running libvirt/KVM guests show live vCPU, RAM, disk I/O, and network throughput metrics.
 - **No Authentication Required** — Plug-and-play local/internal server monitoring.
 
 ---

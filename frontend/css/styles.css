@@ -1227,3 +1227,19 @@ canvas {
 .service-permission-notice.blocked { border-color: rgba(244, 63, 94, .45); color: #fda4af; background: var(--danger-bg); }
 .service-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .btn:disabled { cursor: not-allowed; opacity: .48; transform: none; box-shadow: none; }
+
+/* Live KVM guest metrics */
+.vm-header-actions { display: flex; align-items: center; gap: 10px; }
+.vm-running { border-color: rgba(56, 189, 248, .26); }
+.vm-uuid { margin-top: 2px; color: var(--text-dim); font: 0.68rem 'JetBrains Mono', monospace; }
+.vm-utilization { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; }
+.vm-meter > div:first-child, .vm-live-grid > div { display: flex; justify-content: space-between; gap: 8px; font-size: .78rem; }
+.vm-meter span, .vm-live-grid span, .vm-meter small { color: var(--text-muted); }
+.vm-meter small { display: block; margin-top: 4px; font: .68rem 'JetBrains Mono', monospace; }
+.vm-progress { height: 7px; overflow: hidden; background: rgba(255,255,255,.08); border-radius: 99px; margin-top: 6px; }
+.vm-progress i { display: block; height: 100%; background: var(--accent-blue); border-radius: inherit; transition: width .45s ease; }
+.vm-meter.memory .vm-progress i { background: var(--success); }
+.vm-live-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 12px 0; padding: 10px; background: rgba(0,0,0,.18); border-radius: var(--radius-sm); }
+.vm-live-grid b { font: .7rem 'JetBrains Mono', monospace; color: var(--text-main); white-space: nowrap; }
+.vm-rate-status { margin-top: 10px; color: var(--text-dim); font-size: .72rem; font-style: italic; }
+@media (max-width: 480px) { .vm-utilization, .vm-live-grid { grid-template-columns: 1fr; } }

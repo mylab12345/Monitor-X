@@ -10,6 +10,7 @@ import re
 import socket
 import shutil
 import time
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,11 @@ last_net_io = None
 last_net_time = None
 last_disk_io = None
 last_disk_time = None
+
+# Libvirt counters are cumulative. Keep one prior sample per domain to calculate
+# instantaneous CPU, disk, and network rates.
+vm_metric_samples: Dict[str, Dict[str, float]] = {}
+vm_metrics_lock = asyncio.Lock()
 
 # Initialize NVML if available
 if NVML_AVAILABLE:
@@ -422,41 +428,116 @@ async def get_system_info() -> Dict[str, Any]:
 
 
 async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
-    """Get VM statistics using libvirt"""
+    """Return libvirt domain inventory and live metrics for running KVM guests.
+
+    Libvirt exposes CPU time and I/O counters cumulatively, therefore rates are
+    derived from two successive samples. Values are zero on the first poll.
+    """
     if not LIBVIRT_AVAILABLE or not libvirt_conn:
         return None
-    
-    vms = []
-    try:
-        for domain_id in libvirt_conn.listDomainsID():
-            domain = libvirt_conn.lookupByID(domain_id)
-            info = domain.info()
-            
-            state_map = {
-                libvirt.VIR_DOMAIN_NOSTATE: "no_state",
-                libvirt.VIR_DOMAIN_RUNNING: "running",
-                libvirt.VIR_DOMAIN_BLOCKED: "blocked",
-                libvirt.VIR_DOMAIN_PAUSED: "paused",
-                libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown",
-                libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
-                libvirt.VIR_DOMAIN_CRASHED: "crashed",
-                libvirt.VIR_DOMAIN_PMSUSPENDED: "pmsuspended"
-            }
-            
-            vms.append({
-                "id": domain_id,
-                "name": domain.name(),
-                "state": state_map.get(info[0], "unknown"),
-                "cpu_time": info[4],
-                "max_memory": info[1],
-                "memory": info[2],
-                "vcpus": info[3]
-            })
-    except Exception as e:
-        logger.error(f"Error getting VM stats: {e}")
-        return None
-    
-    return vms if vms else None
+
+    state_map = {
+        libvirt.VIR_DOMAIN_NOSTATE: "no_state", libvirt.VIR_DOMAIN_RUNNING: "running",
+        libvirt.VIR_DOMAIN_BLOCKED: "blocked", libvirt.VIR_DOMAIN_PAUSED: "paused",
+        libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown", libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
+        libvirt.VIR_DOMAIN_CRASHED: "crashed", libvirt.VIR_DOMAIN_PMSUSPENDED: "pmsuspended",
+    }
+    async with vm_metrics_lock:
+        now = time.monotonic()
+        try:
+            domains = libvirt_conn.listAllDomains(0)
+        except Exception as exc:
+            logger.warning("Could not list libvirt domains: %s", exc)
+            return None
+
+        vms: List[Dict[str, Any]] = []
+        active_domain_ids = set()
+        for domain in domains:
+            try:
+                info = domain.info()  # state, maxMem KiB, memory KiB, vCPUs, cpuTime ns
+                state = state_map.get(info[0], "unknown")
+                domain_id = domain.ID() if domain.isActive() else -1
+                vm: Dict[str, Any] = {
+                    "id": domain_id, "uuid": domain.UUIDString(), "name": domain.name(),
+                    "state": state, "active": bool(domain.isActive()), "vcpus": info[3],
+                    "max_memory": info[1], "memory": info[2], "cpu_time": info[4],
+                    "cpu_percent": 0.0, "memory_used": 0, "memory_total": info[1],
+                    "memory_percent": 0.0, "disk_read_bytes_sec": 0.0,
+                    "disk_write_bytes_sec": 0.0, "network_rx_bytes_sec": 0.0,
+                    "network_tx_bytes_sec": 0.0, "rates_available": False,
+                    "disks": [], "interfaces": [],
+                }
+                if not vm["active"]:
+                    vms.append(vm)
+                    continue
+
+                active_domain_ids.add(vm["uuid"])
+                memory = domain.memoryStats()
+                memory_total = memory.get("actual", info[1]) or info[1]
+                # rss is the best guest-used figure when the balloon driver reports it.
+                memory_used = memory.get("rss", memory.get("actual", info[2]))
+                if "unused" in memory and "actual" in memory:
+                    memory_used = max(memory_used, memory["actual"] - memory["unused"])
+                vm.update({
+                    "memory_used": memory_used, "memory_total": memory_total,
+                    "memory_percent": round((memory_used / memory_total * 100) if memory_total else 0, 1),
+                })
+
+                disk_read = disk_write = net_rx = net_tx = 0
+                try:
+                    root = ET.fromstring(domain.XMLDesc(0))
+                    disk_targets = [node.get("dev") for node in root.findall("./devices/disk/target") if node.get("dev")]
+                    interface_targets = [node.get("dev") for node in root.findall("./devices/interface/target") if node.get("dev")]
+                except ET.ParseError:
+                    disk_targets, interface_targets = [], []
+
+                for target in disk_targets:
+                    try:
+                        stats = domain.blockStats(target)
+                        # rd_req, rd_bytes, wr_req, wr_bytes, errs
+                        read_bytes, write_bytes = stats[1], stats[3]
+                        disk_read += read_bytes
+                        disk_write += write_bytes
+                        try:
+                            capacity, allocation, _ = domain.blockInfo(target, 0)
+                        except Exception:
+                            capacity, allocation = 0, 0
+                        vm["disks"].append({"target": target, "read_bytes": read_bytes, "write_bytes": write_bytes,
+                                            "capacity": capacity, "allocation": allocation})
+                    except Exception:
+                        continue
+                for target in interface_targets:
+                    try:
+                        stats = domain.interfaceStats(target)
+                        # rx_bytes, rx_packets, rx_errs, rx_drop, tx_bytes, ...
+                        rx_bytes, tx_bytes = stats[0], stats[4]
+                        net_rx += rx_bytes
+                        net_tx += tx_bytes
+                        vm["interfaces"].append({"target": target, "rx_bytes": rx_bytes, "tx_bytes": tx_bytes})
+                    except Exception:
+                        continue
+
+                previous = vm_metric_samples.get(vm["uuid"])
+                if previous:
+                    elapsed = now - previous["time"]
+                    if elapsed > 0:
+                        vm["cpu_percent"] = round(min(100, max(0, (info[4] - previous["cpu_time"]) / elapsed / 1e7 / max(info[3], 1))), 1)
+                        vm["disk_read_bytes_sec"] = round(max(0, (disk_read - previous["disk_read"]) / elapsed), 1)
+                        vm["disk_write_bytes_sec"] = round(max(0, (disk_write - previous["disk_write"]) / elapsed), 1)
+                        vm["network_rx_bytes_sec"] = round(max(0, (net_rx - previous["net_rx"]) / elapsed), 1)
+                        vm["network_tx_bytes_sec"] = round(max(0, (net_tx - previous["net_tx"]) / elapsed), 1)
+                        vm["rates_available"] = True
+                vm_metric_samples[vm["uuid"]] = {"time": now, "cpu_time": info[4], "disk_read": disk_read,
+                                                    "disk_write": disk_write, "net_rx": net_rx, "net_tx": net_tx}
+                vms.append(vm)
+            except Exception as exc:
+                logger.warning("Could not collect metrics for a libvirt domain: %s", exc)
+
+        # Discard counters for guests that were stopped or removed.
+        for domain_uuid in list(vm_metric_samples):
+            if domain_uuid not in active_domain_ids:
+                vm_metric_samples.pop(domain_uuid, None)
+        return vms
 
 
 async def collect_all_stats() -> SystemStats:
