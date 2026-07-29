@@ -9,7 +9,7 @@
 | Fact | Value |
 |------|-------|
 | **What** | Real-time Linux server monitoring dashboard (self-hosted, no auth) |
-| **Version** | v2.0 PRO |
+| **Version** | v2.2 (NASA Mission-Control theme) |
 | **Port** | 8080 (`0.0.0.0`) |
 | **Backend** | Python 3.12 + FastAPI + Uvicorn + WebSockets |
 | **Frontend** | Vanilla JS (no framework) + CSS Glassmorphism + HTML5 Canvas sparklines |
@@ -27,11 +27,14 @@ MonitorX/
 │   ├── main.py              # ~2940 lines — ENTIRE BACKEND (single file)
 │   └── requirements.txt     # Points to ../requirements.txt
 ├── frontend/
-│   ├── index.html           # ~735 lines — Full dashboard HTML
+│   ├── index.html           # ~745 lines — Full dashboard HTML
 │   ├── css/
-│   │   └── styles.css       # ~1580 lines — All styling (glassmorphism dark/light)
+│   │   ├── styles.css       # ~1580 lines — All styling (glassmorphism dark/light)
+│   │   ├── modern-overrides.css # Progressive enhancement layer
+│   │   └── nasa-theme.css   # v2.2 — NASA mission-control HUD theme
 │   └── js/
-│       └── app.js           # ~2400 lines — All frontend logic
+│       ├── app.js           # ~2400 lines — All frontend logic
+│       └── nasa-enhance.js  # v2.2 — MET/UTC clocks, telemetry ticker, boot seq
 ├── systemd/
 │   ├── monitorx.service     # Systemd unit file
 │   └── install-service.sh   # Installer with sudoers policies
@@ -70,7 +73,7 @@ py3nvml==0.2.7
 - xterm.js 5.5.0 — VM console terminal
 - @xterm/addon-fit — Terminal auto-fit
 - @xterm/addon-web-links — Clickable links in terminal
-- Google Fonts (Inter + JetBrains Mono)
+- Google Fonts (Inter + JetBrains Mono + Orbitron for HUD headings)
 
 ---
 
@@ -208,9 +211,20 @@ renderVmContainers(data)    // Per-VM container chips
 
 ### Design System
 - Glassmorphism dark theme (default) + light theme toggle
-- CSS custom properties for all colors (`--accent-blue`, `--success`, `--danger`, etc.)
-- Fonts: Inter (UI) + JetBrains Mono (code/metrics)
+- **v2.2 NASA mission-control theme** (`nasa-theme.css`, loaded last): deep-space palette, HUD corner brackets on every panel, CRT scanlines + drifting starfield/grid overlay, MET/UTC clocks, live telemetry ticker, radar-sweep health gauge, flight-control boot sequence
+- CSS custom properties for all colors (`--accent-blue`, `--success`, `--danger`, etc.); NASA theme overrides these to a telemetry spectrum
+- Fonts: Inter (UI) + JetBrains Mono (code/metrics) + Orbitron (HUD headings)
 - Responsive: mobile breakpoint at 768px
+
+### NASA Theme Files (v2.2)
+```css
+nasa-theme.css   // Full visual overhaul: palette, HUD brackets, scanlines, grids,
+                 //   ticker, boot, radar gauge. Loaded AFTER styles.css + modern-overrides.css.
+nasa-enhance.js  // MET clock, UTC clock, telemetry ticker (reads app.js DOM values),
+                 //   flight-control boot sequence. Progressive enhancement, guards all nodes.
+```
+- Overlay `.nasa-overlay` (z-index 40, pointer-events none) sits below header(100)/tabs(90)/modals(200).
+- All original IDs/classes preserved so `app.js` is untouched. Theme toggle still switches to a "clean-room" light variant.
 
 ### Key CSS Classes
 ```css
@@ -309,7 +323,16 @@ POST /api/services/{name}/{action}  // start/stop/restart/reload/enable/disable
 
 ## File Change Log
 
-### v2.1 (Latest — 2026-07-29)
+### v2.2 (Latest — 2026-07-29) — NASA MISSION-CONTROL THEME
+**Added**: Full flight-control / mission-control HUD re-skin of the existing dashboard. No backend or app.js changes — pure progressive enhancement.
+
+**Files changed**:
+- `frontend/css/nasa-theme.css`: NEW (~470 lines) — deep-space palette, HUD corner brackets on all panels, CRT scanlines + drifting starfield/grid overlay, vignette, radar-sweep health gauge, MET/UTC mission readout, live telemetry ticker, flight-control boot sequence, glow/telemetry typography (Orbitron headings, mono data).
+- `frontend/js/nasa-enhance.js`: NEW (~150 lines) — MET clock (T+ elapsed), UTC clock, live telemetry marquee (reads values rendered by app.js), datalink status relabel, boot sequence with failsafe auto-fade.
+- `frontend/index.html`: +overlay/boot markup, +Orbitron font link, +`nasa-theme.css` link, +MET/UTC readout in header, +telemetry ticker strip in main content, +`nasa-enhance.js` script.
+- `.opencode/MEMORY.md`: documented v2.2 + theme architecture.
+
+### v2.1 (Previous — 2026-07-29)
 **Added**: VM Console access, VM CPU/RAM Resize, Docker container monitoring, Kubernetes pod monitoring, per-VM container monitoring via SSH
 
 **Files changed**:

@@ -1,0 +1,620 @@
+/* ============================================================================
+   MonitorX — NASA MISSION CONTROL THEME (v2.2)
+   Progressive enhancement layer loaded AFTER styles.css + modern-overrides.css
+   Transforms the dashboard into a flight-control / mission-control HUD.
+   All existing selectors and IDs are preserved; this only restyles + adds FX.
+   ============================================================================ */
+
+:root {
+    /* ── Deep-space mission-control palette ───────────────────────────────── */
+    --bg-base:        #03060e;            /* near-black space navy            */
+    --bg-surface:     #060c18;
+    --bg-card:        rgba(9, 17, 31, 0.72);
+    --bg-card-hover:  rgba(15, 27, 47, 0.86);
+    --bg-header:      rgba(5, 10, 20, 0.92);
+    --bg-input:       rgba(6, 13, 25, 0.92);
+
+    --border-card:    rgba(86, 166, 222, 0.16);
+    --border-hover:   rgba(74, 205, 255, 0.6);
+
+    --text-main:      #d8e7f6;
+    --text-muted:     #6f95b6;
+    --text-dim:       #43607a;
+
+    /* Telemetry accent spectrum (cyan / indigo / violet / amber / status) */
+    --accent-blue:    #38c6ff;
+    --accent-indigo:  #6ea8ff;
+    --accent-purple:  #b388ff;
+    --accent-glow:    rgba(56, 198, 255, 0.30);
+
+    --success:        #25e6a0;
+    --success-glow:   rgba(37, 230, 160, 0.30);
+    --success-bg:     rgba(37, 230, 160, 0.12);
+
+    --warning:        #ffb020;
+    --warning-glow:   rgba(255, 176, 32, 0.30);
+    --warning-bg:     rgba(255, 176, 32, 0.12);
+
+    --danger:         #ff4d5e;
+    --danger-glow:    rgba(255, 77, 94, 0.30);
+    --danger-bg:      rgba(255, 77, 94, 0.12);
+
+    /* NASA-specific helpers */
+    --nasa-line:      rgba(96, 200, 255, 0.85);
+    --nasa-amber:     #ffb000;
+    --nasa-grid:      rgba(56, 198, 255, 0.05);
+    --nasa-star:      rgba(180, 220, 255, 0.5);
+
+    --radius-lg: 14px;
+    --radius-md: 9px;
+    --radius-sm: 6px;
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(120, 200, 255, 0.25);
+    --shadow-glow: 0 0 22px rgba(56, 198, 255, 0.30);
+
+    --font-hud: 'Orbitron', 'Inter', system-ui, sans-serif;
+}
+
+/* Light "clean-room" daylight variant (still technical) */
+body.light-theme {
+    --bg-base:        #dde6f0;
+    --bg-surface:     #ffffff;
+    --bg-card:        rgba(255, 255, 255, 0.78);
+    --bg-card-hover:  #ffffff;
+    --bg-header:      rgba(255, 255, 255, 0.9);
+    --bg-input:       #eef3f9;
+    --border-card:    rgba(20, 60, 100, 0.14);
+    --border-hover:   rgba(20, 120, 200, 0.5);
+    --text-main:      #0c1c30;
+    --text-muted:     #41617e;
+    --text-dim:       #7b94ab;
+    --accent-blue:    #0a83c4;
+    --accent-glow:    rgba(10, 131, 196, 0.25);
+    --nasa-line:      rgba(10, 110, 180, 0.8);
+}
+
+/* ───────────────────────────  GLOBAL FX OVERLAY  ────────────────────────── */
+.nasa-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+/* faint drifting starfield */
+.nasa-grid {
+    position: absolute;
+    inset: -50%;
+    background-image:
+        radial-gradient(circle at 20% 30%, var(--nasa-star) 0 0.6px, transparent 1px),
+        radial-gradient(circle at 70% 60%, var(--nasa-star) 0 0.5px, transparent 1px),
+        radial-gradient(circle at 45% 85%, var(--nasa-star) 0 0.5px, transparent 1px),
+        radial-gradient(circle at 88% 22%, var(--nasa-star) 0 0.4px, transparent 1px),
+        linear-gradient(var(--nasa-grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--nasa-grid) 1px, transparent 1px);
+    background-size: 240px 240px, 300px 300px, 180px 180px, 260px 260px, 44px 44px, 44px 44px;
+    opacity: 0.55;
+    animation: nasa-starfield 120s linear infinite;
+}
+
+/* CRT scanlines */
+.nasa-scanline {
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+        to bottom,
+        rgba(120, 200, 255, 0.035) 0px,
+        rgba(120, 200, 255, 0.035) 1px,
+        transparent 2px,
+        transparent 4px
+    );
+    opacity: 0.55;
+}
+
+/* slow bright sweep line travelling down the screen */
+.nasa-scanline::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 140px;
+    background: linear-gradient(to bottom,
+        transparent,
+        rgba(56, 198, 255, 0.06) 45%,
+        rgba(56, 198, 255, 0.12) 50%,
+        rgba(56, 198, 255, 0.06) 55%,
+        transparent);
+    animation: nasa-sweep-line 7s linear infinite;
+}
+
+/* corner vignette to focus the eye toward center */
+.nasa-vignette {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0, 0, 0, 0.45) 100%);
+}
+
+body.light-theme .nasa-overlay { display: none; }
+
+@keyframes nasa-starfield { from { transform: translate3d(0,0,0); } to { transform: translate3d(-44px, -44px, 0); } }
+@keyframes nasa-sweep-line { from { top: -160px; } to { top: 100%; } }
+
+/* ───────────────────────────  BACKGROUND + BODY  ────────────────────────── */
+body {
+    background:
+        radial-gradient(circle at 12% 8%, rgba(56, 198, 255, 0.10) 0px, transparent 38%),
+        radial-gradient(circle at 88% 92%, rgba(129, 140, 248, 0.10) 0px, transparent 40%),
+        radial-gradient(circle at 50% 120%, rgba(37, 230, 160, 0.05) 0px, transparent 45%),
+        var(--bg-base);
+    background-attachment: fixed;
+}
+
+/* ───────────────────────────  HEADER / FLIGHT DECK  ─────────────────────── */
+.app-header {
+    background: linear-gradient(180deg, rgba(8, 16, 30, 0.96), rgba(5, 10, 20, 0.86));
+    border-bottom: 1px solid rgba(86, 166, 222, 0.28);
+    box-shadow: 0 1px 0 rgba(56, 198, 255, 0.25), 0 12px 30px -18px rgba(0, 0, 0, 0.9);
+}
+
+.logo {
+    font-family: var(--font-hud);
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-shadow: 0 0 18px rgba(56, 198, 255, 0.45);
+}
+
+.version-tag {
+    font-family: var(--font-hud);
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    border-color: rgba(56, 198, 255, 0.4);
+    color: var(--accent-blue);
+}
+
+.logo-icon {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border: 1px solid rgba(56, 198, 255, 0.35);
+    border-radius: 9px;
+    background: linear-gradient(145deg, rgba(56, 198, 255, 0.2), rgba(129, 140, 248, 0.14));
+    box-shadow: inset 0 0 10px rgba(56, 198, 255, 0.25), 0 0 14px rgba(56, 198, 255, 0.2);
+}
+
+/* MET + UTC mission readout */
+.mission-readout {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 4px 14px;
+    border-left: 1px solid var(--border-card);
+    border-right: 1px solid var(--border-card);
+    margin-right: 4px;
+}
+.met-clock, .utc-clock {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    font-family: var(--font-hud);
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--accent-blue);
+    letter-spacing: 0.06em;
+}
+.met-label, .utc-label {
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: var(--text-dim);
+    letter-spacing: 0.18em;
+}
+.utc-clock { color: var(--text-muted); }
+#met-clock, #utc-clock { font-variant-numeric: tabular-nums; text-shadow: 0 0 10px rgba(56, 198, 255, 0.35); }
+
+.status-indicator { font-family: var(--font-hud); letter-spacing: 0.05em; }
+.status-dot.connected { box-shadow: 0 0 12px var(--success), 0 0 4px var(--success); }
+
+/* pulsing ring around connected status dot */
+.status-dot.connected::after {
+    content: '';
+    position: absolute;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    border: 1px solid var(--success);
+    animation: nasa-ring 2s ease-out infinite;
+}
+@keyframes nasa-ring {
+    0% { transform: scale(1); opacity: 0.8; }
+    100% { transform: scale(2.6); opacity: 0; }
+}
+
+/* ───────────────────────────  TAB NAV  ──────────────────────────────────── */
+.tab-nav {
+    background: linear-gradient(180deg, rgba(7, 13, 24, 0.96), rgba(5, 10, 20, 0.9));
+    border-bottom: 1px solid rgba(86, 166, 222, 0.2);
+}
+.tab-btn {
+    font-family: var(--font-hud);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+}
+.tab-btn:hover { color: var(--text-main); }
+.tab-btn.active {
+    color: var(--accent-blue);
+    text-shadow: 0 0 14px var(--accent-glow);
+    background: linear-gradient(180deg, rgba(56, 198, 255, 0.08), transparent);
+}
+.tab-btn.highlight-tab.active {
+    color: var(--accent-purple);
+    text-shadow: 0 0 14px rgba(179, 136, 255, 0.4);
+}
+.tab-icon { filter: drop-shadow(0 0 6px currentColor); }
+
+/* ───────────────────────────  HUD CORNER BRACKETS  ──────────────────────── */
+/* Draws 4 corner brackets on every key panel using 8 gradient fragments. */
+.metric-card, .chart-card, .issues-panel, .top-processes, .table-container,
+.troubleshoot-header-card, .troubleshoot-card, .check-card,
+.vm-card, .container-card, .containers-panel, .pods-panel, .vm-audit-panel,
+.modal-content, .logs-window, .terminal-box {
+    position: relative;
+}
+
+.metric-card::before, .chart-card::before, .issues-panel::before,
+.top-processes::before, .table-container::before, .troubleshoot-header-card::before,
+.troubleshoot-card::before, .check-card::before, .vm-card::before,
+.container-card::before, .containers-panel::before, .pods-panel::before,
+.vm-audit-panel::before, .modal-content::before {
+    content: '';
+    position: absolute;
+    inset: 6px;
+    pointer-events: none;
+    z-index: 3;
+    opacity: 0.7;
+    background:
+        linear-gradient(var(--nasa-line), var(--nasa-line)) left   top    / 14px 2px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) left   top    / 2px 14px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) right  top    / 14px 2px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) right  top    / 2px 14px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) left   bottom / 14px 2px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) left   bottom / 2px 14px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) right  bottom / 14px 2px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) right  bottom / 2px 14px no-repeat;
+}
+
+/* vertical accent rail on the left edge of metric cards (mission-panel feel) */
+.metric-card::after, .chart-card::after, .troubleshoot-card::after, .vm-card:not(.pending)::after {
+    content: '';
+    position: absolute;
+    left: 0; top: 14px; bottom: 14px;
+    width: 2px;
+    border-radius: 2px;
+    background: linear-gradient(180deg, transparent, var(--accent-blue), transparent);
+    box-shadow: 0 0 10px var(--accent-glow);
+    opacity: 0.6;
+    pointer-events: none;
+    z-index: 2;
+}
+
+/* HUD-style uppercase section headings */
+.card-header h2, .scorecard-text h2, .vms-header h2, .modal-header h3,
+.troubleshoot-card h3, .vm-kpi-label, .container-header-actions .badge,
+.nasa-ticker-tag {
+    font-family: var(--font-hud);
+}
+
+.card-header h2 {
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    color: var(--text-muted);
+}
+.card-header h2::before {
+    content: '▸ ';
+    color: var(--accent-blue);
+}
+
+/* metric values glow like seven-seg telemetry */
+.metric-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    text-shadow: 0 0 16px rgba(56, 198, 255, 0.4);
+    letter-spacing: -0.02em;
+}
+
+/* ───────────────────────────  CHARTS / SPARKLINES  ──────────────────────── */
+.chart-card { border-color: rgba(86, 166, 222, 0.18); }
+.chart-header {
+    font-family: var(--font-hud);
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+canvas { filter: drop-shadow(0 0 6px rgba(56, 198, 255, 0.25)); border-radius: 4px; }
+
+/* ───────────────────────────  BUTTONS / INPUTS  ─────────────────────────── */
+.btn, .btn-icon, .tab-btn, .filter-select, .search-input {
+    letter-spacing: 0.03em;
+}
+.btn-primary {
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-indigo));
+    box-shadow: 0 0 18px rgba(56, 198, 255, 0.35);
+}
+.btn-primary:hover { box-shadow: 0 0 26px rgba(56, 198, 255, 0.55); }
+.glow-btn {
+    font-family: var(--font-hud);
+    letter-spacing: 0.06em;
+    box-shadow: 0 0 26px rgba(56, 198, 255, 0.45);
+}
+.search-input, .filter-select {
+    border-color: rgba(86, 166, 222, 0.22);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+}
+.search-input:focus, .filter-select:focus {
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 14px var(--accent-glow);
+}
+
+/* ───────────────────────────  TABLES  ───────────────────────────────────── */
+.data-table th {
+    font-family: var(--font-hud);
+    font-size: 0.66rem;
+    letter-spacing: 0.12em;
+    color: var(--text-muted);
+    background: rgba(4, 9, 18, 0.6);
+}
+.data-table td { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+.data-table tbody tr:hover { background: rgba(56, 198, 255, 0.06); }
+.data-table tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.018); }
+
+/* ───────────────────────────  HEALTH GAUGE (radar)  ─────────────────────── */
+.health-gauge { position: relative; }
+.circular-chart { position: relative; z-index: 3; }
+.health-gauge::before {
+    content: '';
+    position: absolute;
+    inset: 5px;
+    border-radius: 50%;
+    z-index: 1;
+    background: repeating-radial-gradient(circle at center,
+        rgba(56, 198, 255, 0.14) 0 1px, transparent 1px 13px);
+    pointer-events: none;
+}
+.health-gauge::after {
+    content: '';
+    position: absolute;
+    inset: 5px;
+    border-radius: 50%;
+    z-index: 2;
+    background: conic-gradient(from 0deg,
+        transparent 0deg,
+        transparent 285deg,
+        rgba(56, 198, 255, 0.04) 320deg,
+        rgba(56, 198, 255, 0.5) 356deg,
+        transparent 360deg);
+    mix-blend-mode: screen;
+    animation: nasa-sweep 3.6s linear infinite;
+    pointer-events: none;
+}
+.scorecard-text h2 { font-family: var(--font-hud); letter-spacing: 0.04em; }
+.percentage { font-size: 0.7em; text-shadow: 0 0 14px rgba(56, 198, 255, 0.4); }
+
+@keyframes nasa-sweep { to { transform: rotate(360deg); } }
+
+/* ───────────────────────────  SUB-TABS / PILLS  ─────────────────────────── */
+.sub-tab-btn {
+    font-family: var(--font-hud);
+    font-size: 0.74rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.sub-tab-btn.active {
+    box-shadow: 0 0 18px rgba(56, 198, 255, 0.4);
+}
+.pill, .badge { font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em; }
+
+/* ───────────────────────────  PROGRESS / BARS  ──────────────────────────── */
+.progress-fill {
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-indigo));
+    box-shadow: 0 0 12px var(--accent-glow);
+}
+.cpu-bar-fill { box-shadow: 0 0 8px rgba(56, 198, 255, 0.4); }
+.cpu-bar-fill.warning { box-shadow: 0 0 8px rgba(255, 176, 32, 0.5); }
+.cpu-bar-fill.danger  { box-shadow: 0 0 8px rgba(255, 77, 94, 0.5); }
+
+/* ───────────────────────────  VM / CONTAINER STATES  ────────────────────── */
+.vm-state::before { box-shadow: 0 0 8px currentColor; }
+.vm-kpi b { text-shadow: 0 0 14px currentColor; }
+.vm-kpi-label { letter-spacing: 0.12em; }
+
+/* ───────────────────────────  LOGS / TERMINAL  ──────────────────────────── */
+.logs-window, .terminal-box {
+    background: #02060e;
+    box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.8);
+    border-color: rgba(86, 166, 222, 0.2);
+}
+.cmd-output { text-shadow: 0 0 8px rgba(37, 230, 160, 0.35); }
+.log-line { text-shadow: 0 0 6px currentColor; }
+
+/* ───────────────────────────  TOASTS  ───────────────────────────────────── */
+.toast {
+    font-family: var(--font-hud);
+    letter-spacing: 0.03em;
+    border-width: 1px;
+}
+.toast.success { box-shadow: 0 0 22px rgba(37, 230, 160, 0.4); }
+.toast.error   { box-shadow: 0 0 22px rgba(255, 77, 94, 0.4); }
+.toast.info    { box-shadow: 0 0 22px rgba(56, 198, 255, 0.4); }
+
+/* ───────────────────────────  LIVE TELEMETRY TICKER  ────────────────────── */
+.nasa-ticker {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin: 0 0 20px;
+    height: 38px;
+    border: 1px solid rgba(86, 166, 222, 0.22);
+    border-radius: var(--radius-md);
+    background: linear-gradient(90deg, rgba(8, 16, 30, 0.9), rgba(6, 12, 22, 0.7));
+    overflow: hidden;
+    box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.6);
+    position: relative;
+}
+.nasa-ticker::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 90px;
+    background: linear-gradient(90deg, rgba(56, 198, 255, 0.18), transparent);
+    pointer-events: none;
+    z-index: 2;
+}
+.nasa-ticker-tag {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    height: 100%;
+    padding: 0 16px;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    color: #03060e;
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-indigo));
+    text-shadow: none;
+    z-index: 3;
+}
+.nasa-ticker-viewport {
+    flex: 1;
+    overflow: hidden;
+    height: 100%;
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+            mask-image: linear-gradient(90deg, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+}
+.nasa-ticker-track {
+    display: inline-flex;
+    align-items: center;
+    height: 100%;
+    white-space: nowrap;
+    animation: nasa-marquee 32s linear infinite;
+    will-change: transform;
+}
+.nasa-ticker:hover .nasa-ticker-track { animation-play-state: paused; }
+.tk {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 22px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    border-right: 1px solid rgba(86, 166, 222, 0.12);
+}
+.tk b {
+    color: var(--accent-blue);
+    font-family: var(--font-hud);
+    font-size: 0.62rem;
+    letter-spacing: 0.14em;
+    font-weight: 700;
+}
+@keyframes nasa-marquee {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-50%); }
+}
+
+/* ───────────────────────────  FOOTER  ───────────────────────────────────── */
+.app-footer {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    border-top: 1px solid rgba(86, 166, 222, 0.2);
+}
+.app-footer span:nth-child(1) {
+    color: var(--accent-blue);
+    font-family: var(--font-hud);
+    letter-spacing: 0.1em;
+}
+
+/* ───────────────────────────  BOOT SEQUENCE  ────────────────────────────── */
+.nasa-boot {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+        radial-gradient(circle at 50% 40%, rgba(8, 20, 40, 0.9), rgba(2, 5, 12, 0.98)),
+        var(--bg-base);
+    pointer-events: none;
+    transition: opacity 0.6s ease;
+}
+.nasa-boot.done { opacity: 0; }
+/* safety fallback: auto-fade even if JS fails to remove the node */
+.nasa-boot { animation: nasa-boot-failsafe 0.01s linear 4s forwards; }
+@keyframes nasa-boot-failsafe { to { opacity: 0; } }
+
+.nasa-boot-inner {
+    text-align: center;
+    width: min(420px, 80vw);
+}
+.nasa-boot-emblem {
+    font-size: 2.6rem;
+    color: var(--accent-blue);
+    text-shadow: 0 0 24px rgba(56, 198, 255, 0.6);
+    animation: nasa-ring-pulse 1.6s ease-in-out infinite;
+}
+.nasa-boot-logo {
+    font-family: var(--font-hud);
+    font-weight: 800;
+    letter-spacing: 0.3em;
+    font-size: 1.05rem;
+    color: var(--text-main);
+    margin: 14px 0 22px;
+    text-shadow: 0 0 18px rgba(56, 198, 255, 0.4);
+}
+.nasa-boot-bar {
+    height: 4px;
+    border-radius: 4px;
+    background: rgba(56, 198, 255, 0.12);
+    overflow: hidden;
+    border: 1px solid rgba(86, 166, 222, 0.3);
+}
+.nasa-boot-bar i {
+    display: block;
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-indigo));
+    box-shadow: 0 0 12px var(--accent-glow);
+    transition: width 0.35s ease;
+}
+.nasa-boot-status {
+    margin-top: 14px;
+    font-family: var(--font-hud);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    color: var(--text-muted);
+}
+@keyframes nasa-ring-pulse {
+    0%, 100% { transform: scale(1); opacity: 0.85; }
+    50%      { transform: scale(1.12); opacity: 1; }
+}
+
+/* ───────────────────────────  RESPONSIVE TWEAKS  ────────────────────────── */
+@media (max-width: 768px) {
+    .mission-readout { padding: 2px 8px; }
+    .met-clock, .utc-clock { font-size: 0.72rem; }
+    .nasa-ticker { height: 34px; }
+    .nasa-ticker-tag { padding: 0 10px; font-size: 0.58rem; }
+}
+@media (max-width: 480px) {
+    .mission-readout { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .nasa-grid, .nasa-scanline::after, .health-gauge::after, .nasa-ticker-track,
+    .status-dot.connected::after, .nasa-boot-emblem { animation: none !important; }
+}
