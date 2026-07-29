@@ -1,12 +1,13 @@
 /* MonitorX v2.0 - Application Logic */
 const API_BASE = '';
-const WS_URL = `ws://${window.location.host}/ws`;
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 
 let ws = null;
-let reconnectInterval = null;
+let reconnectTimer = null;
 let statsData = null;
 let autoTailInterval = null;
 let healthData = null;
+let serviceCapabilities = null;
 
 // History buffer for sparkline charts (last 30 samples)
 const historyBuffer = {
@@ -55,44 +56,40 @@ function showToast(message, type = 'info') {
     }, 4000);
 }
 
-function escapeHtml(text) {
-    if (!text) return '';
+function escapeHtml(value) {
     const div = document.createElement('div');
-    div.textContent = text;
+    div.textContent = String(value ?? '');
     return div.innerHTML;
 }
 
 /* WebSocket Connection */
 function connectWebSocket() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
         document.getElementById('ws-status').className = 'status-indicator';
         document.getElementById('ws-status-text').textContent = 'Connected';
         document.querySelector('.status-dot').className = 'status-dot connected';
-        if (reconnectInterval) { clearInterval(reconnectInterval); reconnectInterval = null; }
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     };
-
     ws.onmessage = (event) => {
         try {
             statsData = JSON.parse(event.data);
             updateDashboard(statsData);
             updateLastUpdate();
-        } catch (e) {
-            console.error('Error parsing WebSocket frame:', e);
-        }
+        } catch (e) { console.error('Error parsing WebSocket frame:', e); }
     };
-
     ws.onclose = () => {
         document.querySelector('.status-dot').className = 'status-dot disconnected';
         document.getElementById('ws-status-text').textContent = 'Disconnected';
-        if (!reconnectInterval) {
-            reconnectInterval = setInterval(() => {
+        if (!reconnectTimer) {
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
                 connectWebSocket();
             }, 3000);
         }
     };
-
     ws.onerror = (err) => {
         console.error('WebSocket error:', err);
         ws.close();
@@ -113,9 +110,8 @@ function updateDashboard(data) {
     checkOSIssues(data);
     updateCharts(data);
 
-    if (state.currentTab === 'processes') {
-        filterProcesses();
-    }
+    if (state.currentTab === 'processes') filterProcesses();
+    if (state.currentTab === 'vms' && data.vms) renderVms(data.vms);
 }
 
 function updateCpu(cpu) {
@@ -166,7 +162,7 @@ function updateDisk(disk) {
         const item = document.createElement('div');
         item.className = 'disk-item';
         item.innerHTML = `
-            <span><b>${p.mountpoint}</b> (${p.fstype})</span>
+            <span><b>${escapeHtml(p.mountpoint)}</b> (${escapeHtml(p.fstype)})</span>
             <span><b>${p.percent.toFixed(1)}%</b> (${formatBytes(p.used)} / ${formatBytes(p.total)})</span>
         `;
         list.appendChild(item);
@@ -191,7 +187,7 @@ function updateNetwork(net) {
         const item = document.createElement('div');
         item.className = 'net-item';
         item.innerHTML = `
-            <span><b>${name}</b></span>
+            <span><b>${escapeHtml(name)}</b></span>
             <span>↓ ${formatBytes(stats.bytes_recv)} | ↑ ${formatBytes(stats.bytes_sent)}</span>
         `;
         list.appendChild(item);
@@ -211,7 +207,7 @@ function updateGpu(gpus) {
         html += `
             <div class="gpu-item">
                 <div class="gpu-item-header">
-                    <span>${gpu.name}</span>
+                    <span>${escapeHtml(gpu.name)}</span>
                     <span>${gpu.temperature}°C</span>
                 </div>
                 <div class="gpu-bars">
@@ -236,12 +232,12 @@ function updateSystem(sys) {
     if (!sys) return;
     const info = document.getElementById('system-info');
     info.innerHTML = `
-        <span><span>Hostname:</span><b>${sys.hostname}</b></span>
-        <span><span>OS Platform:</span><b>${sys.platform} ${sys.platform_release}</b></span>
-        <span><span>Kernel Version:</span><b>${sys.platform_version.substring(0, 20)}</b></span>
-        <span><span>Architecture:</span><b>${sys.architecture}</b></span>
-        <span><span>Uptime:</span><b>${sys.uptime_str}</b></span>
-        <span><span>Boot Time:</span><b>${sys.boot_time}</b></span>
+        <span><span>Hostname:</span><b>${escapeHtml(sys.hostname)}</b></span>
+        <span><span>OS Platform:</span><b>${escapeHtml(sys.platform)} ${escapeHtml(sys.platform_release)}</b></span>
+        <span><span>Kernel Version:</span><b>${escapeHtml(sys.platform_version.substring(0, 20))}</b></span>
+        <span><span>Architecture:</span><b>${escapeHtml(sys.architecture)}</b></span>
+        <span><span>Uptime:</span><b>${escapeHtml(sys.uptime_str)}</b></span>
+        <span><span>Boot Time:</span><b>${escapeHtml(sys.boot_time)}</b></span>
     `;
     document.getElementById('hostname').textContent = sys.hostname;
     document.getElementById('uptime').textContent = 'Uptime: ' + sys.uptime_str;
@@ -256,12 +252,12 @@ function updateTopProcesses(processes) {
         row.style.cursor = 'pointer';
         row.innerHTML = `
             <td><b>${p.pid}</b></td>
-            <td>${p.name}</td>
+            <td>${escapeHtml(p.name)}</td>
             <td><b class="${p.cpu_percent > 50 ? 'text-danger' : ''}">${p.cpu_percent}%</b></td>
             <td>${p.memory_percent}%</td>
             <td>${p.memory_mb} MB</td>
-            <td><span class="badge ${p.status === 'running' ? 'badge-success' : 'badge-warning'}">${p.status}</span></td>
-            <td>${p.username}</td>
+            <td><span class="badge ${p.status === 'running' ? 'badge-success' : 'badge-warning'}">${escapeHtml(p.status)}</span></td>
+            <td>${escapeHtml(p.username)}</td>
             <td>${p.threads || 1}</td>
         `;
         row.addEventListener('click', () => showProcessDetail(p.pid));
@@ -326,7 +322,7 @@ function updateCharts(data) {
     historyBuffer.netTx.shift();
     historyBuffer.netTx.push((data.network?.tx_bytes_sec || 0) / 1024); // KB/s
 
-    document.getElementById('cpu-chart-val').textContent = `${data.cpu?.percent_total.toFixed(1)}%`;
+    document.getElementById('cpu-chart-val').textContent = `${Number(data.cpu?.percent_total || 0).toFixed(1)}%`;
     document.getElementById('mem-chart-val').textContent = `${data.memory?.percent}%`;
     document.getElementById('net-chart-val').textContent = `↓ ${formatSpeed(data.network?.rx_bytes_sec)} | ↑ ${formatSpeed(data.network?.tx_bytes_sec)}`;
 
@@ -416,14 +412,14 @@ async function showProcessDetail(pid) {
         body.innerHTML = `
             <div class="system-info" style="margin-bottom:14px;">
                 <span><span>Process PID:</span><b>${proc.pid}</b></span>
-                <span><span>Process Name:</span><b>${proc.name}</b></span>
-                <span><span>Execution State:</span><b>${proc.status}</b></span>
-                <span><span>User Owner:</span><b>${proc.username}</b></span>
+                <span><span>Process Name:</span><b>${escapeHtml(proc.name)}</b></span>
+                <span><span>Execution State:</span><b>${escapeHtml(proc.status)}</b></span>
+                <span><span>User Owner:</span><b>${escapeHtml(proc.username)}</b></span>
                 <span><span>CPU Usage:</span><b>${proc.cpu_percent}%</b></span>
                 <span><span>RAM Usage:</span><b>${proc.memory_percent}% (${proc.memory_info?.rss ? (proc.memory_info.rss/1024/1024).toFixed(1) : 0} MB)</b></span>
                 <span><span>Threads Count:</span><b>${proc.num_threads}</b></span>
                 <span><span>Open File Descriptors:</span><b>${proc.num_fds}</b></span>
-                <span><span>Launch Time:</span><b>${proc.create_time}</b></span>
+                <span><span>Launch Time:</span><b>${escapeHtml(proc.create_time)}</b></span>
             </div>
             <h4 style="margin-bottom:6px;font-size:0.85rem;color:var(--text-secondary);">Command Line Command</h4>
             <pre style="background:var(--bg-primary);padding:10px;border-radius:6px;font-size:0.8rem;border:1px solid var(--border);">${escapeHtml((proc.cmdline || []).join(' ') || proc.exe || proc.name)}</pre>
@@ -432,7 +428,7 @@ async function showProcessDetail(pid) {
             <h4 style="margin:12px 0 6px;font-size:0.85rem;color:var(--text-secondary);">Active Socket Connections (${proc.connections.length})</h4>
             <pre style="background:var(--bg-primary);padding:10px;border-radius:6px;font-size:0.75rem;max-height:140px;overflow-y:auto;border:1px solid var(--border);">${escapeHtml((proc.connections || []).map(c => `${c.status || 'CONNECTED'} ${c.laddr ? c.laddr.ip + ':' + c.laddr.port : ''} -> ${c.raddr ? c.raddr.ip + ':' + c.raddr.port : ''}`).join('\n') || 'No active sockets')}</pre>
             <div style="margin-top:16px;display:flex;justify-content:flex-end;">
-                <button class="btn btn-danger" onclick="killProcess(${proc.pid})">💀 Terminate Process (SIGKILL)</button>
+                <button class="btn btn-danger" onclick="killProcess(${proc.pid})">💀 Terminate Process</button>
             </div>
         `;
         modal.classList.add('show');
@@ -565,7 +561,7 @@ function renderHealthChecks(checks) {
         card.innerHTML = `
             <div>
                 <div class="check-card-header">
-                    <span class="check-card-title">${c.category}: ${c.name}</span>
+                    <span class="check-card-title">${escapeHtml(c.category)}: ${escapeHtml(c.name)}</span>
                     <span class="badge ${statusBadgeClass}">${statusIcon}</span>
                 </div>
                 <div class="check-card-val">${escapeHtml(c.value)}</div>
@@ -628,7 +624,7 @@ async function fetchLogs() {
             container.scrollTop = container.scrollHeight;
         }
     } catch (e) {
-        container.innerHTML = `<p class="issue-item danger">Error: ${e.message}</p>`;
+        container.innerHTML = `<p class="issue-item danger">Error: ${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -645,6 +641,7 @@ async function runPingTest() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ host, count: 4 })
         });
+        if (!res.ok) throw new Error(await readApiError(res));
         const data = await res.json();
 
         if (data.success) {
@@ -657,7 +654,7 @@ async function runPingTest() {
             resultsBox.innerHTML = `<div style="color:var(--danger)"><b>✗ Ping Failed to ${escapeHtml(host)}</b></div><pre style="font-size:0.75rem">${escapeHtml(data.raw_output || data.error)}</pre>`;
         }
     } catch (e) {
-        resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+        resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -675,6 +672,7 @@ async function runPortTest() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ host, port })
         });
+        if (!res.ok) throw new Error(await readApiError(res));
         const data = await res.json();
 
         if (data.open) {
@@ -683,7 +681,7 @@ async function runPortTest() {
             resultsBox.innerHTML = `<div style="color:var(--danger)"><b>✗ CLOSED / UNREACHABLE:</b> ${escapeHtml(data.message)}</div>`;
         }
     } catch (e) {
-        resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+        resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -700,6 +698,7 @@ async function runDnsTest() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ domain })
         });
+        if (!res.ok) throw new Error(await readApiError(res));
         const data = await res.json();
 
         let html = `<div><b>Domain:</b> ${escapeHtml(domain)}</div>`;
@@ -717,7 +716,7 @@ async function runDnsTest() {
 
         resultsBox.innerHTML = html;
     } catch (e) {
-        resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+        resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -741,14 +740,14 @@ async function fetchListeningPorts() {
             row.innerHTML = `
                 <td><b>${p.port}</b></td>
                 <td><span class="badge ${p.protocol === 'TCP' ? 'badge-success' : 'badge-warning'}">${p.protocol}</span></td>
-                <td>${p.ip}</td>
+                <td>${escapeHtml(p.ip)}</td>
                 <td>${p.pid || 'N/A'}</td>
-                <td><b>${p.process}</b></td>
+                <td><b>${escapeHtml(p.process)}</b></td>
             `;
             tbody.appendChild(row);
         });
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Error: ${e.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Error: ${escapeHtml(e.message)}</td></tr>`;
     }
 }
 
@@ -770,7 +769,7 @@ async function fetchBottlenecks() {
         // CPU Hogs
         cpuBox.innerHTML = (data.cpu_hogs || []).map(p => `
             <div class="disk-item" style="margin-bottom:6px;">
-                <span><b>${p.name}</b> (PID ${p.pid})</span>
+                <span><b>${escapeHtml(p.name)}</b> (PID ${p.pid})</span>
                 <span><b class="text-danger">${p.cpu_percent}% CPU</b></span>
             </div>
         `).join('');
@@ -778,7 +777,7 @@ async function fetchBottlenecks() {
         // Memory Hogs
         memBox.innerHTML = (data.memory_hogs || []).map(p => `
             <div class="disk-item" style="margin-bottom:6px;">
-                <span><b>${p.name}</b> (PID ${p.pid})</span>
+                <span><b>${escapeHtml(p.name)}</b> (PID ${p.pid})</span>
                 <span><b>${p.memory_mb} MB RAM</b> (${p.memory_percent}%)</span>
             </div>
         `).join('');
@@ -789,13 +788,13 @@ async function fetchBottlenecks() {
         } else {
             stuckBox.innerHTML = data.stuck_processes.map(p => `
                 <div class="issue-item danger">
-                    <span><b>${p.name}</b> (PID ${p.pid}) - State: <b>${p.status}</b></span>
+                    <span><b>${escapeHtml(p.name)}</b> (PID ${p.pid}) - State: <b>${p.status}</b></span>
                     <button class="btn btn-sm btn-danger" onclick="remediateAction('kill_process', '${p.pid}')">💀 Terminate Process</button>
                 </div>
             `).join('');
         }
     } catch (e) {
-        cpuBox.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+        cpuBox.innerHTML = `<p style="color:var(--danger)">Error: ${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -828,13 +827,13 @@ async function executeCommand(cmdText = null) {
             statusTag.textContent = `Exit Code: ${result.returncode}`;
             statusTag.className = `cmd-status-badge ${result.returncode === 0 ? 'badge-success' : 'badge-danger'}`;
         } else {
-            const errText = await res.text();
+            const errText = await readApiError(res);
             output.textContent = `$ ${cmd}\n\nCommand Failed:\n${errText}`;
             statusTag.textContent = 'Error';
             statusTag.className = 'cmd-status-badge badge-danger';
         }
     } catch (e) {
-        output.textContent = `$ ${cmd}\n\nExecution Error: ${e.message}`;
+        output.textContent = `$ ${cmd}\n\nExecution Error: ${escapeHtml(e.message)}`;
         statusTag.textContent = 'Error';
         statusTag.className = 'cmd-status-badge badge-danger';
     }
@@ -897,12 +896,12 @@ function filterProcesses() {
         row.innerHTML = `
             <td><input type="checkbox" class="proc-check" value="${p.pid}"></td>
             <td><b>${p.pid}</b></td>
-            <td>${p.name}</td>
+            <td>${escapeHtml(p.name)}</td>
             <td><b class="${p.cpu_percent > 50 ? 'text-danger' : ''}">${p.cpu_percent}%</b></td>
             <td>${p.memory_percent}%</td>
             <td>${p.memory_mb} MB</td>
-            <td><span class="badge ${p.status === 'running' ? 'badge-success' : 'badge-warning'}">${p.status}</span></td>
-            <td>${p.username}</td>
+            <td><span class="badge ${p.status === 'running' ? 'badge-success' : 'badge-warning'}">${escapeHtml(p.status)}</span></td>
+            <td>${escapeHtml(p.username)}</td>
             <td>${p.threads || 1}</td>
             <td style="font-size:0.75rem">${p.create_time}</td>
             <td>
@@ -915,48 +914,96 @@ function filterProcesses() {
 }
 
 /* VMs */
+function renderVms(vms) {
+    const container = document.getElementById('vm-list');
+    if (!container) return;
+    document.getElementById('vm-count').textContent = `${vms.length} VM${vms.length === 1 ? '' : 's'}`;
+    if (!vms.length) {
+        container.innerHTML = '<p class="no-data">No libvirt/KVM guests found.</p>';
+        return;
+    }
+    container.innerHTML = vms.map(vm => {
+        const running = vm.active && vm.state === 'running';
+        const rateStatus = running && !vm.rates_available ? 'Collecting live rates…' : '';
+        const cpu = Number(vm.cpu_percent || 0);
+        const memory = Number(vm.memory_percent || 0);
+        return `
+            <article class="vm-card ${running ? 'vm-running' : ''}">
+                <div class="vm-card-header">
+                    <div><strong>${escapeHtml(vm.name)}</strong><div class="vm-uuid">${escapeHtml(vm.uuid || '')}</div></div>
+                    <span class="vm-state ${escapeHtml(vm.state)}">${escapeHtml(String(vm.state).toUpperCase())}</span>
+                </div>
+                <div class="vm-utilization">
+                    <div class="vm-meter"><div><span>CPU</span><b>${cpu.toFixed(1)}%</b></div><div class="vm-progress"><i style="width:${Math.min(cpu, 100)}%"></i></div><small>of ${vm.vcpus || 0} vCPU(s)</small></div>
+                    <div class="vm-meter memory"><div><span>RAM</span><b>${memory.toFixed(1)}%</b></div><div class="vm-progress"><i style="width:${Math.min(memory, 100)}%"></i></div><small>${formatBytes((vm.memory_used || 0) * 1024)} / ${formatBytes((vm.memory_total || vm.max_memory || 0) * 1024)}</small></div>
+                </div>
+                <div class="vm-live-grid">
+                    <div><span>Disk read</span><b>↓ ${formatSpeed(vm.disk_read_bytes_sec)}</b></div>
+                    <div><span>Disk write</span><b>↑ ${formatSpeed(vm.disk_write_bytes_sec)}</b></div>
+                    <div><span>Network RX</span><b>↓ ${formatSpeed(vm.network_rx_bytes_sec)}</b></div>
+                    <div><span>Network TX</span><b>↑ ${formatSpeed(vm.network_tx_bytes_sec)}</b></div>
+                </div>
+                <div class="vm-stats">
+                    <div class="vm-stat"><span>Domain ID</span><span>${vm.id >= 0 ? vm.id : '—'}</span></div>
+                    <div class="vm-stat"><span>Disks / NICs</span><span>${(vm.disks || []).length} / ${(vm.interfaces || []).length}</span></div>
+                </div>
+                ${rateStatus ? `<p class="vm-rate-status">${rateStatus}</p>` : ''}
+            </article>`;
+    }).join('');
+}
+
 async function fetchVms() {
     const container = document.getElementById('vm-list');
     try {
         const res = await fetch(`${API_BASE}/api/stats/vms`);
         if (res.status === 404) {
-            container.innerHTML = '<p class="no-data">VM monitoring unavailable (libvirt daemon not running or not installed)</p>';
+            container.innerHTML = '<p class="no-data">VM monitoring unavailable (libvirt daemon not running or not installed).</p>';
             return;
         }
-        const vms = await res.json();
-        document.getElementById('vm-count').textContent = vms.length + ' VMs';
-
-        if (vms.length === 0) {
-            container.innerHTML = '<p class="no-data">No active or defined VMs found on hypervisor.</p>';
-            return;
-        }
-
-        container.innerHTML = vms.map(vm => `
-            <div class="vm-card">
-                <div class="vm-card-header">
-                    <strong>${vm.name}</strong>
-                    <span class="vm-state ${vm.state}">${vm.state.toUpperCase()}</span>
-                </div>
-                <div class="vm-stats">
-                    <div class="vm-stat"><span>VM ID</span><span>${vm.id}</span></div>
-                    <div class="vm-stat"><span>vCPUs</span><span>${vm.vcpus}</span></div>
-                    <div class="vm-stat"><span>Allocated Memory</span><span>${formatBytes(vm.memory * 1024)}</span></div>
-                    <div class="vm-stat"><span>Max Memory</span><span>${formatBytes(vm.max_memory * 1024)}</span></div>
-                </div>
-            </div>
-        `).join('');
+        if (!res.ok) throw new Error(await readApiError(res));
+        renderVms(await res.json());
     } catch (e) {
-        container.innerHTML = `<p class="issue-item danger">Error: ${e.message}</p>`;
+        container.innerHTML = `<p class="issue-item danger">Error: ${escapeHtml(e.message)}</p>`;
     }
 }
 
+
+
 /* Services */
-async function fetchServices() {
+async function readApiError(res) {
     try {
+        const data = await res.json();
+        return data.detail || data.message || `Request failed (${res.status})`;
+    } catch (_) {
+        return `Request failed (${res.status})`;
+    }
+}
+
+async function fetchServiceCapabilities() {
+    const notice = document.getElementById('service-permission-notice');
+    try {
+        const res = await fetch(`${API_BASE}/api/services/capabilities`);
+        if (!res.ok) throw new Error(await readApiError(res));
+        serviceCapabilities = await res.json();
+        if (notice) {
+            notice.textContent = serviceCapabilities.message;
+            notice.className = `service-permission-notice ${serviceCapabilities.can_control ? 'ready' : 'blocked'}`;
+        }
+    } catch (e) {
+        serviceCapabilities = { can_control: false };
+        if (notice) {
+            notice.textContent = `Unable to verify service-control permissions: ${e.message}`;
+            notice.className = 'service-permission-notice blocked';
+        }
+    }
+}
+
+async function fetchServices(refreshPermissions = false) {
+    try {
+        if (!serviceCapabilities || refreshPermissions) await fetchServiceCapabilities();
         const res = await fetch(`${API_BASE}/api/services`);
-        if (!res.ok) throw new Error('Failed to fetch system services');
-        const services = await res.json();
-        renderServices(services);
+        if (!res.ok) throw new Error(await readApiError(res));
+        renderServices(await res.json());
     } catch (e) {
         showToast('Error fetching services: ' + e.message, 'error');
     }
@@ -966,49 +1013,55 @@ function renderServices(services) {
     const tbody = document.getElementById('services-body');
     if (!tbody) return;
     tbody.innerHTML = '';
-
     const filter = document.getElementById('service-filter').value;
     const search = document.getElementById('service-search').value.toLowerCase();
-
     let filtered = services;
     if (filter === 'running') filtered = filtered.filter(s => s.active === 'active');
     else if (filter === 'stopped') filtered = filtered.filter(s => s.active !== 'active');
     else if (filter === 'failed') filtered = filtered.filter(s => s.active === 'failed' || s.sub === 'failed');
+    if (search) filtered = filtered.filter(s => s.name.toLowerCase().includes(search) || s.description.toLowerCase().includes(search));
 
-    if (search) {
-        filtered = filtered.filter(s => s.name.toLowerCase().includes(search) || s.description.toLowerCase().includes(search));
+    if (!filtered.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="no-data">No services match the current filter.</td></tr>';
+        return;
     }
-
+    const disabled = serviceCapabilities?.can_control ? '' : 'disabled title="Service controls are not configured"';
     filtered.forEach(s => {
         const row = document.createElement('tr');
+        const escapedName = escapeHtml(s.name);
         row.innerHTML = `
-            <td><b>${s.name}</b></td>
-            <td>${s.load}</td>
-            <td><span class="badge ${s.active === 'active' ? 'badge-success' : s.active === 'failed' ? 'badge-danger' : 'badge-warning'}">${s.active}</span></td>
-            <td>${s.sub}</td>
-            <td style="font-size:0.8rem">${escapeHtml(s.description)}</td>
-            <td>
-                ${s.active !== 'active' ? `<button class="btn btn-sm btn-success" onclick="controlService('${s.name}','start')">Start</button>` : ''}
-                ${s.active === 'active' ? `<button class="btn btn-sm btn-warning" onclick="controlService('${s.name}','stop')">Stop</button>` : ''}
-                <button class="btn btn-sm btn-primary" onclick="controlService('${s.name}','restart')">Restart</button>
-            </td>
-        `;
+            <td><b>${escapedName}</b></td><td>${escapeHtml(s.load)}</td>
+            <td><span class="badge ${s.active === 'active' ? 'badge-success' : s.active === 'failed' ? 'badge-danger' : 'badge-warning'}">${escapeHtml(s.active)}</span></td>
+            <td>${escapeHtml(s.sub)}</td><td style="font-size:0.8rem">${escapeHtml(s.description)}</td>
+            <td><div class="service-actions">
+                ${s.active !== 'active' ? `<button class="btn btn-sm btn-success" ${disabled} onclick="controlService('${escapedName}','start', this)">Start</button>` : ''}
+                ${s.active === 'active' ? `<button class="btn btn-sm btn-warning" ${disabled} onclick="controlService('${escapedName}','stop', this)">Stop</button>` : ''}
+                <button class="btn btn-sm btn-primary" ${disabled} onclick="controlService('${escapedName}','restart', this)">Restart</button>
+                <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','reload', this)">Reload</button>
+                <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','enable', this)">Enable</button>
+                <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','disable', this)">Disable</button>
+            </div></td>`;
         tbody.appendChild(row);
     });
 }
 
-async function controlService(name, action) {
+async function controlService(name, action, button) {
+    if (!serviceCapabilities?.can_control) {
+        showToast('Service controls are not authorized. Run systemd/install-service.sh.', 'error');
+        return;
+    }
     if (!confirm(`Are you sure you want to ${action.toUpperCase()} service ${name}?`)) return;
+    const originalLabel = button?.textContent;
+    if (button) { button.disabled = true; button.textContent = 'Working…'; }
     try {
-        const res = await fetch(`${API_BASE}/api/services/${name}/${action}`, { method: 'POST' });
-        if (res.ok) {
-            showToast(`Service ${name} ${action}ed successfully`, 'success');
-            fetchServices();
-        } else {
-            showToast(`Failed to ${action} service`, 'error');
-        }
+        const res = await fetch(`${API_BASE}/api/services/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
+        if (!res.ok) throw new Error(await readApiError(res));
+        const result = await res.json();
+        showToast(result.message, 'success');
+        await fetchServices();
     } catch (e) {
-        showToast('Error: ' + e.message, 'error');
+        showToast(`Could not ${action} ${name}: ${e.message}`, 'error');
+        if (button) { button.disabled = false; button.textContent = originalLabel; }
     }
 }
 
@@ -1107,6 +1160,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('run-port-btn')?.addEventListener('click', runPortTest);
     document.getElementById('run-dns-btn')?.addEventListener('click', runDnsTest);
     document.getElementById('refresh-ports-btn')?.addEventListener('click', fetchListeningPorts);
+    document.getElementById('refresh-vms-btn')?.addEventListener('click', fetchVms);
 
     // Terminal Command Runner
     document.getElementById('run-cmd')?.addEventListener('click', () => executeCommand());
@@ -1146,7 +1200,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Services Filters
     document.getElementById('service-filter')?.addEventListener('change', fetchServices);
     document.getElementById('service-search')?.addEventListener('input', fetchServices);
-    document.getElementById('refresh-services-btn')?.addEventListener('click', fetchServices);
+    document.getElementById('refresh-services-btn')?.addEventListener('click', () => fetchServices(true));
 
     // Modal Close
     document.getElementById('close-modal')?.addEventListener('click', () => {

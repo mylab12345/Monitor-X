@@ -418,7 +418,7 @@
                         </div>
 
                         <div class="command-runner mt-12">
-                            <input type="text" id="cmd-input" placeholder="Type shell command (e.g. ps aux | head -n 10)..." class="search-input terminal-input">
+                            <input type="text" id="cmd-input" placeholder="Choose an approved diagnostic preset below" class="search-input terminal-input" readonly>
                             <button class="btn btn-primary" id="run-cmd">Execute</button>
                             <button class="btn btn-outline" id="clear-cmd-btn">Clear Terminal</button>
                         </div>
@@ -427,7 +427,7 @@
                                 <span>Console Output Window</span>
                                 <span class="cmd-status-badge" id="cmd-status-tag">Ready</span>
                             </div>
-                            <pre id="cmd-output" class="cmd-output">Ready to execute shell diagnostic commands.</pre>
+                            <pre id="cmd-output" class="cmd-output">Choose a diagnostic preset to run it safely.</pre>
                         </div>
                     </div>
                 </div>
@@ -437,7 +437,7 @@
             <div class="tab-content" id="tab-vms">
                 <div class="vms-header">
                     <h2>Virtual Machines (Libvirt / KVM)</h2>
-                    <span class="badge" id="vm-count">0 VMs</span>
+                    <div class="vm-header-actions"><span class="badge" id="vm-count">0 VMs</span><button class="btn btn-secondary btn-sm" id="refresh-vms-btn">↻ Refresh</button></div>
                 </div>
                 <div id="vm-list">
                     <p class="no-data">Loading VMs...</p>
@@ -449,6 +449,9 @@
                 <div class="vms-header">
                     <h2>Systemd Services Management</h2>
                     <button class="btn btn-secondary" id="refresh-services-btn">🔄 Refresh Services</button>
+                </div>
+                <div id="service-permission-notice" class="service-permission-notice" role="status">
+                    Checking service-control permissions…
                 </div>
                 <div class="service-controls">
                     <input type="text" id="service-search" placeholder="🔍 Search service name or description..." class="search-input">

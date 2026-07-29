@@ -12,9 +12,9 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 - **Live Log Inspector** — Auto-tail streaming for system logs and `dmesg` with level filtering (`ALL`, `🔴 ERROR`, `⚠️ WARN`, `ℹ️ INFO`) and regex search.
 - **Network Diagnostic Suite** — Interactive ICMP Ping latency tester, TCP Port connectivity checker, DNS resolver benchmark, and active listening ports table.
 - **Resource Bottleneck Finder** — Identifies top CPU, RAM, and thread consumers alongside stuck/zombie process killers.
-- **Terminal Shell Console** — Quick diagnostic preset buttons (`df -h`, `free -h`, `ss -tulpn`, `systemctl --failed`, `dmesg -T`, `uname -a`) with interactive command execution history.
+- **Safe Diagnostic Console** — Approved read-only diagnostic presets (`df -h`, `free -h`, `ss -tulpn`, `systemctl --failed`, `dmesg -T`, `uname -a`) with command history. Arbitrary shell execution is intentionally disabled.
 - **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections).
-- **Service & VM Management** — Start, stop, and restart systemd services and inspect libvirt/KVM Virtual Machines.
+- **Service & VM Management** — Start, stop, restart, and reload systemd services, with an in-UI authorization status and actionable errors. Running libvirt/KVM guests show live vCPU, RAM, disk I/O, and network throughput metrics.
 - **No Authentication Required** — Plug-and-play local/internal server monitoring.
 
 ---
@@ -41,6 +41,20 @@ To run MonitorX as a background systemd service that starts automatically on boo
 # Run installer script (creates and enables /etc/systemd/system/monitorx.service)
 ./systemd/install-service.sh
 ```
+
+### Dashboard service controls
+
+A dashboard process runs as your regular user, so plain `systemctl restart …` is normally rejected by systemd/polkit. The installer now creates a **limited passwordless sudo policy** only for MonitorX’s `start`, `stop`, `restart`, `reload`, `enable`, and `disable` actions on `.service` units, plus the two explicit remediation commands used by the Troubleshoot Hub (drop page cache and vacuum journals). It does **not** grant shell access.
+
+After updating an existing installation, run the installer once more and reload MonitorX:
+
+```bash
+./systemd/install-service.sh
+# or, if MonitorX is already installed:
+sudo systemctl restart monitorx
+```
+
+The **Systemd Services** tab shows whether this policy is available, disables controls if it is not, and displays the exact API error rather than reporting a false success.
 
 ### Useful Service Commands
 
@@ -84,3 +98,11 @@ MonitorX/
    - Add a dedicated Container tab integrating with the Docker daemon API to monitor container CPU/RAM usage, status, and logs.
 4. **Custom Dashboard Widgets**:
    - Allow users to pin, drag, and resize metric cards or custom command outputs to create personalized monitoring views.
+5. **Service safety workflow**:
+   - Add maintenance windows, dependency previews, per-service log tails, and an audit timeline recording who invoked each action and its result.
+6. **Role-based access and authentication**:
+   - Protect control endpoints with local accounts/SSO and granular roles (view, diagnose, operate) before exposing the dashboard beyond a trusted network.
+7. **Alert rules UI**:
+   - Let operators create threshold rules with cooldowns, acknowledgement, silencing, and notification routing directly from the dashboard.
+8. **Fleet view**:
+   - Securely aggregate multiple MonitorX agents into a host inventory with tags, health rollups, and drill-down diagnostics.

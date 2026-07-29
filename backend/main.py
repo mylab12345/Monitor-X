@@ -3,14 +3,14 @@ Monitoring Dashboard Backend - FastAPI Application
 Provides real-time system monitoring via WebSocket and REST API
 """
 import asyncio
-import json
 import logging
 import os
 import platform
 import re
 import socket
-import subprocess
+import shutil
 import time
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +20,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Requ
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import psutil
 
 # Optional imports for GPU monitoring
@@ -41,14 +41,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global state tracking for rate calculations
-connected_clients: List[WebSocket] = []
-system_stats_cache: Dict[str, Any] = {}
+# Network/disk rates are derived from a previous sample; serialize snapshots.
 stats_lock = asyncio.Lock()
 
 last_net_io = None
 last_net_time = None
 last_disk_io = None
 last_disk_time = None
+
+# Libvirt counters are cumulative. Keep one prior sample per domain to calculate
+# instantaneous CPU, disk, and network rates.
+vm_metric_samples: Dict[str, Dict[str, float]] = {}
+vm_metrics_lock = asyncio.Lock()
 
 # Initialize NVML if available
 if NVML_AVAILABLE:
@@ -119,23 +123,23 @@ class SystemStats(BaseModel):
 
 
 class PingRequest(BaseModel):
-    host: str
-    count: Optional[int] = 4
+    host: str = Field(min_length=1, max_length=253)
+    count: int = Field(default=4, ge=1, le=10)
 
 
 class PortCheckRequest(BaseModel):
-    host: str
-    port: int
-    timeout: Optional[float] = 3.0
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(ge=1, le=65535)
+    timeout: float = Field(default=3.0, ge=0.1, le=10.0)
 
 
 class DNSCheckRequest(BaseModel):
-    domain: str
+    domain: str = Field(min_length=1, max_length=253)
 
 
 class RemediateRequest(BaseModel):
-    action: str
-    target: Optional[str] = None
+    action: str = Field(min_length=1, max_length=64)
+    target: Optional[str] = Field(default=None, max_length=128)
 
 
 class ConnectionManager:
@@ -424,65 +428,137 @@ async def get_system_info() -> Dict[str, Any]:
 
 
 async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
-    """Get VM statistics using libvirt"""
+    """Return libvirt domain inventory and live metrics for running KVM guests.
+
+    Libvirt exposes CPU time and I/O counters cumulatively, therefore rates are
+    derived from two successive samples. Values are zero on the first poll.
+    """
     if not LIBVIRT_AVAILABLE or not libvirt_conn:
         return None
-    
-    vms = []
-    try:
-        for domain_id in libvirt_conn.listDomainsID():
-            domain = libvirt_conn.lookupByID(domain_id)
-            info = domain.info()
-            
-            state_map = {
-                libvirt.VIR_DOMAIN_NOSTATE: "no_state",
-                libvirt.VIR_DOMAIN_RUNNING: "running",
-                libvirt.VIR_DOMAIN_BLOCKED: "blocked",
-                libvirt.VIR_DOMAIN_PAUSED: "paused",
-                libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown",
-                libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
-                libvirt.VIR_DOMAIN_CRASHED: "crashed",
-                libvirt.VIR_DOMAIN_PMSUSPENDED: "pmsuspended"
-            }
-            
-            vms.append({
-                "id": domain_id,
-                "name": domain.name(),
-                "state": state_map.get(info[0], "unknown"),
-                "cpu_time": info[2],
-                "max_memory": info[1],
-                "memory": info[2],
-                "vcpus": info[3]
-            })
-    except Exception as e:
-        logger.error(f"Error getting VM stats: {e}")
-        return None
-    
-    return vms if vms else None
+
+    state_map = {
+        libvirt.VIR_DOMAIN_NOSTATE: "no_state", libvirt.VIR_DOMAIN_RUNNING: "running",
+        libvirt.VIR_DOMAIN_BLOCKED: "blocked", libvirt.VIR_DOMAIN_PAUSED: "paused",
+        libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown", libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
+        libvirt.VIR_DOMAIN_CRASHED: "crashed", libvirt.VIR_DOMAIN_PMSUSPENDED: "pmsuspended",
+    }
+    async with vm_metrics_lock:
+        now = time.monotonic()
+        try:
+            domains = libvirt_conn.listAllDomains(0)
+        except Exception as exc:
+            logger.warning("Could not list libvirt domains: %s", exc)
+            return None
+
+        vms: List[Dict[str, Any]] = []
+        active_domain_ids = set()
+        for domain in domains:
+            try:
+                info = domain.info()  # state, maxMem KiB, memory KiB, vCPUs, cpuTime ns
+                state = state_map.get(info[0], "unknown")
+                domain_id = domain.ID() if domain.isActive() else -1
+                vm: Dict[str, Any] = {
+                    "id": domain_id, "uuid": domain.UUIDString(), "name": domain.name(),
+                    "state": state, "active": bool(domain.isActive()), "vcpus": info[3],
+                    "max_memory": info[1], "memory": info[2], "cpu_time": info[4],
+                    "cpu_percent": 0.0, "memory_used": 0, "memory_total": info[1],
+                    "memory_percent": 0.0, "disk_read_bytes_sec": 0.0,
+                    "disk_write_bytes_sec": 0.0, "network_rx_bytes_sec": 0.0,
+                    "network_tx_bytes_sec": 0.0, "rates_available": False,
+                    "disks": [], "interfaces": [],
+                }
+                if not vm["active"]:
+                    vms.append(vm)
+                    continue
+
+                active_domain_ids.add(vm["uuid"])
+                memory = domain.memoryStats()
+                memory_total = memory.get("actual", info[1]) or info[1]
+                # rss is the best guest-used figure when the balloon driver reports it.
+                memory_used = memory.get("rss", memory.get("actual", info[2]))
+                if "unused" in memory and "actual" in memory:
+                    memory_used = max(memory_used, memory["actual"] - memory["unused"])
+                vm.update({
+                    "memory_used": memory_used, "memory_total": memory_total,
+                    "memory_percent": round((memory_used / memory_total * 100) if memory_total else 0, 1),
+                })
+
+                disk_read = disk_write = net_rx = net_tx = 0
+                try:
+                    root = ET.fromstring(domain.XMLDesc(0))
+                    disk_targets = [node.get("dev") for node in root.findall("./devices/disk/target") if node.get("dev")]
+                    interface_targets = [node.get("dev") for node in root.findall("./devices/interface/target") if node.get("dev")]
+                except ET.ParseError:
+                    disk_targets, interface_targets = [], []
+
+                for target in disk_targets:
+                    try:
+                        stats = domain.blockStats(target)
+                        # rd_req, rd_bytes, wr_req, wr_bytes, errs
+                        read_bytes, write_bytes = stats[1], stats[3]
+                        disk_read += read_bytes
+                        disk_write += write_bytes
+                        try:
+                            capacity, allocation, _ = domain.blockInfo(target, 0)
+                        except Exception:
+                            capacity, allocation = 0, 0
+                        vm["disks"].append({"target": target, "read_bytes": read_bytes, "write_bytes": write_bytes,
+                                            "capacity": capacity, "allocation": allocation})
+                    except Exception:
+                        continue
+                for target in interface_targets:
+                    try:
+                        stats = domain.interfaceStats(target)
+                        # rx_bytes, rx_packets, rx_errs, rx_drop, tx_bytes, ...
+                        rx_bytes, tx_bytes = stats[0], stats[4]
+                        net_rx += rx_bytes
+                        net_tx += tx_bytes
+                        vm["interfaces"].append({"target": target, "rx_bytes": rx_bytes, "tx_bytes": tx_bytes})
+                    except Exception:
+                        continue
+
+                previous = vm_metric_samples.get(vm["uuid"])
+                if previous:
+                    elapsed = now - previous["time"]
+                    if elapsed > 0:
+                        vm["cpu_percent"] = round(min(100, max(0, (info[4] - previous["cpu_time"]) / elapsed / 1e7 / max(info[3], 1))), 1)
+                        vm["disk_read_bytes_sec"] = round(max(0, (disk_read - previous["disk_read"]) / elapsed), 1)
+                        vm["disk_write_bytes_sec"] = round(max(0, (disk_write - previous["disk_write"]) / elapsed), 1)
+                        vm["network_rx_bytes_sec"] = round(max(0, (net_rx - previous["net_rx"]) / elapsed), 1)
+                        vm["network_tx_bytes_sec"] = round(max(0, (net_tx - previous["net_tx"]) / elapsed), 1)
+                        vm["rates_available"] = True
+                vm_metric_samples[vm["uuid"]] = {"time": now, "cpu_time": info[4], "disk_read": disk_read,
+                                                    "disk_write": disk_write, "net_rx": net_rx, "net_tx": net_tx}
+                vms.append(vm)
+            except Exception as exc:
+                logger.warning("Could not collect metrics for a libvirt domain: %s", exc)
+
+        # Discard counters for guests that were stopped or removed.
+        for domain_uuid in list(vm_metric_samples):
+            if domain_uuid not in active_domain_ids:
+                vm_metric_samples.pop(domain_uuid, None)
+        return vms
 
 
 async def collect_all_stats() -> SystemStats:
-    """Collect all system statistics"""
-    cpu = await get_cpu_stats()
-    memory = await get_memory_stats()
-    disk = await get_disk_stats()
-    network = await get_network_stats()
-    gpu = await get_gpu_stats()
-    processes = await get_process_stats()
-    system = await get_system_info()
-    vms = await get_vm_stats()
-    
-    return SystemStats(
-        timestamp=datetime.now().isoformat(),
-        cpu=cpu,
-        memory=memory,
-        disk=disk,
-        network=network,
-        gpu=gpu,
-        processes=processes,
-        system=system,
-        vms=vms
-    )
+    """Collect a consistent stats snapshot.
+
+    Disk and network rates use previous samples, so serializing collection avoids
+    concurrent REST/WebSocket requests corrupting those calculations.
+    """
+    async with stats_lock:
+        cpu = await get_cpu_stats()
+        memory = await get_memory_stats()
+        disk = await get_disk_stats()
+        network = await get_network_stats()
+        gpu = await get_gpu_stats()
+        processes = await get_process_stats()
+        system = await get_system_info()
+        vms = await get_vm_stats()
+        return SystemStats(
+            timestamp=datetime.now().isoformat(), cpu=cpu, memory=memory, disk=disk,
+            network=network, gpu=gpu, processes=processes, system=system, vms=vms
+        )
 
 
 async def broadcast_stats():
@@ -614,8 +690,10 @@ async def get_process_detail(pid: int):
 
 
 @app.post("/api/processes/{pid}/kill")
-async def kill_process(pid: int, signal: int = 15):
-    """Kill a process (default SIGTERM=15, SIGKILL=9)"""
+async def kill_process(pid: int, signal: int = Query(15)):
+    """Terminate a process with SIGTERM or SIGKILL."""
+    if signal not in (9, 15):
+        raise HTTPException(status_code=400, detail="Only SIGTERM (15) and SIGKILL (9) are allowed.")
     try:
         proc = psutil.Process(pid)
         proc.send_signal(signal)
@@ -629,70 +707,110 @@ async def kill_process(pid: int, signal: int = 15):
         raise HTTPException(status_code=403, detail="Access denied")
 
 
-# System control endpoints
-@app.post("/api/system/reboot")
+# Power actions are intentionally not exposed to unauthenticated dashboard clients.
+# Service-level actions are available through the constrained service-control API below.
+@app.post("/api/system/reboot", status_code=403)
 async def reboot_system():
-    try:
-        await asyncio.create_subprocess_exec("systemctl", "reboot")
-        return {"success": True, "message": "Reboot initiated"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=403, detail="Reboot is disabled from the unauthenticated dashboard.")
 
 
-@app.post("/api/system/shutdown")
+@app.post("/api/system/shutdown", status_code=403)
 async def shutdown_system():
-    try:
-        await asyncio.create_subprocess_exec("systemctl", "poweroff")
-        return {"success": True, "message": "Shutdown initiated"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=403, detail="Shutdown is disabled from the unauthenticated dashboard.")
+
+
+SYSTEMCTL_BIN = shutil.which("systemctl") or "/usr/bin/systemctl"
+SYSCTL_BIN = shutil.which("sysctl") or "/usr/sbin/sysctl"
+JOURNALCTL_BIN = shutil.which("journalctl") or "/usr/bin/journalctl"
+SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@_.:-]*\.service$")
+SERVICE_ACTIONS = ("start", "stop", "restart", "reload", "enable", "disable")
+
+
+def service_action_label(action: str) -> str:
+    """Human-readable past tense for service control notifications."""
+    return {"start": "started", "stop": "stopped", "restart": "restarted", "reload": "reloaded",
+            "enable": "enabled", "disable": "disabled"}[action]
+
+
+async def run_service_action(action: str, service_name: str):
+    """Run an approved systemctl action without ever prompting for a password.
+
+    MonitorX normally runs as an unprivileged service account.  The installer grants
+    that account narrowly scoped, non-interactive sudo access for these commands.
+    """
+    command = [SYSTEMCTL_BIN, "--no-ask-password", action, service_name]
+    if os.geteuid() != 0:
+        sudo = shutil.which("sudo")
+        if not sudo:
+            return None, "sudo is not installed. Re-run systemd/install-service.sh to configure service controls."
+        command = [sudo, "-n", *command]
+    proc = await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    output = (stderr or stdout).decode().strip()
+    if proc.returncode:
+        if "password is required" in output.lower() or "not allowed" in output.lower():
+            output = "MonitorX is not authorized to control system services. Run systemd/install-service.sh, then restart MonitorX."
+        return None, output or f"systemctl {action} failed (exit code {proc.returncode})."
+    return {"output": stdout.decode().strip()}, None
+
+
+@app.get("/api/services/capabilities")
+async def service_capabilities():
+    """Expose whether the running dashboard can execute service controls."""
+    if os.geteuid() == 0:
+        return {"can_control": True, "mode": "root", "message": "Service controls are available."}
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return {"can_control": False, "mode": "unconfigured", "message": "sudo is unavailable; run the MonitorX installer."}
+    proc = await asyncio.create_subprocess_exec(
+        sudo, "-n", "-l", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+    available = proc.returncode == 0
+    return {
+        "can_control": available,
+        "mode": "sudo" if available else "unconfigured",
+        "message": "Service controls are available." if available else
+                   "Controls need the MonitorX sudo policy. Run systemd/install-service.sh and restart MonitorX."
+    }
 
 
 @app.get("/api/services")
 async def list_services():
-    """List systemd services"""
+    """List systemd services. Read-only systemctl access needs no elevated policy."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "systemctl", "list-units", "--type=service", "--no-pager", "--no-legend", "--all",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            SYSTEMCTL_BIN, "list-units", "--type=service", "--no-pager", "--no-legend", "--all",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await proc.communicate()
+        if proc.returncode:
+            raise HTTPException(status_code=503, detail=stderr.decode().strip() or "systemd is unavailable")
         services = []
         for line in stdout.decode().strip().split('\n'):
-            if line:
-                parts = line.split()
-                if len(parts) >= 4:
-                    services.append({
-                        "name": parts[0],
-                        "load": parts[1],
-                        "active": parts[2],
-                        "sub": parts[3],
-                        "description": " ".join(parts[4:]) if len(parts) > 4 else ""
-                    })
+            parts = line.split()
+            if len(parts) >= 4:
+                services.append({"name": parts[0], "load": parts[1], "active": parts[2], "sub": parts[3],
+                                 "description": " ".join(parts[4:]) if len(parts) > 4 else ""})
         return services
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/services/{service_name}/{action}")
 async def control_service(service_name: str, action: str):
-    valid_actions = ["start", "stop", "restart", "reload", "enable", "disable"]
-    if action not in valid_actions:
-        raise HTTPException(status_code=400, detail=f"Invalid action. Valid: {valid_actions}")
-    
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "systemctl", action, service_name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise HTTPException(status_code=500, detail=stderr.decode() or f"Failed to {action} {service_name}")
-        return {"success": True, "message": f"Service {service_name} {action}ed"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if action not in SERVICE_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"Invalid action. Valid: {list(SERVICE_ACTIONS)}")
+    if not SERVICE_NAME_PATTERN.fullmatch(service_name):
+        raise HTTPException(status_code=400, detail="Only valid .service unit names can be controlled.")
+    _, error = await run_service_action(action, service_name)
+    if error:
+        raise HTTPException(status_code=403, detail=error)
+    return {"success": True, "message": f"Service {service_name} {service_action_label(action)}"}
 
 
 # ==============================================================================
@@ -1104,7 +1222,7 @@ async def troubleshoot_ping(req: PingRequest):
     if not re.match(r'^[a-zA-Z0-9.-]+$', host):
         raise HTTPException(status_code=400, detail="Invalid hostname or IP address format")
     
-    count = min(max(1, req.count or 4), 10)
+    count = req.count
     try:
         proc = await asyncio.create_subprocess_exec(
             "ping", "-c", str(count), "-W", "3", host,
@@ -1138,7 +1256,7 @@ async def troubleshoot_port_check(req: PortCheckRequest):
     if not re.match(r'^[a-zA-Z0-9.-]+$', host) or not (1 <= port <= 65535):
         raise HTTPException(status_code=400, detail="Invalid host or port range")
     
-    timeout = req.timeout or 3.0
+    timeout = req.timeout
     start_time = time.time()
     try:
         conn = asyncio.open_connection(host, port)
@@ -1319,7 +1437,7 @@ async def perform_remediation(req: RemediateRequest):
     if action == "clear_pagecache":
         try:
             proc = await asyncio.create_subprocess_exec(
-                "sudo", "sysctl", "-w", "vm.drop_caches=3",
+                "sudo", "-n", SYSCTL_BIN, "-w", "vm.drop_caches=3",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -1346,23 +1464,26 @@ async def perform_remediation(req: RemediateRequest):
 
             restarted = []
             failed_restarts = []
+            errors = []
             for unit in failed_units:
-                p = await asyncio.create_subprocess_exec(
-                    "systemctl", "restart", unit,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                await p.communicate()
-                if p.returncode == 0:
-                    restarted.append(unit)
-                else:
+                # Failed units can include non-service units; service controls are deliberately limited.
+                if not SERVICE_NAME_PATTERN.fullmatch(unit):
                     failed_restarts.append(unit)
+                    errors.append(f"{unit}: not a controllable .service unit")
+                    continue
+                _, error = await run_service_action("restart", unit)
+                if error:
+                    failed_restarts.append(unit)
+                    errors.append(f"{unit}: {error}")
+                else:
+                    restarted.append(unit)
 
             return {
-                "success": True,
+                "success": not failed_restarts,
                 "message": f"Attempted restart of {len(failed_units)} unit(s). Success: {len(restarted)}",
                 "restarted": restarted,
-                "failed": failed_restarts
+                "failed": failed_restarts,
+                "errors": errors
             }
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -1370,7 +1491,7 @@ async def perform_remediation(req: RemediateRequest):
     elif action == "vacuum_journal":
         try:
             proc = await asyncio.create_subprocess_exec(
-                "journalctl", "--vacuum-time=2d",
+                "sudo", "-n", JOURNALCTL_BIN, "--vacuum-time=2d",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -1397,41 +1518,61 @@ async def perform_remediation(req: RemediateRequest):
         raise HTTPException(status_code=400, detail=f"Unsupported remediation action: {action}")
 
 
+SAFE_DIAGNOSTIC_COMMANDS = {
+    "df -h": ("df", "-h"),
+    "free -h": ("free", "-h"),
+    "ss -tulpn": ("ss", "-tulpn"),
+    "systemctl --failed": (SYSTEMCTL_BIN, "--no-ask-password", "--failed", "--no-pager"),
+    "uname -a": ("uname", "-a"),
+}
+
+
 @app.post("/api/commands/run")
 async def run_command(request: Request):
-    """Run a shell command safely"""
+    """Run one of the dashboard's explicitly approved, read-only diagnostics.
+
+    This endpoint is reachable from the browser and MonitorX has no authentication,
+    so accepting an arbitrary shell command would be remote code execution.
+    """
     try:
         body = await request.json()
-        cmd = body.get("command", "")
+        command = str(body.get("command", "")).strip()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    
-    if not cmd:
-        raise HTTPException(status_code=400, detail="No command provided")
-    
-    dangerous = ["rm -rf /", "mkfs", "dd if=", "shutdown", "reboot", "halt", "poweroff"]
-    for d in dangerous:
-        if d in cmd.lower():
-            raise HTTPException(status_code=403, detail=f"Blocked dangerous command pattern: {d}")
-    
+
+    if command == "dmesg -T | tail -n 25":
+        args = ("dmesg", "-T")
+        tail_lines = 25
+    else:
+        args = SAFE_DIAGNOSTIC_COMMANDS.get(command)
+        tail_lines = None
+    if not args:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the dashboard's approved diagnostic presets can be run. Arbitrary shell commands are disabled."
+        )
+
     try:
         proc = await asyncio.create_subprocess_exec(
-            "bash", "-c", cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        output = stdout.decode()
-        error = stderr.decode()
-        return {
-            "output": output,
-            "error": error,
-            "returncode": proc.returncode
-        }
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        output = stdout.decode(errors="replace")
+        if tail_lines:
+            output = "\n".join(output.splitlines()[-tail_lines:])
+        return {"output": output, "error": stderr.decode(errors="replace"), "returncode": proc.returncode}
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=500, detail="Command execution timed out (30s)")
+        try:
+            proc.kill()
+            await proc.communicate()
+        except ProcessLookupError:
+            pass
+        raise HTTPException(status_code=504, detail="Diagnostic command timed out after 15 seconds.")
+    except FileNotFoundError:
+        raise HTTPException(status_code=501, detail=f"Diagnostic command is unavailable: {args[0]}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Diagnostic command failed")
+        raise HTTPException(status_code=500, detail="Diagnostic command could not be executed.")
 
 
 if __name__ == "__main__":
