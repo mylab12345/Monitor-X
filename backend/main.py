@@ -142,6 +142,26 @@ class RemediateRequest(BaseModel):
     target: Optional[str] = Field(default=None, max_length=128)
 
 
+class VMActionRequest(BaseModel):
+    """Optional payload for VM control endpoints (reserved for future use)."""
+    confirm: bool = Field(default=False, description="Set true for destructive actions (poweroff/destroy).")
+
+
+# Approved libvirt domain control actions exposed to the dashboard.
+# - start / shutdown / reboot / suspend / resume: graceful control operations
+# - poweroff / destroy: forced termination; require explicit confirm=1
+VM_ACTIONS_GRACEFUL = ("start", "shutdown", "reboot", "suspend", "resume")
+VM_ACTIONS_DESTRUCTIVE = ("poweroff", "destroy")
+VM_ACTIONS = VM_ACTIONS_GRACEFUL + VM_ACTIONS_DESTRUCTIVE
+VM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,62}$")
+# Bounded in-memory ring buffer of VM control actions for the audit panel.
+_vm_action_log: List[Dict[str, Any]] = []
+_VM_ACTION_LOG_LIMIT = 50
+_vm_action_log_lock = asyncio.Lock()
+
+VIRSH_BIN = shutil.which("virsh") or "/usr/bin/virsh"
+
+
 class ConnectionManager:
     """Manages WebSocket connections"""
     
@@ -425,6 +445,232 @@ async def get_system_info() -> Dict[str, Any]:
         "uptime_str": str(uptime).split('.')[0],
         "python_version": platform.python_version()
     }
+
+
+@app.get("/api/vms/capabilities")
+async def vm_capabilities():
+    """Expose whether the running dashboard can control libvirt guests.
+
+    Mirrors the service-control pattern: the MonitorX process is unprivileged
+    by default, so destructive operations rely on a narrowly scoped, non-
+    interactive sudo policy installed by ``systemd/install-service.sh``.
+    """
+    if not LIBVIRT_AVAILABLE:
+        return {
+            "can_control": False,
+            "can_list": False,
+            "mode": "unavailable",
+            "message": "libvirt is not installed on this host. Install python3-libvirt and start libvirtd to enable VM monitoring.",
+        }
+
+    # Listing domains is possible through the read-only connection.
+    if libvirt_conn and getattr(libvirt_conn, "getURI", lambda: "")() == "qemu:///system":
+        list_ok = True
+    else:
+        list_ok = bool(libvirt_conn)
+
+    if os.geteuid() == 0:
+        return {
+            "can_control": True,
+            "can_list": list_ok,
+            "mode": "root",
+            "message": "VM controls are available (running as root).",
+        }
+
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return {
+            "can_control": False,
+            "can_list": list_ok,
+            "mode": "unconfigured",
+            "message": "sudo is unavailable. Re-run systemd/install-service.sh to configure VM controls.",
+        }
+
+    # Probe whether the configured sudo policy permits `virsh --no-ask-password`.
+    proc = await asyncio.create_subprocess_exec(
+        sudo, "-n", "-l",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    policy_text = stdout.decode(errors="replace")
+    virsh_path = VIRSH_BIN
+    allowed = any(
+        f"{virsh_path}".split("/")[-1] in line and f"{a}" in line
+        for line in policy_text.splitlines()
+        for a in VM_ACTIONS
+    )
+
+    return {
+        "can_control": allowed,
+        "can_list": list_ok,
+        "mode": "sudo" if allowed else "unconfigured",
+        "message": "VM controls are available." if allowed
+        else "Controls need the MonitorX sudo policy. Run systemd/install-service.sh, then restart MonitorX.",
+    }
+
+
+def _resolve_domain(vm_id: str):
+    """Look up a libvirt domain by id (UUID, numeric ID, or name).
+
+    Returns ``(domain, error_message)``. ``error_message`` is ``None`` on success.
+    """
+    if not libvirt_conn:
+        return None, "libvirt connection is not available."
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        return None, "Invalid VM identifier."
+
+    # 1. Try as a numeric domain id (only valid for active domains).
+    if vm_id.isdigit():
+        try:
+            domain = libvirt_conn.lookupById(int(vm_id))
+            if domain:
+                return domain, None
+        except libvirt.libvirtError:
+            pass
+
+    # 2. Try as a domain UUID.
+    try:
+        domain = libvirt_conn.lookupByUUIDString(vm_id)
+        if domain:
+            return domain, None
+    except libvirt.libvirtError:
+        pass
+
+    # 3. Try as a domain name.
+    try:
+        domain = libvirt_conn.lookupByName(vm_id)
+        if domain:
+            return domain, None
+    except libvirt.libvirtError:
+        pass
+
+    return None, f"VM '{vm_id}' was not found."
+
+
+async def _run_virsh_action(action: str, vm_id: str) -> Optional[str]:
+    """Run a constrained virsh command, mirroring the service-control pattern.
+
+    Returns ``None`` on success, or a human-readable error string on failure.
+    """
+    args = ["--no-ask-password", action, vm_id]
+    if os.geteuid() == 0:
+        command = [VIRSH_BIN, *args]
+    else:
+        sudo = shutil.which("sudo")
+        if not sudo:
+            return "sudo is not installed. Re-run systemd/install-service.sh to configure VM controls."
+        command = [sudo, "-n", VIRSH_BIN, *args]
+
+    proc = await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.communicate()
+        except ProcessLookupError:
+            pass
+        return f"virsh {action} timed out after 30 seconds."
+    err = (stderr or stdout).decode(errors="replace").strip()
+    if proc.returncode != 0:
+        if "password is required" in err.lower() or "not allowed" in err.lower():
+            err = ("MonitorX is not authorized to control VMs. "
+                   "Run systemd/install-service.sh, then restart MonitorX.")
+        return err or f"virsh {action} failed (exit code {proc.returncode})."
+    return None
+
+
+async def _record_vm_action(vm_id: str, action: str, success: bool, message: str) -> None:
+    """Append an entry to the bounded audit log used by the UI."""
+    entry = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "vm": vm_id,
+        "action": action,
+        "success": success,
+        "message": message,
+    }
+    async with _vm_action_log_lock:
+        _vm_action_log.append(entry)
+        if len(_vm_action_log) > _VM_ACTION_LOG_LIMIT:
+            del _vm_action_log[: len(_vm_action_log) - _VM_ACTION_LOG_LIMIT]
+
+
+@app.post("/api/vms/{vm_id}/{action}")
+async def control_vm(vm_id: str, action: str, payload: Optional[VMActionRequest] = None):
+    """Perform a libvirt domain action (start, stop, poweroff, reboot, ...)."""
+    if action not in VM_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported action '{action}'. Valid: {list(VM_ACTIONS)}",
+        )
+
+    # Destructive actions require explicit confirmation from the UI.
+    if action in VM_ACTIONS_DESTRUCTIVE and not (payload and payload.confirm):
+        raise HTTPException(
+            status_code=400,
+            detail=f"The '{action}' action is destructive and requires an explicit confirmation payload.",
+        )
+
+    if not LIBVIRT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="libvirt is not installed on this host.")
+
+    # Sanity check: surface libvirt state so the UI can decide before sending
+    # graceful vs. destructive commands (e.g. "shutdown" is a no-op on a stopped VM).
+    domain, lookup_error = _resolve_domain(vm_id)
+    if lookup_error:
+        await _record_vm_action(vm_id, action, False, lookup_error)
+        raise HTTPException(status_code=404, detail=lookup_error)
+
+    try:
+        info = domain.info()
+        current_state = info[0]
+    except Exception as exc:
+        await _record_vm_action(vm_id, action, False, f"Could not read domain state: {exc}")
+        raise HTTPException(status_code=503, detail=f"Could not read VM state: {exc}")
+
+    # Skip no-ops so the UI does not log a misleading failure.
+    if action in ("start",) and current_state == libvirt.VIR_DOMAIN_RUNNING:
+        msg = f"VM '{vm_id}' is already running."
+        await _record_vm_action(vm_id, action, True, msg)
+        return {"success": True, "message": msg, "state": "running", "noop": True}
+    if action in ("shutdown", "reboot", "poweroff", "destroy") and current_state == libvirt.VIR_DOMAIN_SHUTOFF:
+        msg = f"VM '{vm_id}' is already stopped."
+        await _record_vm_action(vm_id, action, True, msg)
+        return {"success": True, "message": msg, "state": "shutoff", "noop": True}
+    if action == "suspend" and current_state == libvirt.VIR_DOMAIN_PAUSED:
+        msg = f"VM '{vm_id}' is already paused."
+        await _record_vm_action(vm_id, action, True, msg)
+        return {"success": True, "message": msg, "state": "paused", "noop": True}
+    if action == "resume" and current_state == libvirt.VIR_DOMAIN_RUNNING:
+        msg = f"VM '{vm_id}' is already running."
+        await _record_vm_action(vm_id, action, True, msg)
+        return {"success": True, "message": msg, "state": "running", "noop": True}
+
+    error = await _run_virsh_action(action, vm_id)
+    if error:
+        await _record_vm_action(vm_id, action, False, error)
+        raise HTTPException(status_code=403, detail=error)
+
+    friendly = {
+        "start": "started", "shutdown": "shut down", "reboot": "rebooted",
+        "poweroff": "powered off", "destroy": "force-stopped",
+        "suspend": "suspended", "resume": "resumed",
+    }[action]
+    message = f"VM '{vm_id}' {friendly} successfully."
+    await _record_vm_action(vm_id, action, True, message)
+    return {"success": True, "message": message}
+
+
+@app.get("/api/vms/log")
+async def vm_action_log(limit: int = Query(20, ge=1, le=_VM_ACTION_LOG_LIMIT)):
+    """Return the most recent VM control actions, newest first."""
+    async with _vm_action_log_lock:
+        recent = list(reversed(_vm_action_log[-limit:]))
+    return {"entries": recent, "total": len(_vm_action_log)}
+
 
 
 async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:

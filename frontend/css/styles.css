@@ -1230,6 +1230,7 @@ canvas {
 
 /* Live KVM guest metrics */
 .vm-header-actions { display: flex; align-items: center; gap: 10px; }
+.vm-refresh-select { min-width: 110px; }
 .vm-running { border-color: rgba(56, 189, 248, .26); }
 .vm-uuid { margin-top: 2px; color: var(--text-dim); font: 0.68rem 'JetBrains Mono', monospace; }
 .vm-utilization { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; }
@@ -1243,3 +1244,62 @@ canvas {
 .vm-live-grid b { font: .7rem 'JetBrains Mono', monospace; color: var(--text-main); white-space: nowrap; }
 .vm-rate-status { margin-top: 10px; color: var(--text-dim); font-size: .72rem; font-style: italic; }
 @media (max-width: 480px) { .vm-utilization, .vm-live-grid { grid-template-columns: 1fr; } }
+
+/* VM state pills (extended libvirt states) */
+.vm-state { display: inline-flex; align-items: center; gap: 6px; }
+.vm-state.running { background: var(--success-bg); color: var(--success); border: 1px solid var(--success-glow); }
+.vm-state.shutoff, .vm-state.crashed { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger-glow); }
+.vm-state.paused, .vm-state.pmsuspended, .vm-state.shutdown { background: var(--warning-bg); color: var(--warning); border: 1px solid var(--warning-glow); }
+.vm-state.blocked, .vm-state.no_state, .vm-state.unknown { background: rgba(255,255,255,.05); color: var(--text-muted); border: 1px solid var(--border-card); }
+.vm-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
+
+/* VM KPI summary row */
+.vm-kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.vm-kpi { background: var(--bg-card); border: 1px solid var(--border-card); border-radius: var(--radius-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; transition: var(--transition); }
+.vm-kpi:hover { border-color: var(--border-hover); }
+.vm-kpi-label { font-size: 0.7rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.vm-kpi b { font: 1.4rem/1 'JetBrains Mono', monospace; color: var(--text-main); }
+.vm-kpi.kpi-running b { color: var(--success); }
+.vm-kpi.kpi-stopped b { color: var(--danger); }
+.vm-kpi.kpi-paused b { color: var(--warning); }
+.vm-kpi.kpi-other b { color: var(--accent-indigo); }
+
+/* VM control bar */
+.vm-controls-bar { margin-bottom: 14px; }
+
+/* Bulk-action toolbar (sticky) */
+.vm-bulk-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; margin-bottom: 14px; background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: var(--radius-md); animation: fadeIn 0.2s ease; }
+.vm-bulk-bar span { font-size: 0.88rem; font-weight: 600; color: var(--accent-blue); }
+.vm-bulk-bar b { color: var(--text-main); }
+.vm-bulk-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* VM card extensions */
+.vm-card { display: flex; flex-direction: column; gap: 4px; position: relative; transition: var(--transition); }
+.vm-card:hover { transform: translateY(-1px); }
+.vm-card-header { display: flex; align-items: flex-start; gap: 12px; }
+.vm-card-header > div:first-child { flex: 1; min-width: 0; }
+.vm-card-header > div:first-child strong { display: block; font-size: 1rem; word-break: break-all; }
+.vm-checkbox-cell { display: flex; align-items: center; padding-top: 2px; }
+.vm-checkbox { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent-blue); }
+.vm-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-card); }
+.vm-actions .btn { padding: 6px 11px; font-size: 0.76rem; }
+.vm-card.selected { border-color: rgba(56, 189, 248, 0.5); box-shadow: 0 0 0 1px var(--accent-blue) inset; }
+.vm-card.pending { opacity: 0.6; pointer-events: none; }
+.vm-card.pending::after { content: '⏳ Working…'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-weight: 800; color: var(--accent-blue); background: rgba(0,0,0,0.45); border-radius: var(--radius-lg); backdrop-filter: blur(2px); }
+.vm-empty-state { grid-column: 1 / -1; text-align: center; padding: 56px 24px; background: var(--bg-card); border: 1px dashed var(--border-card); border-radius: var(--radius-lg); }
+.vm-empty-state .icon { font-size: 3rem; margin-bottom: 12px; }
+.vm-empty-state h3 { font-size: 1.1rem; color: var(--text-main); margin-bottom: 6px; }
+.vm-empty-state p { font-size: 0.88rem; color: var(--text-muted); max-width: 460px; margin: 0 auto; }
+.vm-empty-state code { background: rgba(0,0,0,.3); padding: 2px 6px; border-radius: 4px; font: 0.78rem 'JetBrains Mono', monospace; color: var(--accent-blue); }
+
+/* VM action audit log */
+.vm-audit-panel { margin-top: 24px; background: var(--bg-card); border: 1px solid var(--border-card); border-radius: var(--radius-lg); padding: 18px 20px; }
+.vm-audit-list { margin-top: 12px; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.vm-audit-entry { display: grid; grid-template-columns: 110px 1fr auto; gap: 12px; align-items: center; padding: 8px 12px; border-radius: var(--radius-sm); background: rgba(0,0,0,.18); border-left: 3px solid var(--text-muted); font-size: 0.82rem; }
+.vm-audit-entry.success { border-left-color: var(--success); }
+.vm-audit-entry.failed { border-left-color: var(--danger); }
+.vm-audit-entry time { font: 0.72rem 'JetBrains Mono', monospace; color: var(--text-dim); }
+.vm-audit-entry .vm-audit-vm { font-weight: 700; color: var(--accent-blue); }
+.vm-audit-entry .vm-audit-action { padding: 2px 8px; border-radius: 99px; background: rgba(255,255,255,.06); font: 0.7rem 'JetBrains Mono', monospace; color: var(--text-main); }
+.vm-audit-entry .vm-audit-msg { color: var(--text-muted); font-size: 0.78rem; }
+.vm-audit-entry.failed .vm-audit-msg { color: #fda4af; }

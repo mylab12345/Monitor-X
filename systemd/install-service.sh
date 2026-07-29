@@ -44,7 +44,9 @@ EOF
 SYSTEMCTL_BIN="$(command -v systemctl)"
 SYSCTL_BIN="$(command -v sysctl)"
 JOURNALCTL_BIN="$(command -v journalctl)"
+VIRSH_BIN="$(command -v virsh || true)"
 SUDOERS_DEST="/etc/sudoers.d/monitorx-systemctl"
+SUDOERS_VM_DEST="/etc/sudoers.d/monitorx-virsh"
 echo "[2/4] Installing limited service-control policy at $SUDOERS_DEST..."
 cat <<EOF | sudo tee "$SUDOERS_DEST" > /dev/null
 # Managed by MonitorX. Required for dashboard Start/Stop/Restart controls.
@@ -54,6 +56,21 @@ $CURRENT_USER ALL=(root) NOPASSWD: MONITORX_SYSTEMCTL, MONITORX_REMEDIATION
 EOF
 sudo chmod 440 "$SUDOERS_DEST"
 sudo visudo -cf "$SUDOERS_DEST"
+
+# Optional: VM (libvirt) control policy. Only installed when virsh is present
+# so the policy is never broader than what the dashboard needs.
+if [ -n "$VIRSH_BIN" ]; then
+    echo "[2b/4] Installing limited VM-control policy at $SUDOERS_VM_DEST..."
+    cat <<EOF | sudo tee "$SUDOERS_VM_DEST" > /dev/null
+# Managed by MonitorX. Required for dashboard Start/Stop/Reboot/Poweroff controls on libvirt/KVM guests.
+Cmnd_Alias MONITORX_VIRSH = $VIRSH_BIN --no-ask-password start *, $VIRSH_BIN --no-ask-password shutdown *, $VIRSH_BIN --no-ask-password reboot *, $VIRSH_BIN --no-ask-password poweroff *, $VIRSH_BIN --no-ask-password destroy *, $VIRSH_BIN --no-ask-password suspend *, $VIRSH_BIN --no-ask-password resume *
+$CURRENT_USER ALL=(root) NOPASSWD: MONITORX_VIRSH
+EOF
+    sudo chmod 440 "$SUDOERS_VM_DEST"
+    sudo visudo -cf "$SUDOERS_VM_DEST"
+else
+    echo "[2b/4] virsh not found; skipping VM-control sudo policy (re-run installer after installing libvirt-client)."
+fi
 
 echo "[3/4] Reloading systemd daemon..."
 sudo systemctl daemon-reload
