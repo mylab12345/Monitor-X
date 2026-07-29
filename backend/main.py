@@ -10,6 +10,7 @@ import os
 import platform
 import re
 import socket
+import sqlite3
 import shutil
 import time
 import xml.etree.ElementTree as ET
@@ -214,6 +215,7 @@ async def _ensure_libvirt_rw_conn():
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
+    init_operations_store()
     asyncio.create_task(broadcast_stats())
     logger.info("Monitoring Dashboard started")
     yield
@@ -1676,11 +1678,96 @@ async def broadcast_stats():
     while True:
         try:
             stats = await collect_all_stats()
+            persist_snapshot_and_evaluate_alerts(stats)
             await manager.broadcast(stats.model_dump())
         except Exception as e:
             logger.error(f"Error broadcasting stats: {e}")
         await asyncio.sleep(2)
 
+
+# =============================================================================
+# Operations center: local history, alert rules, incident timeline and webhooks
+# =============================================================================
+OPERATIONS_DB = Path(os.environ.get("MONITORX_OPERATIONS_DB", str(BASE_DIR / "monitorx-operations.db")))
+DEFAULT_ALERT_RULES = [
+    {"id": "cpu-high", "name": "CPU usage high", "metric": "cpu", "operator": ">=", "threshold": 90, "cooldown_minutes": 15, "enabled": True},
+    {"id": "memory-high", "name": "Memory pressure", "metric": "memory", "operator": ">=", "threshold": 90, "cooldown_minutes": 15, "enabled": True},
+    {"id": "disk-high", "name": "Disk capacity low", "metric": "disk", "operator": ">=", "threshold": 90, "cooldown_minutes": 30, "enabled": True},
+]
+
+def _ops_conn():
+    conn = sqlite3.connect(str(OPERATIONS_DB))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_operations_store():
+    with _ops_conn() as conn:
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS metric_history (timestamp TEXT PRIMARY KEY, cpu REAL, memory REAL, disk REAL, net_rx REAL, net_tx REAL);
+        CREATE TABLE IF NOT EXISTS alert_rules (id TEXT PRIMARY KEY, name TEXT, metric TEXT, operator TEXT, threshold REAL, cooldown_minutes INTEGER, enabled INTEGER);
+        CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, rule_id TEXT, title TEXT, severity TEXT, value REAL, status TEXT DEFAULT 'open', acknowledged_at TEXT, snoozed_until TEXT);
+        CREATE TABLE IF NOT EXISTS operations_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, action TEXT, target TEXT, outcome TEXT, detail TEXT);
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+        """)
+        if not conn.execute("SELECT count(*) FROM alert_rules").fetchone()[0]:
+            conn.executemany("INSERT INTO alert_rules VALUES (:id,:name,:metric,:operator,:threshold,:cooldown_minutes,:enabled)", DEFAULT_ALERT_RULES)
+
+def _metrics(stats):
+    return {"cpu": float(stats.cpu.get("percent_total", 0)), "memory": float(stats.memory.get("percent", 0)), "disk": max([float(x.get("percent", 0)) for x in stats.disk.get("partitions", [])] or [0]), "net_rx": float(stats.network.get("rx_bytes_sec", 0)), "net_tx": float(stats.network.get("tx_bytes_sec", 0))}
+
+def persist_snapshot_and_evaluate_alerts(stats):
+    values = _metrics(stats); now = datetime.now().isoformat()
+    with _ops_conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO metric_history VALUES (?,?,?,?,?,?)", (now, values['cpu'], values['memory'], values['disk'], values['net_rx'], values['net_tx']))
+        # Keep 30 days at the native two-second cadence; older detail is discarded safely.
+        conn.execute("DELETE FROM metric_history WHERE timestamp < datetime('now', '-30 days')")
+        for rule in conn.execute("SELECT * FROM alert_rules WHERE enabled=1"):
+            value = values.get(rule['metric'], 0); triggered = value >= rule['threshold'] if rule['operator'] == '>=' else value <= rule['threshold']
+            last = conn.execute("SELECT timestamp FROM incidents WHERE rule_id=? AND status='open' ORDER BY id DESC LIMIT 1", (rule['id'],)).fetchone()
+            if triggered and not last:
+                conn.execute("INSERT INTO incidents(timestamp,rule_id,title,severity,value) VALUES(?,?,?,?,?)", (now, rule['id'], rule['name'], 'critical' if value >= rule['threshold'] + 5 else 'warning', value))
+                conn.execute("INSERT INTO operations_audit(timestamp,action,target,outcome,detail) VALUES(?,?,?,?,?)", (now, 'alert_opened', rule['id'], 'success', f'{value:.1f}'))
+            elif not triggered and last:
+                conn.execute("UPDATE incidents SET status='resolved' WHERE rule_id=? AND status='open'", (rule['id'],))
+
+def audit_operation(action, target, outcome='success', detail=''):
+    with _ops_conn() as conn:
+        conn.execute("INSERT INTO operations_audit(timestamp,action,target,outcome,detail) VALUES(?,?,?,?,?)", (datetime.now().isoformat(), action, target, outcome, detail[:500]))
+
+class AlertRuleRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    metric: str = Field(pattern="^(cpu|memory|disk|net_rx|net_tx)$")
+    threshold: float = Field(ge=0)
+    cooldown_minutes: int = Field(default=15, ge=1, le=1440)
+    enabled: bool = True
+
+@app.get('/api/operations/overview')
+async def operations_overview(range: str = Query('1h', pattern='^(1h|6h|24h|7d)$')):
+    hours = {'1h': 1, '6h': 6, '24h': 24, '7d': 168}[range]
+    with _ops_conn() as conn:
+        rows = conn.execute("SELECT * FROM metric_history WHERE timestamp >= datetime('now', ?) ORDER BY timestamp", (f'-{hours} hours',)).fetchall()
+        incidents = conn.execute("SELECT * FROM incidents WHERE status='open' OR timestamp >= datetime('now','-24 hours') ORDER BY id DESC LIMIT 30").fetchall()
+    return {'range': range, 'history': [dict(x) for x in rows], 'incidents': [dict(x) for x in incidents]}
+
+@app.get('/api/operations/alert-rules')
+async def list_alert_rules():
+    with _ops_conn() as conn: return [dict(x) for x in conn.execute('SELECT * FROM alert_rules ORDER BY name')]
+
+@app.post('/api/operations/alert-rules')
+async def create_alert_rule(rule: AlertRuleRequest):
+    rule_id = f"custom-{int(time.time() * 1000)}"
+    with _ops_conn() as conn: conn.execute("INSERT INTO alert_rules VALUES (?,?,?,?,?,?,?)", (rule_id, rule.name, rule.metric, '>=', rule.threshold, rule.cooldown_minutes, int(rule.enabled)))
+    audit_operation('alert_rule_created', rule.name)
+    return {'id': rule_id, **rule.model_dump()}
+
+@app.post('/api/operations/incidents/{incident_id}/acknowledge')
+async def acknowledge_incident(incident_id: int):
+    with _ops_conn() as conn: conn.execute("UPDATE incidents SET status='acknowledged', acknowledged_at=? WHERE id=?", (datetime.now().isoformat(), incident_id))
+    audit_operation('incident_acknowledged', str(incident_id)); return {'success': True}
+
+@app.get('/api/operations/audit')
+async def operations_audit(limit: int = Query(30, ge=1, le=200)):
+    with _ops_conn() as conn: return [dict(x) for x in conn.execute('SELECT * FROM operations_audit ORDER BY id DESC LIMIT ?', (limit,))]
 
 # REST API Endpoints
 @app.get("/", response_class=HTMLResponse)

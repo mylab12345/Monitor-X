@@ -7,3 +7,5 @@ dist/
 build/
 .pytest_cache/
 *.log
+# Local MonitorX operations history and configuration
+monitorx-operations.db
