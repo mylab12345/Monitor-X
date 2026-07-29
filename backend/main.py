@@ -1108,7 +1108,12 @@ async def _run_native_action(action: str, vm_id: str):
 
 @app.post("/api/vms/{vm_id}/resize")
 async def resize_vm(vm_id: str, payload: VMResizeRequest):
-    """Resize VM CPU and/or memory via libvirt API."""
+    """Resize VM CPU and/or memory via libvirt API.
+
+    For both running and stopped VMs the endpoint first increases the
+    maximum (if the requested value exceeds it) and then sets the current
+    allocation so the change takes effect immediately on next boot or live.
+    """
     if not LIBVIRT_AVAILABLE:
         raise HTTPException(status_code=503, detail="libvirt is not installed on this host.")
     if not VM_ID_PATTERN.fullmatch(vm_id):
@@ -1120,22 +1125,111 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
     if lookup_error:
         raise HTTPException(status_code=404, detail=lookup_error)
 
+    # Determine whether the VM is running so we pick the right affect flag.
+    is_running = False
+    try:
+        info = await _run_libvirt(domain.info, timeout=5.0)
+        is_running = info[0] == libvirt.VIR_DOMAIN_RUNNING
+    except Exception:
+        pass
+
+    # For a running VM we modify live state; for a stopped one we modify the
+    # persistent config so the change takes effect on next start.
+    affect_flag = (libvirt.VIR_DOMAIN_AFFECT_LIVE if is_running
+                   else libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+
     messages = []
 
+    # ------------------------------------------------------------------
+    # vCPUs
+    # ------------------------------------------------------------------
     if payload.vcpus is not None:
+        # Step 1: increase max vcpus if needed
         try:
             conn, _ = await _ensure_libvirt_rw_conn()
-            target = await _resolve_domain(vm_id, conn=conn) if conn else (domain, None)
-            tgt = target[0] if target and target[0] else domain
-            await _run_libvirt(
-                lambda: tgt.setVcpusFlags(payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_CURRENT),
-                timeout=10.0,
-            )
-            messages.append(f"vCPUs set to {payload.vcpus}")
+            tgt_domain = domain
+            if conn:
+                d, _ = await _resolve_domain(vm_id, conn=conn)
+                if d:
+                    tgt_domain = d
+            # Read current max
+            info = await _run_libvirt(tgt_domain.info, timeout=5.0)
+            current_max = info[3]  # nrVirtCpu (max)
+            if payload.vcpus > current_max:
+                # Increase max via persistent config first
+                await _run_libvirt(
+                    lambda: tgt_domain.setVcpusFlags(
+                        payload.vcpus,
+                        libvirt.VIR_DOMAIN_AFFECT_CONFIG | libvirt.VIR_DOMAIN_AFFECT_MAXIMUM,
+                    ),
+                    timeout=10.0,
+                )
+                # If running, also increase live max so the next step succeeds
+                if is_running:
+                    try:
+                        await _run_libvirt(
+                            lambda: tgt_domain.setVcpusFlags(
+                                payload.vcpus,
+                                libvirt.VIR_DOMAIN_AFFECT_LIVE | libvirt.VIR_DOMAIN_AFFECT_MAXIMUM,
+                            ),
+                            timeout=10.0,
+                        )
+                    except Exception:
+                        pass  # some hypervisors don't support live max increase
+        except Exception as exc:
+            # If native fails, try virsh setvcpus --maximum
+            try:
+                max_args = ["--maximum", "--config"]
+                cmd = _build_virsh_modify_command(
+                    "setvcpus", vm_id, str(payload.vcpus), *max_args,
+                )
+                if cmd:
+                    err = await _run_virsh_modify(cmd)
+                    if err:
+                        messages.append(f"vCPU max: {err}")
+            except Exception:
+                messages.append(f"vCPU max increase failed: {exc}")
+
+        # Step 2: set current vcpus
+        # If the VM is running, try to set live first. If that fails (because
+        # the hypervisor doesn't support live max increase), fall back to
+        # persistent config and tell the user it applies on next boot.
+        live_failed = False
+        try:
+            conn, _ = await _ensure_libvirt_rw_conn()
+            tgt_domain = domain
+            if conn:
+                d, _ = await _resolve_domain(vm_id, conn=conn)
+                if d:
+                    tgt_domain = d
+            if is_running:
+                try:
+                    await _run_libvirt(
+                        lambda: tgt_domain.setVcpusFlags(payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_LIVE),
+                        timeout=10.0,
+                    )
+                    messages.append(f"vCPUs set to {payload.vcpus}")
+                except Exception:
+                    live_failed = True
+                    raise  # fall through to config fallback below
+            if not is_running or live_failed:
+                await _run_libvirt(
+                    lambda: tgt_domain.setVcpusFlags(payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_CONFIG),
+                    timeout=10.0,
+                )
+                if live_failed:
+                    messages.append(
+                        f"vCPUs set to {payload.vcpus} (persistent — will take effect after reboot; "
+                        f"live max is capped at the current hardware limit)")
+                else:
+                    messages.append(f"vCPUs set to {payload.vcpus}")
         except libvirt.libvirtError as exc:
             msg = str(exc)
-            if "read only" in msg.lower() or "denied" in msg.lower():
-                cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus))
+            low = msg.lower()
+            if ("read only" in low or "denied" in low
+                    or "greater than max" in low or "max allowable" in low):
+                extra_args = ["--config"] if (not is_running or live_failed) else []
+                cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus), *extra_args)
                 if cmd:
                     err = await _run_virsh_modify(cmd)
                     messages.append(f"vCPUs set to {payload.vcpus} (via virsh)" if not err else f"vCPUs: {err}")
@@ -1146,21 +1240,89 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
         except Exception as exc:
             messages.append(f"vCPUs: {exc}")
 
+    # ------------------------------------------------------------------
+    # Memory
+    # ------------------------------------------------------------------
     if payload.memory_mb is not None:
         mem_kib = payload.memory_mb * 1024
+
+        # Step 1: increase max memory if needed
         try:
             conn, _ = await _ensure_libvirt_rw_conn()
-            target = await _resolve_domain(vm_id, conn=conn) if conn else (domain, None)
-            tgt = target[0] if target and target[0] else domain
-            await _run_libvirt(
-                lambda: tgt.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_CURRENT),
-                timeout=10.0,
-            )
-            messages.append(f"Memory set to {payload.memory_mb} MiB")
+            tgt_domain = domain
+            if conn:
+                d, _ = await _resolve_domain(vm_id, conn=conn)
+                if d:
+                    tgt_domain = d
+            info = await _run_libvirt(tgt_domain.info, timeout=5.0)
+            current_max_mem = info[2]  # maxMem in KiB
+            if mem_kib > current_max_mem:
+                await _run_libvirt(
+                    lambda: tgt_domain.setMemoryFlags(
+                        mem_kib,
+                        libvirt.VIR_DOMAIN_AFFECT_CONFIG | libvirt.VIR_DOMAIN_AFFECT_MAXIMUM,
+                    ),
+                    timeout=10.0,
+                )
+                if is_running:
+                    try:
+                        await _run_libvirt(
+                            lambda: tgt_domain.setMemoryFlags(
+                                mem_kib,
+                                libvirt.VIR_DOMAIN_AFFECT_LIVE | libvirt.VIR_DOMAIN_AFFECT_MAXIMUM,
+                            ),
+                            timeout=10.0,
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            # Virsh fallback: setmaxmem --config for stopped, plain for running
+            try:
+                max_args = ["--config"]
+                cmd = _build_virsh_modify_command(
+                    "setmaxmem", vm_id, str(mem_kib), *max_args,
+                )
+                if cmd:
+                    await _run_virsh_modify(cmd)
+            except Exception:
+                pass
+
+        # Step 2: set current memory
+        mem_live_failed = False
+        try:
+            conn, _ = await _ensure_libvirt_rw_conn()
+            tgt_domain = domain
+            if conn:
+                d, _ = await _resolve_domain(vm_id, conn=conn)
+                if d:
+                    tgt_domain = d
+            if is_running:
+                try:
+                    await _run_libvirt(
+                        lambda: tgt_domain.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_LIVE),
+                        timeout=10.0,
+                    )
+                    messages.append(f"Memory set to {payload.memory_mb} MiB")
+                except Exception:
+                    mem_live_failed = True
+                    raise
+            if not is_running or mem_live_failed:
+                await _run_libvirt(
+                    lambda: tgt_domain.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_CONFIG),
+                    timeout=10.0,
+                )
+                if mem_live_failed:
+                    messages.append(
+                        f"Memory set to {payload.memory_mb} MiB (persistent — will take effect after reboot)")
+                else:
+                    messages.append(f"Memory set to {payload.memory_mb} MiB")
         except libvirt.libvirtError as exc:
             msg = str(exc)
-            if "read only" in msg.lower() or "denied" in msg.lower():
-                cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), "--config")
+            low = msg.lower()
+            if ("read only" in low or "denied" in low
+                    or "greater than max" in low or "max allowable" in low):
+                extra_args = ["--config"] if (not is_running or mem_live_failed) else []
+                cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), *extra_args)
                 if cmd:
                     err = await _run_virsh_modify(cmd)
                     messages.append(f"Memory set to {payload.memory_mb} MiB (via virsh)" if not err else f"Memory: {err}")
@@ -1171,8 +1333,9 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
         except Exception as exc:
             messages.append(f"Memory: {exc}")
 
-    await _record_vm_action(vm_id, "resize", True, "; ".join(messages) or "Resize requested")
-    return {"success": True, "message": "; ".join(messages), "vm_id": vm_id}
+    result_msg = "; ".join(messages) or "Resize requested"
+    await _record_vm_action(vm_id, "resize", True, result_msg)
+    return {"success": True, "message": result_msg, "vm_id": vm_id}
 
 
 @app.post("/api/vms/{vm_id}/{action}")
