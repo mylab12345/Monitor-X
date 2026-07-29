@@ -934,9 +934,9 @@ def _virsh_command(action: str, vm_id: str) -> List[str]:
     """Build the argv for a constrained virsh lifecycle command.
 
     Correctness notes (these were the actual bugs):
-      * ``--no-ask-password`` is a *systemctl* flag. virsh rejects it with
-        "unsupported option", so every control command failed before it ever
-        reached libvirtd. The virsh equivalent is ``--no-pkttyagent``.
+      * ``--no-ask-password`` is a *systemctl* flag, not a virsh flag.
+        virsh rejects it with "unsupported option", so every control
+        command failed before it ever reached libvirtd. Just omit it.
       * ``poweroff`` is not a virsh command; the forced-stop verb is
         ``destroy`` (see VM_ACTION_TO_VIRSH).
       * ``--connect`` must be pinned. Without it, ``sudo virsh`` runs as root
@@ -950,7 +950,6 @@ def _virsh_command(action: str, vm_id: str) -> List[str]:
     args = [
         VIRSH_BIN,
         "--quiet",
-        "--no-pkttyagent",
         "--connect", LIBVIRT_URI,
         verb, "--", vm_id,
     ]
@@ -1320,8 +1319,8 @@ async def vm_action_log(limit: int = Query(20, ge=1, le=_VM_ACTION_LOG_LIMIT)):
 
 def _build_virsh_modify_command(subcmd: str, vm_id: str, *args) -> List[str]:
     """Build a virsh command for domain modification via the fallback path."""
-    base = [VIRSH_BIN, "--quiet", "--no-pkttyagent", "--connect", LIBVIRT_URI,
-            subcmd, "--", vm_id, *args]
+    base = [VIRSH_BIN, "--quiet", "--connect", LIBVIRT_URI,
+            subcmd, vm_id, *args]
     if os.geteuid() == 0:
         return base
     sudo = shutil.which("sudo")
