@@ -96,6 +96,20 @@
 
             <!-- TAB 1: DASHBOARD -->
             <div class="tab-content active" id="tab-dashboard">
+                <!-- Prioritized incidents, historical trend, and operator controls -->
+                <section class="operations-center" aria-label="Operations center">
+                    <div class="operations-top">
+                        <div><h2>◈ OPERATIONS CENTER</h2><div class="operations-summary" id="ops-summary">Loading incident intelligence…</div></div>
+                        <div class="ops-controls">
+                            <select id="ops-range" class="filter-select" aria-label="Historical time range"><option value="1h">Last hour</option><option value="6h">6 hours</option><option value="24h">24 hours</option><option value="7d">7 days</option></select>
+                            <button class="btn btn-sm btn-outline" id="ops-rule-btn">+ Alert rule</button>
+                            <button class="btn btn-sm btn-outline" id="focus-mode-btn" aria-pressed="false">Focus mode</button>
+                        </div>
+                    </div>
+                    <div id="ops-incidents" class="ops-incidents"></div>
+                    <canvas id="ops-history-chart" class="ops-chart" aria-label="CPU, memory, and disk historical trend"></canvas>
+                    <div id="ops-detail" class="ops-detail">History is retained locally for 30 days. Alerts are evaluated every live snapshot.</div>
+                </section>
                 <!-- Sparkline Trend Charts Banner -->
                 <div class="charts-row">
                     <div class="chart-card">
@@ -729,5 +743,6 @@
     <script src="/static/js/nasa-enhance.js?v=20260729"></script>
     <script src="/static/js/app.js?v=20260729"></script>
     <script src="/static/js/nexus-hud.js?v=20260729"></script>
+    <script src="/static/js/operations-center.js?v=20260729"></script>
 </body>
 </html>
