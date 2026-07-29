@@ -1,0 +1,647 @@
+/* ===========================================================================
+   MonitorX — NEXT-LEVEL HUD ENHANCEMENTS (v2.3 NEXUS)
+   Progressive enhancement layer loaded AFTER nasa-theme.css.
+   Adds: aurora + parallax starfield, value delta flicker, card hover tilt/lift,
+         animated section reveals, redesigned toasts, FAB, refined modals,
+         denser telemetry chips, scroll progress, and HUD chrome polish.
+   Does NOT touch existing markup/selectors beyond additive styles.
+   =========================================================================== */
+
+:root {
+    --nx-glow-cyan:   56, 198, 255;
+    --nx-glow-violet: 179, 136, 255;
+    --nx-glow-green:  37, 230, 160;
+    --nx-glow-amber:  255, 176, 32;
+    --nx-glow-red:    255, 77,  94;
+
+    --nx-ease-out:    cubic-bezier(.2,.8,.2,1);
+    --nx-ease-bounce: cubic-bezier(.34,1.56,.64,1);
+}
+
+/* ── Smooth everything where supported ─────────────────────────────────── */
+@media (prefers-reduced-motion: no-preference) {
+    .metric-card, .chart-card, .troubleshoot-card, .vm-card,
+    .container-card, .check-card, .btn, .tab-btn, .sub-tab-btn,
+    .btn-icon, .pill, .badge, .modal-content, .toast {
+        transition:
+            transform .35s var(--nx-ease-out),
+            box-shadow .35s var(--nx-ease-out),
+            border-color .25s var(--nx-ease-out),
+            background-color .25s var(--nx-ease-out);
+    }
+}
+
+/* ── Aurora glow behind the app container ──────────────────────────────── */
+body::before {
+    content: '';
+    position: fixed;
+    inset: -10% -10% -30%;
+    z-index: 0;
+    pointer-events: none;
+    background:
+        radial-gradient(60vmax 60vmax at 15% -10%, rgba(var(--nx-glow-cyan), .12), transparent 60%),
+        radial-gradient(50vmax 50vmax at 110% 10%, rgba(var(--nx-glow-violet), .10), transparent 60%),
+        radial-gradient(70vmax 70vmax at 50% 120%, rgba(var(--nx-glow-green), .07), transparent 60%);
+    filter: blur(0px);
+    animation: nx-aurora-drift 22s ease-in-out infinite alternate;
+}
+body.light-theme::before {
+    opacity: .5;
+}
+@keyframes nx-aurora-drift {
+    0%   { transform: translate3d(0, 0, 0) scale(1); }
+    100% { transform: translate3d(-2%, 2%, 0) scale(1.05); }
+}
+.app-container { position: relative; z-index: 1; }
+
+/* ── Parallax starfield depth layers (added via JS: .nx-stars) ─────────── */
+.nx-stars {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    overflow: hidden;
+}
+.nx-stars i {
+    position: absolute;
+    width: 2px; height: 2px;
+    border-radius: 50%;
+    background: #fff;
+    opacity: .0;
+    box-shadow: 0 0 6px rgba(255,255,255,.6);
+    animation: nx-twinkle 4s ease-in-out infinite;
+}
+@keyframes nx-twinkle {
+    0%, 100% { opacity: .15; transform: scale(.7); }
+    50%      { opacity: .9;  transform: scale(1.3); }
+}
+body.light-theme .nx-stars { display: none; }
+
+/* ── Card lift + tilt on hover (non-touch only) ────────────────────────── */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .metric-card, .chart-card, .troubleshoot-card, .vm-card,
+    .container-card, .check-card {
+        transform-origin: center;
+        will-change: transform;
+    }
+    .metric-card:hover, .chart-card:hover, .troubleshoot-card:hover,
+    .vm-card:hover, .container-card:hover, .check-card:hover {
+        transform: translateY(-4px) rotateX(.6deg) rotateY(-.6deg);
+        border-color: var(--border-hover);
+        box-shadow:
+            0 24px 48px -16px rgba(0,0,0,.75),
+            0 0 0 1px rgba(var(--nx-glow-cyan), .35),
+            0 0 32px rgba(var(--nx-glow-cyan), .18);
+        background: var(--bg-card-hover);
+        z-index: 4;
+    }
+    .chart-card:hover { transform: translateY(-3px); }
+    /* soften the corner brackets when hovering so glow reads */
+    .metric-card:hover::before, .chart-card:hover::before,
+    .troubleshoot-card:hover::before, .vm-card:hover::before,
+    .container-card:hover::before, .check-card:hover::before {
+        opacity: 1;
+    }
+}
+
+/* ── Animated section reveals on first view ────────────────────────────── */
+.nx-reveal {
+    opacity: 0;
+    transform: translateY(14px);
+    transition: opacity .6s var(--nx-ease-out), transform .6s var(--nx-ease-out);
+}
+.nx-reveal.in {
+    opacity: 1;
+    transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+    .nx-reveal { opacity: 1; transform: none; transition: none; }
+}
+
+/* ── Value delta flicker ───────────────────────────────────────────────── */
+.metric-value.nx-flash-up   { animation: nx-flash-up .8s var(--nx-ease-out); }
+.metric-value.nx-flash-down { animation: nx-flash-down .8s var(--nx-ease-out); }
+@keyframes nx-flash-up {
+    0%   { color: var(--success); text-shadow: 0 0 18px rgba(var(--nx-glow-green), .9); }
+    100% { color: ''; }
+}
+@keyframes nx-flash-down {
+    0%   { color: var(--danger); text-shadow: 0 0 18px rgba(var(--nx-glow-red), .9); }
+    100% { color: ''; }
+}
+
+/* Glint sweep across metric cards when data changes */
+.metric-value.nx-flash-up::after,
+.metric-value.nx-flash-down::after {
+    /* noop fallback */
+    content: none;
+}
+
+/* ── Header: sharper readability, animated glow border ─────────────────── */
+.app-header::after {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; bottom: -1px;
+    height: 1px;
+    background: linear-gradient(90deg,
+        transparent 0%,
+        rgba(var(--nx-glow-cyan), .6) 20%,
+        rgba(var(--nx-glow-violet), .5) 50%,
+        rgba(var(--nx-glow-cyan), .6) 80%,
+        transparent 100%);
+    background-size: 200% 100%;
+    animation: nx-flow 6s linear infinite;
+}
+@keyframes nx-flow {
+    from { background-position: 0% 0; }
+    to   { background-position: 200% 0; }
+}
+
+/* Logo pulses softly */
+.logo-icon { animation: nx-logo-pulse 3.6s ease-in-out infinite; }
+@keyframes nx-logo-pulse {
+    0%, 100% { box-shadow: inset 0 0 10px rgba(var(--nx-glow-cyan), .25), 0 0 14px rgba(var(--nx-glow-cyan), .2); }
+    50%      { box-shadow: inset 0 0 14px rgba(var(--nx-glow-cyan), .45), 0 0 22px rgba(var(--nx-glow-cyan), .45); }
+}
+
+/* ── Ticker: add a subtle "LIVE" pulse dot ─────────────────────────────── */
+.nasa-ticker-tag::before {
+    content: '';
+    display: inline-block;
+    width: 7px; height: 7px;
+    margin-right: 8px;
+    border-radius: 50%;
+    background: var(--danger);
+    box-shadow: 0 0 8px var(--danger);
+    animation: nx-live-dot 1.2s ease-in-out infinite;
+}
+@keyframes nx-live-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: .4; transform: scale(.7); }
+}
+
+/* ── Buttons: tactile press + neon ring on hover ───────────────────────── */
+.btn {
+    position: relative;
+    overflow: hidden;
+    transform: translateZ(0);
+}
+.btn::after {
+    /* hover sheen */
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,.14) 50%, transparent 70%);
+    transform: translateX(-120%);
+    transition: transform .7s var(--nx-ease-out);
+    pointer-events: none;
+}
+.btn:hover::after { transform: translateX(120%); }
+.btn:active { transform: translateY(1px) scale(.98); }
+.btn-primary { position: relative; }
+.btn-primary::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple), var(--accent-indigo));
+    filter: blur(10px);
+    opacity: .0;
+    z-index: -1;
+    transition: opacity .3s var(--nx-ease-out);
+}
+.btn-primary:hover::before { opacity: .7; }
+.glow-btn { animation: nx-glow-pulse 2.4s ease-in-out infinite; }
+@keyframes nx-glow-pulse {
+    0%, 100% { box-shadow: 0 0 22px rgba(var(--nx-glow-cyan), .45); }
+    50%      { box-shadow: 0 0 38px rgba(var(--nx-glow-cyan), .7), 0 0 60px rgba(var(--nx-glow-violet), .35); }
+}
+
+/* ── Tab underline with gradient flow ──────────────────────────────────── */
+.tab-btn::after {
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+    height: 2px;
+    box-shadow: 0 0 10px rgba(var(--nx-glow-cyan), .7);
+}
+.tab-btn.active { position: relative; }
+
+/* ── Tables: zebra, hover emphasis, sticky headers, row state colors ───── */
+.data-table thead th {
+    position: sticky;
+    top: 0;
+    backdrop-filter: blur(8px);
+    z-index: 2;
+}
+.data-table tbody tr {
+    position: relative;
+}
+.data-table tbody tr:hover td {
+    color: var(--text-main);
+}
+.data-table tbody tr.nx-row-ok::before,
+.data-table tbody tr.nx-row-warn::before,
+.data-table tbody tr.nx-row-err::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+}
+.data-table tbody tr.nx-row-ok::before   { background: var(--success); box-shadow: 0 0 8px var(--success); }
+.data-table tbody tr.nx-row-warn::before { background: var(--warning); box-shadow: 0 0 8px var(--warning); }
+.data-table tbody tr.nx-row-err::before  { background: var(--danger);  box-shadow: 0 0 8px var(--danger); }
+
+/* ── Modals: cinematic enter, backdrop, inner glow ─────────────────────── */
+.modal {
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    background: rgba(2, 6, 14, .55);
+}
+.modal.show { animation: nx-fade-in .25s var(--nx-ease-out); }
+.modal-content {
+    animation: nx-modal-in .35s var(--nx-ease-bounce);
+    box-shadow:
+        0 40px 80px -20px rgba(0,0,0,.85),
+        0 0 0 1px rgba(var(--nx-glow-cyan), .25),
+        0 0 60px rgba(var(--nx-glow-cyan), .15);
+}
+@keyframes nx-fade-in  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes nx-modal-in {
+    from { opacity: 0; transform: translateY(18px) scale(.96); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* ── Toasts: redesigned stack with progress bar ────────────────────────── */
+.toast-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    z-index: 10000;
+    pointer-events: none;
+}
+.toast {
+    pointer-events: auto;
+    min-width: 280px;
+    max-width: 420px;
+    padding: 12px 14px 10px;
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(10,18,32,.96), rgba(6,12,24,.96));
+    border: 1px solid var(--border-card);
+    color: var(--text-main);
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 10px;
+    position: relative;
+    overflow: hidden;
+    backdrop-filter: blur(10px);
+    animation: nx-toast-in .35s var(--nx-ease-bounce);
+    box-shadow: 0 20px 40px -16px rgba(0,0,0,.8);
+}
+.toast.removing { animation: nx-toast-out .25s var(--nx-ease-out) forwards; }
+.toast.success { border-color: rgba(var(--nx-glow-green), .5); box-shadow: 0 20px 40px -16px rgba(0,0,0,.8), 0 0 22px rgba(var(--nx-glow-green), .35); }
+.toast.error   { border-color: rgba(var(--nx-glow-red), .5);   box-shadow: 0 20px 40px -16px rgba(0,0,0,.8), 0 0 22px rgba(var(--nx-glow-red), .35); }
+.toast.warning { border-color: rgba(var(--nx-glow-amber), .5); box-shadow: 0 20px 40px -16px rgba(0,0,0,.8), 0 0 22px rgba(var(--nx-glow-amber), .35); }
+.toast.info    { border-color: rgba(var(--nx-glow-cyan), .5);  box-shadow: 0 20px 40px -16px rgba(0,0,0,.8), 0 0 22px rgba(var(--nx-glow-cyan), .35); }
+.toast .toast-icon { font-size: 1.1rem; }
+.toast .toast-msg  { font-size: .86rem; line-height: 1.35; }
+.toast .toast-close {
+    background: transparent; border: 0; color: var(--text-muted);
+    cursor: pointer; font-size: 1rem; padding: 2px 6px; border-radius: 6px;
+}
+.toast .toast-close:hover { color: var(--text-main); background: rgba(255,255,255,.06); }
+.toast .toast-progress {
+    position: absolute;
+    left: 0; bottom: 0;
+    height: 2px;
+    background: currentColor;
+    opacity: .7;
+    animation: nx-toast-progress linear forwards;
+}
+@keyframes nx-toast-in {
+    from { opacity: 0; transform: translateX(20px) scale(.96); }
+    to   { opacity: 1; transform: none; }
+}
+@keyframes nx-toast-out {
+    to { opacity: 0; transform: translateX(24px) scale(.95); }
+}
+@keyframes nx-toast-progress {
+    from { width: 100%; }
+    to   { width: 0%; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .toast, .toast.show, .toast.removing { animation: none; }
+}
+
+/* ── Scrollbar polish ──────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(var(--nx-glow-cyan), .25), rgba(var(--nx-glow-violet), .25));
+    border-radius: 10px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgba(var(--nx-glow-cyan), .5), rgba(var(--nx-glow-violet), .5));
+    background-clip: padding-box;
+    border: 2px solid transparent;
+}
+* { scrollbar-color: rgba(var(--nx-glow-cyan), .35) transparent; scrollbar-width: thin; }
+
+/* ── Selection color matches HUD palette ───────────────────────────────── */
+::selection { background: rgba(var(--nx-glow-cyan), .35); color: #fff; }
+
+/* ── Floating Action Buttons (scroll-top + cmd palette hint) ───────────── */
+.nx-fab {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    width: 48px; height: 48px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 1.1rem;
+    color: #03101c;
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+    border: 0;
+    cursor: pointer;
+    z-index: 9500;
+    box-shadow:
+        0 10px 30px rgba(0,0,0,.55),
+        0 0 0 1px rgba(255,255,255,.15) inset,
+        0 0 22px rgba(var(--nx-glow-cyan), .55);
+    opacity: 0;
+    transform: translateY(10px) scale(.9);
+    pointer-events: none;
+    transition: opacity .3s var(--nx-ease-out), transform .3s var(--nx-ease-out), box-shadow .3s var(--nx-ease-out);
+}
+.nx-fab.show { opacity: 1; transform: none; pointer-events: auto; }
+.nx-fab:hover { box-shadow: 0 14px 36px rgba(0,0,0,.6), 0 0 34px rgba(var(--nx-glow-cyan), .8); }
+.nx-fab:active { transform: scale(.94); }
+.nx-fab.cmd { bottom: 80px; }
+.nx-fab kbd {
+    position: absolute;
+    top: -8px; right: -8px;
+    font-size: .6rem;
+    padding: 2px 5px;
+    border-radius: 6px;
+    background: rgba(0,0,0,.7);
+    color: var(--accent-blue);
+    border: 1px solid rgba(var(--nx-glow-cyan), .4);
+    font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── Command Palette (⌘K / Ctrl+K) ─────────────────────────────────────── */
+.nx-cmdk {
+    position: fixed;
+    inset: 0;
+    z-index: 10010;
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 14vh 16px 16px;
+    background: rgba(2, 6, 14, .55);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+.nx-cmdk.open { display: flex; animation: nx-fade-in .2s var(--nx-ease-out); }
+.nx-cmdk-panel {
+    width: min(640px, 96vw);
+    background: linear-gradient(180deg, rgba(8,16,30,.98), rgba(5,10,20,.98));
+    border: 1px solid rgba(var(--nx-glow-cyan), .35);
+    border-radius: 14px;
+    box-shadow: 0 40px 80px -20px rgba(0,0,0,.9), 0 0 60px rgba(var(--nx-glow-cyan), .2);
+    overflow: hidden;
+    animation: nx-modal-in .28s var(--nx-ease-bounce);
+}
+.nx-cmdk-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px;
+    border-bottom: 1px solid rgba(var(--nx-glow-cyan), .18);
+}
+.nx-cmdk-head .nx-cmdk-ico { color: var(--accent-blue); font-size: 1rem; }
+.nx-cmdk-head input {
+    flex: 1;
+    background: transparent;
+    border: 0;
+    outline: 0;
+    color: var(--text-main);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .95rem;
+    letter-spacing: .02em;
+}
+.nx-cmdk-head input::placeholder { color: var(--text-dim); }
+.nx-cmdk-head kbd {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .68rem;
+    color: var(--text-muted);
+    border: 1px solid var(--border-card);
+    border-radius: 5px;
+    padding: 2px 6px;
+}
+.nx-cmdk-list {
+    max-height: 52vh;
+    overflow-y: auto;
+    padding: 8px;
+}
+.nx-cmdk-group {
+    padding: 6px 10px 4px;
+    font-family: var(--font-hud);
+    font-size: .62rem;
+    letter-spacing: .18em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+}
+.nx-cmdk-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text-main);
+    font-size: .88rem;
+}
+.nx-cmdk-item .icn { width: 22px; text-align: center; color: var(--accent-blue); }
+.nx-cmdk-item .lbl { flex: 1; }
+.nx-cmdk-item .desc { color: var(--text-dim); font-size: .72rem; font-family: 'JetBrains Mono', monospace; }
+.nx-cmdk-item .kbs { display: flex; gap: 4px; }
+.nx-cmdk-item .kbs kbd {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .66rem;
+    padding: 2px 6px;
+    border-radius: 5px;
+    border: 1px solid var(--border-card);
+    color: var(--text-muted);
+    background: rgba(255,255,255,.03);
+}
+.nx-cmdk-item.active, .nx-cmdk-item:hover {
+    background: linear-gradient(90deg, rgba(var(--nx-glow-cyan), .14), rgba(var(--nx-glow-violet), .08));
+    box-shadow: inset 0 0 0 1px rgba(var(--nx-glow-cyan), .2);
+}
+.nx-cmdk-item.active .icn { text-shadow: 0 0 10px var(--accent-glow); }
+.nx-cmdk-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: .85rem;
+}
+.nx-cmdk-foot {
+    display: flex;
+    gap: 14px;
+    padding: 8px 14px;
+    border-top: 1px solid rgba(var(--nx-glow-cyan), .15);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .68rem;
+    color: var(--text-dim);
+}
+.nx-cmdk-foot kbd {
+    border: 1px solid var(--border-card);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--text-muted);
+    margin-right: 4px;
+}
+
+/* ── Keyboard shortcut cheatsheet modal ────────────────────────────────── */
+.nx-help {
+    position: fixed;
+    inset: 0; z-index: 10020;
+    display: none;
+    align-items: center; justify-content: center;
+    padding: 16px;
+    background: rgba(2,6,14,.6);
+    backdrop-filter: blur(8px);
+}
+.nx-help.open { display: flex; }
+.nx-help-panel {
+    width: min(560px, 96vw);
+    background: linear-gradient(180deg, rgba(8,16,30,.98), rgba(5,10,20,.98));
+    border: 1px solid rgba(var(--nx-glow-cyan), .3);
+    border-radius: 14px;
+    padding: 18px 20px;
+    box-shadow: 0 40px 80px -20px rgba(0,0,0,.85), 0 0 40px rgba(var(--nx-glow-cyan), .2);
+}
+.nx-help-panel h3 {
+    font-family: var(--font-hud); letter-spacing: .12em; font-size: .8rem;
+    color: var(--accent-blue); margin-bottom: 12px;
+}
+.nx-help-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 18px;
+    font-size: .84rem;
+}
+.nx-help-grid .row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 0; border-bottom: 1px dashed rgba(var(--nx-glow-cyan), .12);
+}
+.nx-help-grid .row span:first-child { color: var(--text-muted); }
+.nx-help-grid kbd {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .7rem;
+    padding: 2px 6px;
+    border-radius: 5px;
+    border: 1px solid var(--border-card);
+    color: var(--accent-blue);
+    background: rgba(var(--nx-glow-cyan), .06);
+}
+
+/* ── Scroll progress bar along top of viewport ─────────────────────────── */
+.nx-progress {
+    position: fixed;
+    top: 0; left: 0;
+    height: 2px;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple), var(--success));
+    z-index: 10050;
+    box-shadow: 0 0 10px rgba(var(--nx-glow-cyan), .7);
+    transition: width .1s linear;
+}
+
+/* ── Health gauge: brighter sweep + inner digital readout ──────────────── */
+.health-gauge::after { animation-duration: 2.6s; }
+
+/* ── Pills / badges get soft inner glow ────────────────────────────────── */
+.pill, .badge {
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.05);
+}
+.badge.rx-badge { color: var(--success); border-color: rgba(var(--nx-glow-green), .4); }
+.badge.tx-badge { color: var(--accent-blue); border-color: rgba(var(--nx-glow-cyan), .4); }
+
+/* ── Progress fill gets a shimmer sweep ────────────────────────────────── */
+.progress-fill { position: relative; overflow: hidden; }
+.progress-fill::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent);
+    transform: translateX(-100%);
+    animation: nx-shimmer 2.4s linear infinite;
+}
+@keyframes nx-shimmer {
+    from { transform: translateX(-100%); }
+    to   { transform: translateX(100%); }
+}
+
+/* ── Loading text flicker ──────────────────────────────────────────────── */
+.loading-text, .no-data { color: var(--text-muted); }
+.loading-text::after {
+    content: '';
+    display: inline-block;
+    width: 1ch;
+    animation: nx-blink 1s steps(2) infinite;
+}
+@keyframes nx-blink { 50% { opacity: 0; } }
+
+/* ── Inputs: stronger focus halo ───────────────────────────────────────── */
+.search-input:focus, .filter-select:focus {
+    box-shadow: 0 0 0 3px rgba(var(--nx-glow-cyan), .18), 0 0 18px rgba(var(--nx-glow-cyan), .35);
+}
+
+/* ── Console modal: chrome corners + LED ───────────────────────────────── */
+.console-status-bar {
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: .06em;
+}
+.console-status-bar::before {
+    content: '●';
+    color: var(--success);
+    margin-right: 8px;
+    text-shadow: 0 0 8px var(--success);
+    animation: nx-live-dot 1.4s ease-in-out infinite;
+}
+
+/* ── Footer glow strip ─────────────────────────────────────────────────── */
+.app-footer {
+    position: relative;
+}
+.app-footer::before {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; top: -1px;
+    height: 1px;
+    background: linear-gradient(90deg,
+        transparent, rgba(var(--nx-glow-cyan), .4),
+        rgba(var(--nx-glow-violet), .35),
+        rgba(var(--nx-glow-cyan), .4), transparent);
+}
+
+/* ── Mobile safeguards for new chrome ──────────────────────────────────── */
+@media (max-width: 768px) {
+    .nx-cmdk { padding-top: 8vh; }
+    .nx-help-grid { grid-template-columns: 1fr; }
+    .nx-fab { right: 14px; bottom: 14px; width: 44px; height: 44px; }
+    .nx-fab.cmd { bottom: 68px; }
+    .toast-container { right: 12px; bottom: 12px; left: 12px; }
+    .toast { min-width: 0; max-width: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .nasa-grid, .nasa-scanline::after, .health-gauge::after,
+    .nasa-ticker-track, .status-dot.connected::after, .nasa-boot-emblem,
+    .logo-icon, .glow-btn, .progress-fill::after, body::before,
+    .app-header::after { animation: none !important; }
+}
