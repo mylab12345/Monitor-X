@@ -1212,3 +1212,18 @@ canvas {
     .header-right { width: 100%; justify-content: space-between; }
     .sub-tab-nav { flex-wrap: nowrap; overflow-x: auto; }
 }
+
+/* Service-control authorization status */
+.service-permission-notice {
+    margin: 0 0 18px;
+    padding: 11px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-card);
+    background: var(--bg-card);
+    color: var(--text-muted);
+    font-size: 0.84rem;
+}
+.service-permission-notice.ready { border-color: rgba(16, 185, 129, .45); color: var(--success); background: var(--success-bg); }
+.service-permission-notice.blocked { border-color: rgba(244, 63, 94, .45); color: #fda4af; background: var(--danger-bg); }
+.service-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn:disabled { cursor: not-allowed; opacity: .48; transform: none; box-shadow: none; }

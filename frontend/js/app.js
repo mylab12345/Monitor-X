@@ -7,6 +7,7 @@ let reconnectInterval = null;
 let statsData = null;
 let autoTailInterval = null;
 let healthData = null;
+let serviceCapabilities = null;
 
 // History buffer for sparkline charts (last 30 samples)
 const historyBuffer = {
@@ -951,12 +952,40 @@ async function fetchVms() {
 }
 
 /* Services */
-async function fetchServices() {
+async function readApiError(res) {
     try {
+        const data = await res.json();
+        return data.detail || data.message || `Request failed (${res.status})`;
+    } catch (_) {
+        return `Request failed (${res.status})`;
+    }
+}
+
+async function fetchServiceCapabilities() {
+    const notice = document.getElementById('service-permission-notice');
+    try {
+        const res = await fetch(`${API_BASE}/api/services/capabilities`);
+        if (!res.ok) throw new Error(await readApiError(res));
+        serviceCapabilities = await res.json();
+        if (notice) {
+            notice.textContent = serviceCapabilities.message;
+            notice.className = `service-permission-notice ${serviceCapabilities.can_control ? 'ready' : 'blocked'}`;
+        }
+    } catch (e) {
+        serviceCapabilities = { can_control: false };
+        if (notice) {
+            notice.textContent = `Unable to verify service-control permissions: ${e.message}`;
+            notice.className = 'service-permission-notice blocked';
+        }
+    }
+}
+
+async function fetchServices(refreshPermissions = false) {
+    try {
+        if (!serviceCapabilities || refreshPermissions) await fetchServiceCapabilities();
         const res = await fetch(`${API_BASE}/api/services`);
-        if (!res.ok) throw new Error('Failed to fetch system services');
-        const services = await res.json();
-        renderServices(services);
+        if (!res.ok) throw new Error(await readApiError(res));
+        renderServices(await res.json());
     } catch (e) {
         showToast('Error fetching services: ' + e.message, 'error');
     }
@@ -966,49 +995,55 @@ function renderServices(services) {
     const tbody = document.getElementById('services-body');
     if (!tbody) return;
     tbody.innerHTML = '';
-
     const filter = document.getElementById('service-filter').value;
     const search = document.getElementById('service-search').value.toLowerCase();
-
     let filtered = services;
     if (filter === 'running') filtered = filtered.filter(s => s.active === 'active');
     else if (filter === 'stopped') filtered = filtered.filter(s => s.active !== 'active');
     else if (filter === 'failed') filtered = filtered.filter(s => s.active === 'failed' || s.sub === 'failed');
+    if (search) filtered = filtered.filter(s => s.name.toLowerCase().includes(search) || s.description.toLowerCase().includes(search));
 
-    if (search) {
-        filtered = filtered.filter(s => s.name.toLowerCase().includes(search) || s.description.toLowerCase().includes(search));
+    if (!filtered.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="no-data">No services match the current filter.</td></tr>';
+        return;
     }
-
+    const disabled = serviceCapabilities?.can_control ? '' : 'disabled title="Service controls are not configured"';
     filtered.forEach(s => {
         const row = document.createElement('tr');
+        const escapedName = escapeHtml(s.name);
         row.innerHTML = `
-            <td><b>${s.name}</b></td>
-            <td>${s.load}</td>
-            <td><span class="badge ${s.active === 'active' ? 'badge-success' : s.active === 'failed' ? 'badge-danger' : 'badge-warning'}">${s.active}</span></td>
-            <td>${s.sub}</td>
-            <td style="font-size:0.8rem">${escapeHtml(s.description)}</td>
-            <td>
-                ${s.active !== 'active' ? `<button class="btn btn-sm btn-success" onclick="controlService('${s.name}','start')">Start</button>` : ''}
-                ${s.active === 'active' ? `<button class="btn btn-sm btn-warning" onclick="controlService('${s.name}','stop')">Stop</button>` : ''}
-                <button class="btn btn-sm btn-primary" onclick="controlService('${s.name}','restart')">Restart</button>
-            </td>
-        `;
+            <td><b>${escapedName}</b></td><td>${escapeHtml(s.load)}</td>
+            <td><span class="badge ${s.active === 'active' ? 'badge-success' : s.active === 'failed' ? 'badge-danger' : 'badge-warning'}">${escapeHtml(s.active)}</span></td>
+            <td>${escapeHtml(s.sub)}</td><td style="font-size:0.8rem">${escapeHtml(s.description)}</td>
+            <td><div class="service-actions">
+                ${s.active !== 'active' ? `<button class="btn btn-sm btn-success" ${disabled} onclick="controlService('${escapedName}','start', this)">Start</button>` : ''}
+                ${s.active === 'active' ? `<button class="btn btn-sm btn-warning" ${disabled} onclick="controlService('${escapedName}','stop', this)">Stop</button>` : ''}
+                <button class="btn btn-sm btn-primary" ${disabled} onclick="controlService('${escapedName}','restart', this)">Restart</button>
+                <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','reload', this)">Reload</button>
+                <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','enable', this)">Enable</button>
+                <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','disable', this)">Disable</button>
+            </div></td>`;
         tbody.appendChild(row);
     });
 }
 
-async function controlService(name, action) {
+async function controlService(name, action, button) {
+    if (!serviceCapabilities?.can_control) {
+        showToast('Service controls are not authorized. Run systemd/install-service.sh.', 'error');
+        return;
+    }
     if (!confirm(`Are you sure you want to ${action.toUpperCase()} service ${name}?`)) return;
+    const originalLabel = button?.textContent;
+    if (button) { button.disabled = true; button.textContent = 'Working…'; }
     try {
-        const res = await fetch(`${API_BASE}/api/services/${name}/${action}`, { method: 'POST' });
-        if (res.ok) {
-            showToast(`Service ${name} ${action}ed successfully`, 'success');
-            fetchServices();
-        } else {
-            showToast(`Failed to ${action} service`, 'error');
-        }
+        const res = await fetch(`${API_BASE}/api/services/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
+        if (!res.ok) throw new Error(await readApiError(res));
+        const result = await res.json();
+        showToast(result.message, 'success');
+        await fetchServices();
     } catch (e) {
-        showToast('Error: ' + e.message, 'error');
+        showToast(`Could not ${action} ${name}: ${e.message}`, 'error');
+        if (button) { button.disabled = false; button.textContent = originalLabel; }
     }
 }
 
@@ -1146,7 +1181,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Services Filters
     document.getElementById('service-filter')?.addEventListener('change', fetchServices);
     document.getElementById('service-search')?.addEventListener('input', fetchServices);
-    document.getElementById('refresh-services-btn')?.addEventListener('click', fetchServices);
+    document.getElementById('refresh-services-btn')?.addEventListener('click', () => fetchServices(true));
 
     // Modal Close
     document.getElementById('close-modal')?.addEventListener('click', () => {

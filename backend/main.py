@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import socket
+import shutil
 import subprocess
 import time
 from contextlib import asynccontextmanager
@@ -648,51 +649,96 @@ async def shutdown_system():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+SYSTEMCTL_BIN = shutil.which("systemctl") or "/usr/bin/systemctl"
+SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@_.:-]*\.service$")
+SERVICE_ACTIONS = ("start", "stop", "restart", "reload", "enable", "disable")
+
+
+def service_action_label(action: str) -> str:
+    """Human-readable past tense for service control notifications."""
+    return {"start": "started", "stop": "stopped", "restart": "restarted", "reload": "reloaded",
+            "enable": "enabled", "disable": "disabled"}[action]
+
+
+async def run_service_action(action: str, service_name: str):
+    """Run an approved systemctl action without ever prompting for a password.
+
+    MonitorX normally runs as an unprivileged service account.  The installer grants
+    that account narrowly scoped, non-interactive sudo access for these commands.
+    """
+    command = [SYSTEMCTL_BIN, "--no-ask-password", action, service_name]
+    if os.geteuid() != 0:
+        sudo = shutil.which("sudo")
+        if not sudo:
+            return None, "sudo is not installed. Re-run systemd/install-service.sh to configure service controls."
+        command = [sudo, "-n", *command]
+    proc = await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    output = (stderr or stdout).decode().strip()
+    if proc.returncode:
+        if "password is required" in output.lower() or "not allowed" in output.lower():
+            output = "MonitorX is not authorized to control system services. Run systemd/install-service.sh, then restart MonitorX."
+        return None, output or f"systemctl {action} failed (exit code {proc.returncode})."
+    return {"output": stdout.decode().strip()}, None
+
+
+@app.get("/api/services/capabilities")
+async def service_capabilities():
+    """Expose whether the running dashboard can execute service controls."""
+    if os.geteuid() == 0:
+        return {"can_control": True, "mode": "root", "message": "Service controls are available."}
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return {"can_control": False, "mode": "unconfigured", "message": "sudo is unavailable; run the MonitorX installer."}
+    proc = await asyncio.create_subprocess_exec(
+        sudo, "-n", "-l", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+    available = proc.returncode == 0
+    return {
+        "can_control": available,
+        "mode": "sudo" if available else "unconfigured",
+        "message": "Service controls are available." if available else
+                   "Controls need the MonitorX sudo policy. Run systemd/install-service.sh and restart MonitorX."
+    }
+
+
 @app.get("/api/services")
 async def list_services():
-    """List systemd services"""
+    """List systemd services. Read-only systemctl access needs no elevated policy."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "systemctl", "list-units", "--type=service", "--no-pager", "--no-legend", "--all",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            SYSTEMCTL_BIN, "list-units", "--type=service", "--no-pager", "--no-legend", "--all",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await proc.communicate()
+        if proc.returncode:
+            raise HTTPException(status_code=503, detail=stderr.decode().strip() or "systemd is unavailable")
         services = []
         for line in stdout.decode().strip().split('\n'):
-            if line:
-                parts = line.split()
-                if len(parts) >= 4:
-                    services.append({
-                        "name": parts[0],
-                        "load": parts[1],
-                        "active": parts[2],
-                        "sub": parts[3],
-                        "description": " ".join(parts[4:]) if len(parts) > 4 else ""
-                    })
+            parts = line.split()
+            if len(parts) >= 4:
+                services.append({"name": parts[0], "load": parts[1], "active": parts[2], "sub": parts[3],
+                                 "description": " ".join(parts[4:]) if len(parts) > 4 else ""})
         return services
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/services/{service_name}/{action}")
 async def control_service(service_name: str, action: str):
-    valid_actions = ["start", "stop", "restart", "reload", "enable", "disable"]
-    if action not in valid_actions:
-        raise HTTPException(status_code=400, detail=f"Invalid action. Valid: {valid_actions}")
-    
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "systemctl", action, service_name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise HTTPException(status_code=500, detail=stderr.decode() or f"Failed to {action} {service_name}")
-        return {"success": True, "message": f"Service {service_name} {action}ed"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if action not in SERVICE_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"Invalid action. Valid: {list(SERVICE_ACTIONS)}")
+    if not SERVICE_NAME_PATTERN.fullmatch(service_name):
+        raise HTTPException(status_code=400, detail="Only valid .service unit names can be controlled.")
+    _, error = await run_service_action(action, service_name)
+    if error:
+        raise HTTPException(status_code=403, detail=error)
+    return {"success": True, "message": f"Service {service_name} {service_action_label(action)}"}
 
 
 # ==============================================================================
@@ -1346,23 +1392,26 @@ async def perform_remediation(req: RemediateRequest):
 
             restarted = []
             failed_restarts = []
+            errors = []
             for unit in failed_units:
-                p = await asyncio.create_subprocess_exec(
-                    "systemctl", "restart", unit,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                await p.communicate()
-                if p.returncode == 0:
-                    restarted.append(unit)
-                else:
+                # Failed units can include non-service units; service controls are deliberately limited.
+                if not SERVICE_NAME_PATTERN.fullmatch(unit):
                     failed_restarts.append(unit)
+                    errors.append(f"{unit}: not a controllable .service unit")
+                    continue
+                _, error = await run_service_action("restart", unit)
+                if error:
+                    failed_restarts.append(unit)
+                    errors.append(f"{unit}: {error}")
+                else:
+                    restarted.append(unit)
 
             return {
-                "success": True,
+                "success": not failed_restarts,
                 "message": f"Attempted restart of {len(failed_units)} unit(s). Success: {len(restarted)}",
                 "restarted": restarted,
-                "failed": failed_restarts
+                "failed": failed_restarts,
+                "errors": errors
             }
         except Exception as e:
             return {"success": False, "message": str(e)}
