@@ -33,7 +33,13 @@ const state = {
     vmSelected: new Set(),
     vmRefreshMs: 2000,
     vmAutoTimer: null,
-    vmCapabilities: null
+    vmCapabilities: null,
+    // VMs with an action in flight. Rendering is suppressed while non-empty so
+    // the DOM cannot be swapped out from under a click.
+    vmPending: new Set(),
+    // Guests whose state we optimistically expect to change, so a stale poll
+    // arriving mid-transition does not flip the card back.
+    vmLastAction: new Map()
 };
 
 /* Format Helpers */
@@ -935,15 +941,23 @@ const VM_STATE_META = {
 
 function vmActionButtons(vm) {
     const vmState = vm.state;
+    // A guest is "off" in shutoff/crashed; libvirt can start it from either.
     const startable = vmState === 'shutoff' || vmState === 'crashed';
+    // Graceful verbs need a genuinely running guest.
     const stoppable = vmState === 'running';
     const suspendable = vmState === 'running';
     const resumable = vmState === 'paused' || vmState === 'pmsuspended';
     const rebootable = vmState === 'running';
-    const poweroffable = vmState === 'running' || vmState === 'paused' || vmState === 'pmsuspended';
+    // Force-stop must stay reachable for every non-off state, including
+    // 'blocked' and a guest wedged mid-'shutdown' — precisely the cases where
+    // an operator needs it most and the old matrix hid the button.
+    const poweroffable = !startable && vmState !== 'no_state';
 
-    const id = encodeURIComponent(vm.name);
-    const btn = (action, label, klass) => `<button class="btn ${klass}" data-vm-action="${action}" data-vm-id="${id}">${label}</button>`;
+    // Address the guest by UUID when available: it is stable and unambiguous,
+    // whereas a name can contain characters that broke the previous
+    // encodeURIComponent/decodeURIComponent round-trip through the DOM.
+    const id = escapeHtml(vm.uuid || vm.name);
+    const btn = (action, label, klass) => `<button type="button" class="btn ${klass}" data-vm-action="${action}" data-vm-id="${id}">${label}</button>`;
     let html = '';
     if (startable)    html += btn('start',    '▶ Start',      'btn-success');
     if (resumable)    html += btn('resume',   '▶ Resume',     'btn-success');
@@ -977,6 +991,16 @@ function vmFilterSort(vms) {
 function renderVms(vms) {
     const container = document.getElementById('vm-list');
     if (!container) return;
+
+    // Cache the latest inventory so filters/sorting can re-render without a
+    // network round-trip, and so a suppressed render can be replayed later.
+    state.vmLastData = vms;
+
+    // Suppress re-rendering while an action is in flight. Rebuilding innerHTML
+    // detaches the button the user just clicked (and every other listener),
+    // which is why controls appeared dead during the 2s refresh cycle.
+    if (state.vmPending.size > 0) return;
+
     document.getElementById('vm-count').textContent = `${vms.length} VM${vms.length === 1 ? '' : 's'}`;
 
     // KPI counts
@@ -1045,30 +1069,44 @@ function renderVms(vms) {
             </article>`;
     }).join('');
 
-    // Wire individual action buttons
-    container.querySelectorAll('[data-vm-action]').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            const vmId = decodeURIComponent(btn.dataset.vmId);
-            const action = btn.dataset.vmAction;
-            triggerVmAction(vmId, action);
-            e.stopPropagation();
-        });
+    // Action buttons and checkboxes are handled by a single delegated listener
+    // installed once on the container (see initVmDelegation), so a re-render
+    // can never leave the UI with dead controls.
+    initVmDelegation(container);
+}
+
+// Attach exactly one delegated listener per container. Because it lives on the
+// container rather than on each button, it survives every innerHTML rebuild.
+function initVmDelegation(container) {
+    if (!container || container.dataset.vmDelegated === '1') return;
+    container.dataset.vmDelegated = '1';
+
+    container.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-vm-action]');
+        if (!btn || !container.contains(btn)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        triggerVmAction(btn.dataset.vmId, btn.dataset.vmAction);
     });
-    // Wire selection checkboxes
-    container.querySelectorAll('[data-vm-select]').forEach(cb => {
-        cb.addEventListener('change', () => {
-            if (cb.checked) state.vmSelected.add(cb.dataset.vmSelect);
-            else state.vmSelected.delete(cb.dataset.vmSelect);
-            updateBulkBar();
-            const card = cb.closest('.vm-card');
-            if (card) card.classList.toggle('selected', cb.checked);
-        });
+
+    container.addEventListener('change', (e) => {
+        const cb = e.target.closest('[data-vm-select]');
+        if (!cb || !container.contains(cb)) return;
+        if (cb.checked) state.vmSelected.add(cb.dataset.vmSelect);
+        else state.vmSelected.delete(cb.dataset.vmSelect);
+        updateBulkBar();
+        const card = cb.closest('.vm-card');
+        if (card) card.classList.toggle('selected', cb.checked);
     });
 }
 
 function renderVmActions(vm, canControl) {
     if (!canControl) {
-        return `<div class="vm-actions"><span class="text-muted" style="font-size:.75rem;">VM controls disabled — run systemd/install-service.sh to enable.</span></div>`;
+        // Surface the backend's specific reason instead of always blaming the
+        // installer (libvirtd down, virsh missing, no authorization, ...).
+        const reason = state.vmCapabilities?.message
+            || 'VM controls disabled — run systemd/install-service.sh to enable.';
+        return `<div class="vm-actions"><span class="text-muted" style="font-size:.75rem;">${escapeHtml(reason)}</span></div>`;
     }
     const buttons = vmActionButtons(vm);
     return buttons ? `<div class="vm-actions">${buttons}</div>` : '';
@@ -1190,7 +1228,16 @@ function confirmAction({ title, message, target, confirmLabel = 'Confirm', confi
 }
 
 function markCardPending(vmId, pending) {
-    const card = document.querySelector(`.vm-card[data-vm-name="${cssEscape(vmId)}"]`);
+    if (pending) state.vmPending.add(vmId);
+    else state.vmPending.delete(vmId);
+
+    // Match on name OR uuid: bulk actions dispatch by name while cards are
+    // keyed by uuid, so a single-attribute lookup missed the card entirely and
+    // the "Working…" overlay never appeared.
+    const escaped = cssEscape(vmId);
+    const card = document.querySelector(
+        `.vm-card[data-vm-name="${escaped}"], .vm-card[data-vm-uuid="${escaped}"]`
+    );
     if (card) card.classList.toggle('pending', pending);
 }
 
@@ -1200,8 +1247,14 @@ function cssEscape(s) {
 }
 
 async function triggerVmAction(vmId, action, opts = {}) {
+    if (!vmId || !action) return;
+
+    // Ignore repeat clicks on a guest that already has an action in flight.
+    if (state.vmPending.has(vmId)) return;
+
     if (state.vmCapabilities && state.vmCapabilities.can_control === false) {
-        showToast('VM controls are not authorized. Run systemd/install-service.sh.', 'error');
+        showToast(state.vmCapabilities.message
+            || 'VM controls are not authorized. Run systemd/install-service.sh.', 'error');
         return;
     }
 
@@ -1211,7 +1264,7 @@ async function triggerVmAction(vmId, action, opts = {}) {
         confirmed = await confirmAction({
             title: `⚠️ Confirm ${action.toUpperCase()}`,
             message: `The "${action}" action immediately terminates the guest without graceful shutdown. Unsaved data inside the VM will be lost.`,
-            target: `Target: ${vmId}`,
+            target: `Target: ${vmDisplayName(vmId)}`,
             confirmLabel: `Yes, ${action.toUpperCase()}`,
             confirmClass: 'btn-danger'
         });
@@ -1219,62 +1272,113 @@ async function triggerVmAction(vmId, action, opts = {}) {
     }
 
     markCardPending(vmId, true);
+    const label = vmDisplayName(vmId);
+    let succeeded = false;
     try {
         const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/${action}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ confirm: confirmed })
+            // Always send confirm for destructive actions; the backend rejects
+            // them otherwise. Graceful actions ignore the flag.
+            body: JSON.stringify({ confirm: confirmed || destructive.includes(action) })
         });
         const result = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
         if (!res.ok) throw new Error(result.detail || `Action failed (${res.status})`);
-        const msg = result.noop ? `No change: ${result.message}` : result.message;
-        showToast(msg, result.noop ? 'info' : 'success');
-        // Refresh metrics + audit log shortly after the request.
-        setTimeout(() => { fetchVms(); fetchVmAuditLog(); }, 1500);
+
+        let msg = result.message || `${action} completed.`;
+        let tone = 'success';
+        if (result.noop) { msg = `No change: ${msg}`; tone = 'info'; }
+        else if (result.pending) { tone = 'info'; }
+        if (!opts.bulk) showToast(msg, tone);
+        state.vmLastAction.set(vmId, { action, at: Date.now() });
+        succeeded = true;
     } catch (e) {
-        showToast(`Could not ${action} ${vmId}: ${e.message}`, 'error');
+        showToast(`Could not ${action} ${label}: ${e.message}`, 'error');
     } finally {
         markCardPending(vmId, false);
-        fetchVmAuditLog();
+        // Re-check authorization in case the operator just installed the policy.
+        if (state.vmCapabilities && !state.vmCapabilities.can_control) fetchVmCapabilities();
+        // Refresh immediately, then again once the guest has had time to settle
+        // (graceful shutdown/reboot are asynchronous inside the guest).
+        // During bulk runs the caller refreshes once at the end instead.
+        if (!opts.bulk) {
+            await fetchVms();
+            fetchVmAuditLog();
+            scheduleVmSettleRefresh();
+        }
     }
+    return succeeded;
+}
+
+// Domain state changes land asynchronously; poll a few times after an action
+// so the card reflects reality without waiting for the slow refresh tick.
+function scheduleVmSettleRefresh() {
+    [1500, 4000, 8000].forEach(delay => setTimeout(() => {
+        if (state.currentTab === 'vms' && state.vmPending.size === 0) {
+            fetchVms();
+            fetchVmAuditLog();
+        }
+    }, delay));
+}
+
+// Resolve a UUID back to a human-friendly name for toasts and dialogs.
+function vmDisplayName(vmId) {
+    const match = (state.vmLastData || []).find(vm => vm.uuid === vmId || vm.name === vmId);
+    return match ? match.name : vmId;
 }
 
 async function bulkVmAction(action) {
     if (state.vmSelected.size === 0) return;
-    const ids = Array.from(state.vmSelected).map(uuid => {
-        const card = document.querySelector(`.vm-card[data-vm-uuid="${cssEscape(uuid)}"]`);
-        return card ? card.dataset.vmName : null;
-    }).filter(Boolean);
+
+    // Selection is stored as UUIDs, which is exactly what the API accepts.
+    // The old code mapped them back to names via the DOM, so any guest that
+    // was filtered out of view resolved to null and was silently dropped.
+    const ids = Array.from(state.vmSelected);
     if (ids.length === 0) return;
+    const names = ids.map(vmDisplayName);
 
     const destructive = ['poweroff', 'destroy'];
     if (destructive.includes(action)) {
         const confirmed = await confirmAction({
             title: `⚠️ Bulk ${action.toUpperCase()}`,
             message: `You are about to ${action} ${ids.length} guest(s). This cannot be undone for running VMs.`,
-            target: `Targets: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? `, +${ids.length - 5} more` : ''}`,
+            target: `Targets: ${names.slice(0, 5).join(', ')}${names.length > 5 ? `, +${names.length - 5} more` : ''}`,
             confirmLabel: `Yes, ${action.toUpperCase()} all`,
             confirmClass: 'btn-danger'
         });
         if (!confirmed) return;
     }
+
     showToast(`Dispatching ${action} to ${ids.length} VM(s)…`, 'info');
+    let ok = 0, failed = 0;
     for (const id of ids) {
         // Sequential dispatch keeps virsh from overloading the libvirt socket.
-        await triggerVmAction(id, action, { skipConfirm: true });
+        const success = await triggerVmAction(id, action, { skipConfirm: true, bulk: true });
+        if (success === false) failed++; else ok++;
     }
+    showToast(`Bulk ${action}: ${ok} succeeded, ${failed} failed.`,
+              failed ? 'error' : 'success');
+    clearVmSelection();
+    fetchVms();
     fetchVmAuditLog();
 }
 
-function setVmAutoRefresh(intervalMs) {
-    state.vmRefreshMs = parseInt(intervalMs, 10) || 0;
+function setVmAutoRefresh(intervalSeconds) {
+    // The <select> supplies SECONDS ("2", "5", "10", "30"). Feeding those
+    // straight into setInterval() scheduled a refresh every 2 milliseconds,
+    // which hammered the API and re-rendered the VM list mid-click so buttons
+    // were destroyed before their handler could fire.
+    const seconds = parseInt(intervalSeconds, 10);
+    state.vmRefreshMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
     if (state.vmAutoTimer) {
         clearInterval(state.vmAutoTimer);
         state.vmAutoTimer = null;
     }
     if (state.vmRefreshMs > 0) {
         state.vmAutoTimer = setInterval(() => {
-            if (state.currentTab === 'vms') fetchVms();
+            // Never re-render while an action is in flight: replacing innerHTML
+            // under the user's cursor is what made clicks "do nothing".
+            if (state.currentTab === 'vms' && state.vmPending.size === 0) fetchVms();
         }, state.vmRefreshMs);
     }
 }
@@ -1478,18 +1582,25 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchVmAuditLog();
     });
 
-    // VM controls: search, filter, sort, bulk, auto-refresh
+    // VM controls: search, filter, sort, bulk, auto-refresh.
+    // Re-render from the freshest inventory (state.vmLastData), falling back to
+    // the WebSocket snapshot. The old code only ever read statsData, which is
+    // stale whenever the VM tab refreshed via REST.
+    const rerenderVms = () => {
+        const vms = state.vmLastData || statsData?.vms;
+        if (vms) renderVms(vms);
+    };
     document.getElementById('vm-search')?.addEventListener('input', (e) => {
         state.vmSearch = e.target.value;
-        if (statsData?.vms) renderVms(statsData.vms);
+        rerenderVms();
     });
     document.getElementById('vm-state-filter')?.addEventListener('change', (e) => {
         state.vmStateFilter = e.target.value;
-        if (statsData?.vms) renderVms(statsData.vms);
+        rerenderVms();
     });
     document.getElementById('vm-sort')?.addEventListener('change', (e) => {
         state.vmSort = e.target.value;
-        if (statsData?.vms) renderVms(statsData.vms);
+        rerenderVms();
     });
     document.getElementById('vm-refresh-select')?.addEventListener('change', (e) => {
         setVmAutoRefresh(e.target.value);
@@ -1565,5 +1676,6 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchStats();
     // Preload capabilities so the VM tab renders controls immediately.
     fetchVmCapabilities();
-    setVmAutoRefresh(document.getElementById('vm-refresh-select')?.value || 2000);
+    // Value is in SECONDS, matching the <select> options.
+    setVmAutoRefresh(document.getElementById('vm-refresh-select')?.value ?? 2);
 });

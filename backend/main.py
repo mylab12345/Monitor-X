@@ -64,15 +64,32 @@ if NVML_AVAILABLE:
         logger.warning(f"NVML initialization failed: {e}")
         NVML_AVAILABLE = False
 
-# Initialize libvirt if available
-libvirt_conn = None
-if LIBVIRT_AVAILABLE:
-    try:
-        libvirt_conn = libvirt.openReadOnly("qemu:///system")
-        logger.info("Libvirt connected successfully")
-    except Exception as e:
-        logger.warning(f"Libvirt connection failed: {e}")
-        LIBVIRT_AVAILABLE = False
+# ==============================================================================
+# LIBVIRT CONNECTION MANAGEMENT
+#
+# Two connections are maintained against the same hypervisor URI:
+#   * read-only  -> inventory + metrics polling
+#   * read-write -> guest lifecycle control (start/shutdown/reboot/...)
+#
+# IMPORTANT: ``LIBVIRT_AVAILABLE`` reflects only whether the *Python module*
+# could be imported. It is never mutated at runtime. Connection health is
+# tracked separately and re-dialled lazily on every access, so a libvirtd
+# restart (package upgrade, crash, socket activation) can no longer wedge the
+# VM tab into a permanently disabled state until MonitorX itself is restarted.
+# ==============================================================================
+
+# Hypervisor URI. Must match between metrics and control paths, otherwise the
+# dashboard lists guests from qemu:///system while control commands silently
+# target the caller's qemu:///session (where the domain does not exist).
+LIBVIRT_URI = os.environ.get("MONITORX_LIBVIRT_URI", "qemu:///system")
+
+libvirt_conn = None      # read-only connection (metrics/inventory)
+libvirt_rw_conn = None   # read-write connection (lifecycle control)
+
+# Serialize (re)connect attempts so a burst of requests cannot open a storm of
+# sockets against a libvirtd that is still starting up.
+_libvirt_connect_lock = asyncio.Lock()
+_libvirt_last_error: Optional[str] = None
 
 # Thread executor for blocking libvirt operations
 _libvirt_executor = None
@@ -83,46 +100,101 @@ def _get_libvirt_executor():
     global _libvirt_executor
     if _libvirt_executor is None:
         _libvirt_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="libvirt"
+            max_workers=4, thread_name_prefix="libvirt"
         )
     return _libvirt_executor
 
 
-def _libvirt_conn_alive():
-    """Check if the libvirt connection is alive and usable."""
-    global libvirt_conn
-    if not libvirt_conn:
+async def _run_libvirt(func, timeout: float = 10.0):
+    """Run a blocking libvirt call in the executor with a hard timeout."""
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(_get_libvirt_executor(), func), timeout=timeout
+    )
+
+
+def _conn_alive(conn) -> bool:
+    """Return True when a libvirt connection object is usable."""
+    if not conn:
         return False
     try:
-        # isAlive() returns 1 if connection is alive, 0 otherwise
-        return libvirt_conn.isAlive() == 1
+        return conn.isAlive() == 1
     except Exception:
         return False
 
 
-async def _ensure_libvirt_conn():
-    """Ensure the libvirt connection is alive, reconnect if necessary.
+def _libvirt_conn_alive():
+    """Check if the read-only libvirt connection is alive and usable."""
+    return _conn_alive(libvirt_conn)
 
-    Returns True if connection is available, False otherwise.
+
+async def _ensure_libvirt_conn() -> bool:
+    """Ensure the read-only libvirt connection is alive, reconnecting if needed.
+
+    Returns True when a usable connection is available.
     """
-    global libvirt_conn, LIBVIRT_AVAILABLE
-    if _libvirt_conn_alive():
+    global libvirt_conn, _libvirt_last_error
+    if not LIBVIRT_AVAILABLE:
+        return False
+    if _conn_alive(libvirt_conn):
         return True
-    # Connection is dead or stale, try to reconnect
-    try:
-        if libvirt_conn:
+
+    async with _libvirt_connect_lock:
+        # Another waiter may have reconnected while we waited for the lock.
+        if _conn_alive(libvirt_conn):
+            return True
+        if libvirt_conn is not None:
             try:
                 libvirt_conn.close()
             except Exception:
                 pass
-        libvirt_conn = libvirt.openReadOnly("qemu:///system")
-        logger.info("Libvirt reconnected successfully")
-        return True
-    except Exception as e:
-        logger.warning(f"Libvirt reconnection failed: {e}")
-        LIBVIRT_AVAILABLE = False
-        libvirt_conn = None
-        return False
+            libvirt_conn = None
+        try:
+            libvirt_conn = await _run_libvirt(
+                lambda: libvirt.openReadOnly(LIBVIRT_URI), timeout=10.0
+            )
+            _libvirt_last_error = None
+            logger.info("Libvirt read-only connection established (%s)", LIBVIRT_URI)
+            return True
+        except Exception as exc:
+            libvirt_conn = None
+            _libvirt_last_error = str(exc)
+            logger.warning("Libvirt read-only connection failed: %s", exc)
+            return False
+
+
+async def _ensure_libvirt_rw_conn():
+    """Ensure a read-write libvirt connection for lifecycle control.
+
+    Returns ``(connection, error_message)``. A read-write connection succeeds
+    when MonitorX runs as root or its user is in the ``libvirt``/``kvm`` group
+    (or a polkit rule grants ``org.libvirt.unix.manage``). When it fails the
+    caller transparently falls back to the ``sudo virsh`` path.
+    """
+    global libvirt_rw_conn
+    if not LIBVIRT_AVAILABLE:
+        return None, "libvirt Python bindings are not installed on this host."
+    if _conn_alive(libvirt_rw_conn):
+        return libvirt_rw_conn, None
+
+    async with _libvirt_connect_lock:
+        if _conn_alive(libvirt_rw_conn):
+            return libvirt_rw_conn, None
+        if libvirt_rw_conn is not None:
+            try:
+                libvirt_rw_conn.close()
+            except Exception:
+                pass
+            libvirt_rw_conn = None
+        try:
+            libvirt_rw_conn = await _run_libvirt(
+                lambda: libvirt.open(LIBVIRT_URI), timeout=10.0
+            )
+            logger.info("Libvirt read-write connection established (%s)", LIBVIRT_URI)
+            return libvirt_rw_conn, None
+        except Exception as exc:
+            libvirt_rw_conn = None
+            return None, str(exc)
 
 
 @asynccontextmanager
@@ -138,11 +210,12 @@ async def lifespan(app: FastAPI):
             nvml.nvmlShutdown()
         except Exception:
             pass
-    if libvirt_conn:
-        try:
-            libvirt_conn.close()
-        except Exception:
-            pass
+    for _conn in (libvirt_conn, libvirt_rw_conn):
+        if _conn:
+            try:
+                _conn.close()
+            except Exception:
+                pass
     global _libvirt_executor
     if _libvirt_executor:
         _libvirt_executor.shutdown(wait=False)
@@ -208,13 +281,34 @@ class VMActionRequest(BaseModel):
 VM_ACTIONS_GRACEFUL = ("start", "shutdown", "reboot", "suspend", "resume")
 VM_ACTIONS_DESTRUCTIVE = ("poweroff", "destroy")
 VM_ACTIONS = VM_ACTIONS_GRACEFUL + VM_ACTIONS_DESTRUCTIVE
-VM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,62}$")
+
+# `poweroff` is dashboard vocabulary, NOT a virsh command. The real virsh verb
+# for a forced stop is `destroy`. Mapping it here is what makes the Poweroff
+# button work instead of failing with "unknown command: 'poweroff'".
+VM_ACTION_TO_VIRSH = {
+    "start": "start",
+    "shutdown": "shutdown",
+    "reboot": "reboot",
+    "suspend": "suspend",
+    "resume": "resume",
+    "poweroff": "destroy",
+    "destroy": "destroy",
+}
+
+# Domain names may legitimately contain spaces and other characters, so the
+# identifier is passed to virsh as a single argv element (never a shell string).
+# We only reject leading dashes, which would be parsed as virsh options.
+VM_ID_PATTERN = re.compile(r"^[^-\s][^\x00\n\r]{0,127}$")
 # Bounded in-memory ring buffer of VM control actions for the audit panel.
 _vm_action_log: List[Dict[str, Any]] = []
 _VM_ACTION_LOG_LIMIT = 50
 _vm_action_log_lock = asyncio.Lock()
 
 VIRSH_BIN = shutil.which("virsh") or "/usr/bin/virsh"
+
+# Guests can be slow to react (graceful shutdown waits on the guest OS ACK),
+# so control commands get a longer budget than metric polls.
+VM_ACTION_TIMEOUT = 60.0
 
 
 class ConnectionManager:
@@ -502,13 +596,57 @@ async def get_system_info() -> Dict[str, Any]:
     }
 
 
+def _virsh_present() -> bool:
+    """True when a virsh binary is actually available to execute."""
+    return bool(shutil.which(VIRSH_BIN) or Path(VIRSH_BIN).exists())
+
+
+async def _virsh_fallback_allowed() -> bool:
+    """Report whether the ``virsh`` fallback path can actually run.
+
+    As root, virsh runs directly, so only its presence matters. Otherwise we ask
+    sudo to validate the exact argv we would execute.
+
+    The previous implementation scraped ``sudo -l`` text and looked for any line
+    containing both "virsh" and an action substring. That matched loosely (the
+    word "start" appears in unrelated policy lines) and, worse, kept reporting
+    "authorized" for a policy that whitelisted the invalid
+    ``--no-ask-password`` form. Asking sudo to validate the real argv removes
+    the guesswork entirely.
+    """
+    if not _virsh_present():
+        return False
+    if os.geteuid() == 0:
+        return True
+
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return False
+    probe = _virsh_command("start", "monitorx-capability-probe")
+    if not probe:
+        return False
+    # probe[0] is the sudo binary and probe[1] is "-n"; validate the rest.
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sudo, "-n", "-l", "--", *probe[2:],
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=10)
+        return proc.returncode == 0
+    except (asyncio.TimeoutError, OSError):
+        return False
+
+
 @app.get("/api/vms/capabilities")
 async def vm_capabilities():
     """Expose whether the running dashboard can control libvirt guests.
 
-    Mirrors the service-control pattern: the MonitorX process is unprivileged
-    by default, so destructive operations rely on a narrowly scoped, non-
-    interactive sudo policy installed by ``systemd/install-service.sh``.
+    Control works through either of two independent paths, so the UI enables
+    the buttons when *either* succeeds:
+      1. a read-write libvirt connection (root, or user in the 'libvirt' group)
+      2. the narrowly scoped sudo policy from systemd/install-service.sh
     """
     if not LIBVIRT_AVAILABLE:
         return {
@@ -520,138 +658,210 @@ async def vm_capabilities():
 
     # Check if connection is alive - attempt reconnect if stale
     conn_alive = await _ensure_libvirt_conn()
-
-    # Listing domains is possible through the read-only connection.
     list_ok = conn_alive
 
-    if os.geteuid() == 0:
-        return {
-            "can_control": conn_alive,
-            "can_list": list_ok,
-            "mode": "root",
-            "message": "VM controls are available (running as root)." if conn_alive
-            else "libvirt connection is unavailable. Check that libvirtd is running.",
-        }
-
-    sudo = shutil.which("sudo")
-    if not sudo:
+    if not conn_alive:
+        detail = f" ({_libvirt_last_error})" if _libvirt_last_error else ""
         return {
             "can_control": False,
-            "can_list": list_ok,
-            "mode": "unconfigured",
-            "message": "sudo is unavailable. Re-run systemd/install-service.sh to configure VM controls.",
+            "can_list": False,
+            "mode": "disconnected",
+            "message": f"Cannot reach libvirtd at {LIBVIRT_URI}{detail}. "
+                       f"Start it with 'sudo systemctl start libvirtd', then retry.",
         }
 
-    # Probe whether the configured sudo policy permits `virsh --no-ask-password`.
-    proc = await asyncio.create_subprocess_exec(
-        sudo, "-n", "-l",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _ = await proc.communicate()
-    policy_text = stdout.decode(errors="replace")
-    virsh_path = VIRSH_BIN
-    allowed = any(
-        f"{virsh_path}".split("/")[-1] in line and f"{a}" in line
-        for line in policy_text.splitlines()
-        for a in VM_ACTIONS
-    )
+    # Path 1: native read-write connection.
+    rw_conn, rw_error = await _ensure_libvirt_rw_conn()
+    if rw_conn is not None:
+        mode = "root" if os.geteuid() == 0 else "libvirt-rw"
+        detail = ("running as root" if os.geteuid() == 0
+                  else "read-write libvirt access")
+        return {
+            "can_control": True,
+            "can_list": list_ok,
+            "mode": mode,
+            "message": f"VM controls are available ({detail}).",
+        }
+
+    # Path 2: virsh fallback (direct as root, or via the sudo policy).
+    if await _virsh_fallback_allowed():
+        return {
+            "can_control": True,
+            "can_list": list_ok,
+            "mode": "root" if os.geteuid() == 0 else "sudo",
+            "message": "VM controls are available (virsh)." if os.geteuid() == 0
+            else "VM controls are available (sudo virsh policy).",
+        }
+
+    if not _virsh_present():
+        message = ("VM controls need libvirt-clients (virsh) installed, or "
+                   "MonitorX's user added to the 'libvirt' group. "
+                   "Run ./setup.sh and systemd/install-service.sh, then restart MonitorX.")
+    else:
+        message = ("VM controls need authorization. Run systemd/install-service.sh "
+                   "(adds MonitorX's user to the 'libvirt' group and installs the "
+                   "sudo policy), then restart MonitorX.")
+    logger.info("VM control unavailable: rw connection error=%s", rw_error)
 
     return {
-        "can_control": allowed and conn_alive,
+        "can_control": False,
         "can_list": list_ok,
-        "mode": "sudo" if allowed else "unconfigured",
-        "message": "VM controls are available." if (allowed and conn_alive)
-        else "Controls need the MonitorX sudo policy. Run systemd/install-service.sh, then restart MonitorX.",
+        "mode": "unconfigured",
+        "message": message,
     }
 
 
-async def _resolve_domain(vm_id: str):
+async def _resolve_domain(vm_id: str, conn=None):
     """Look up a libvirt domain by id (UUID, numeric ID, or name).
 
     Returns ``(domain, error_message)``. ``error_message`` is ``None`` on success.
     Runs blocking libvirt calls in a thread executor to avoid blocking the event loop.
+
+    ``conn`` selects which connection performs the lookup. Control paths must
+    pass the read-write connection, because a domain object obtained from a
+    read-only connection rejects every lifecycle call with
+    "operation forbidden: read only access prevents ...".
     """
     if not LIBVIRT_AVAILABLE:
         return None, "libvirt is not installed on this host."
-    if not _libvirt_conn_alive():
-        return None, "libvirt connection is not available. Check that libvirtd is running."
     if not VM_ID_PATTERN.fullmatch(vm_id):
         return None, "Invalid VM identifier."
 
-    loop = asyncio.get_running_loop()
-    executor = _get_libvirt_executor()
+    if conn is None:
+        if not await _ensure_libvirt_conn():
+            return None, "libvirt connection is not available. Check that libvirtd is running."
+        conn = libvirt_conn
+    if not _conn_alive(conn):
+        return None, "libvirt connection is not available. Check that libvirtd is running."
 
-    # 1. Try as a numeric domain id (only valid for active domains).
+    lookups = []
+    # 1. Numeric domain id (only valid for active domains).
     if vm_id.isdigit():
+        lookups.append(lambda: conn.lookupByID(int(vm_id)))
+    # 2. Domain UUID.
+    lookups.append(lambda: conn.lookupByUUIDString(vm_id))
+    # 3. Domain name.
+    lookups.append(lambda: conn.lookupByName(vm_id))
+
+    for lookup in lookups:
         try:
-            domain = await asyncio.wait_for(
-                loop.run_in_executor(executor, lambda: libvirt_conn.lookupById(int(vm_id))),
-                timeout=5.0
-            )
+            domain = await _run_libvirt(lookup, timeout=5.0)
             if domain:
                 return domain, None
         except (libvirt.libvirtError, asyncio.TimeoutError):
-            pass
-
-    # 2. Try as a domain UUID.
-    try:
-        domain = await asyncio.wait_for(
-            loop.run_in_executor(executor, lambda: libvirt_conn.lookupByUUIDString(vm_id)),
-            timeout=5.0
-        )
-        if domain:
-            return domain, None
-    except (libvirt.libvirtError, asyncio.TimeoutError):
-        pass
-
-    # 3. Try as a domain name.
-    try:
-        domain = await asyncio.wait_for(
-            loop.run_in_executor(executor, lambda: libvirt_conn.lookupByName(vm_id)),
-            timeout=5.0
-        )
-        if domain:
-            return domain, None
-    except (libvirt.libvirtError, asyncio.TimeoutError):
-        pass
+            continue
+        except Exception:
+            continue
 
     return None, f"VM '{vm_id}' was not found."
 
 
+def _virsh_command(action: str, vm_id: str) -> List[str]:
+    """Build the argv for a constrained virsh lifecycle command.
+
+    Correctness notes (these were the actual bugs):
+      * ``--no-ask-password`` is a *systemctl* flag. virsh rejects it with
+        "unsupported option", so every control command failed before it ever
+        reached libvirtd. The virsh equivalent is ``--no-pkttyagent``.
+      * ``poweroff`` is not a virsh command; the forced-stop verb is
+        ``destroy`` (see VM_ACTION_TO_VIRSH).
+      * ``--connect`` must be pinned. Without it, ``sudo virsh`` runs as root
+        and may resolve a different default URI than the one the dashboard
+        polls for inventory, so it reports "domain not found" for a guest that
+        is plainly visible in the UI.
+      * ``--`` terminates option parsing so a domain name is never mistaken
+        for a flag.
+    """
+    verb = VM_ACTION_TO_VIRSH[action]
+    args = [
+        VIRSH_BIN,
+        "--quiet",
+        "--no-pkttyagent",
+        "--connect", LIBVIRT_URI,
+        verb, "--", vm_id,
+    ]
+    if os.geteuid() == 0:
+        return args
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return []
+    return [sudo, "-n", *args]
+
+
 async def _run_virsh_action(action: str, vm_id: str) -> Optional[str]:
-    """Run a constrained virsh command, mirroring the service-control pattern.
+    """Run a constrained virsh command as the privileged fallback path.
 
     Returns ``None`` on success, or a human-readable error string on failure.
     """
-    args = ["--no-ask-password", action, vm_id]
-    if os.geteuid() == 0:
-        command = [VIRSH_BIN, *args]
-    else:
-        sudo = shutil.which("sudo")
-        if not sudo:
-            return "sudo is not installed. Re-run systemd/install-service.sh to configure VM controls."
-        command = [sudo, "-n", VIRSH_BIN, *args]
+    if not _virsh_present():
+        return ("virsh is not installed on this host. Install the libvirt-clients "
+                "package, then re-run systemd/install-service.sh.")
 
-    proc = await asyncio.create_subprocess_exec(
-        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
+    command = _virsh_command(action, vm_id)
+    if not command:
+        return "sudo is not installed. Re-run systemd/install-service.sh to configure VM controls."
+
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return f"Could not execute {command[0]}: file not found."
+    except PermissionError:
+        return f"Could not execute {command[0]}: permission denied."
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=VM_ACTION_TIMEOUT
+        )
     except asyncio.TimeoutError:
         try:
             proc.kill()
             await proc.communicate()
-        except ProcessLookupError:
+        except (ProcessLookupError, Exception):
             pass
-        return f"virsh {action} timed out after 30 seconds."
-    err = (stderr or stdout).decode(errors="replace").strip()
+        return (f"virsh {action} timed out after {int(VM_ACTION_TIMEOUT)}s. "
+                f"The guest may be unresponsive; try Poweroff to force-stop it.")
+
+    err = (stderr.decode(errors="replace").strip()
+           or stdout.decode(errors="replace").strip())
     if proc.returncode != 0:
-        if "password is required" in err.lower() or "not allowed" in err.lower():
-            err = ("MonitorX is not authorized to control VMs. "
-                   "Run systemd/install-service.sh, then restart MonitorX.")
-        return err or f"virsh {action} failed (exit code {proc.returncode})."
+        return _humanize_vm_error(err, action, proc.returncode)
     return None
+
+
+def _humanize_vm_error(err: str, action: str, returncode: Optional[int] = None) -> str:
+    """Translate raw libvirt/sudo failures into actionable operator guidance."""
+    low = (err or "").lower()
+    if "a password is required" in low or "sudo: a terminal is required" in low:
+        return ("MonitorX is not authorized to control VMs (sudo asked for a password). "
+                "Run systemd/install-service.sh, then restart MonitorX.")
+    if "not allowed to execute" in low or "is not in the sudoers" in low:
+        return ("MonitorX is not authorized to run virsh. "
+                "Run systemd/install-service.sh, then restart MonitorX.")
+    if "authentication unavailable" in low or "polkit" in low or "access denied" in low:
+        return ("libvirt denied the request (polkit authentication unavailable). "
+                "Add MonitorX's user to the 'libvirt' group or run "
+                "systemd/install-service.sh, then restart MonitorX.")
+    if "read only access" in low or "read-only" in low:
+        return ("libvirt connection is read-only. Run systemd/install-service.sh "
+                "to grant MonitorX read-write access, then restart MonitorX.")
+    if "failed to connect to the hypervisor" in low or "refused to connect" in low:
+        return ("Could not reach libvirtd. Start it with "
+                "'sudo systemctl start libvirtd', then retry.")
+    if "domain is already running" in low:
+        return "The guest is already running."
+    if "domain is not running" in low:
+        return "The guest is not running."
+    if "guest agent" in low or "acpi" in low:
+        return (f"The guest did not accept the {action} request (no ACPI/guest-agent "
+                f"support). Use Poweroff to force-stop it.")
+    if err:
+        return err
+    return f"virsh {action} failed (exit code {returncode})."
 
 
 async def _record_vm_action(vm_id: str, action: str, success: bool, message: str) -> None:
@@ -669,9 +879,65 @@ async def _record_vm_action(vm_id: str, action: str, success: bool, message: str
             del _vm_action_log[: len(_vm_action_log) - _VM_ACTION_LOG_LIMIT]
 
 
+async def _run_native_action(action: str, vm_id: str):
+    """Drive the domain through the libvirt API on a read-write connection.
+
+    This is the preferred path: it needs no sudo policy at all when MonitorX's
+    user is in the ``libvirt`` group, and it reports precise libvirt errors.
+
+    Returns ``(handled, error)``. ``handled`` is False when no read-write
+    connection could be opened, signalling the caller to fall back to
+    ``sudo virsh``.
+    """
+    conn, conn_error = await _ensure_libvirt_rw_conn()
+    if conn is None:
+        logger.debug("No read-write libvirt connection (%s); using virsh fallback.", conn_error)
+        return False, conn_error
+
+    # Re-resolve the domain on the READ-WRITE connection. A domain object bound
+    # to the read-only connection refuses every lifecycle call.
+    domain, lookup_error = await _resolve_domain(vm_id, conn=conn)
+    if lookup_error or domain is None:
+        return False, lookup_error
+
+    verb = VM_ACTION_TO_VIRSH[action]
+    operations = {
+        "start": domain.create,
+        "shutdown": domain.shutdown,
+        "reboot": lambda: domain.reboot(0),
+        "suspend": domain.suspend,
+        "resume": domain.resume,
+        "destroy": domain.destroy,
+    }
+    operation = operations[verb]
+
+    try:
+        await _run_libvirt(operation, timeout=VM_ACTION_TIMEOUT)
+        return True, None
+    except asyncio.TimeoutError:
+        return True, (f"{action} timed out after {int(VM_ACTION_TIMEOUT)}s. "
+                      f"The guest may be unresponsive; try Poweroff to force-stop it.")
+    except libvirt.libvirtError as exc:
+        message = str(exc)
+        low = message.lower()
+        # Permission-shaped failures are worth retrying through sudo virsh.
+        if ("read only" in low or "read-only" in low or "access denied" in low
+                or "polkit" in low or "authentication" in low or "permission denied" in low):
+            return False, message
+        return True, _humanize_vm_error(message, action)
+    except Exception as exc:
+        return True, _humanize_vm_error(str(exc), action)
+
+
 @app.post("/api/vms/{vm_id}/{action}")
 async def control_vm(vm_id: str, action: str, payload: Optional[VMActionRequest] = None):
-    """Perform a libvirt domain action (start, stop, poweroff, reboot, ...)."""
+    """Perform a libvirt domain action (start, shutdown, poweroff, reboot, ...).
+
+    Control is attempted natively through a read-write libvirt connection and
+    falls back to a narrowly scoped ``sudo virsh`` invocation, so the buttons
+    work whether MonitorX runs as root, as a member of the ``libvirt`` group,
+    or as an unprivileged user with the installer's sudo policy.
+    """
     if action not in VM_ACTIONS:
         raise HTTPException(
             status_code=400,
@@ -687,27 +953,31 @@ async def control_vm(vm_id: str, action: str, payload: Optional[VMActionRequest]
 
     if not LIBVIRT_AVAILABLE:
         raise HTTPException(status_code=503, detail="libvirt is not installed on this host.")
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        raise HTTPException(status_code=400, detail="Invalid VM identifier.")
 
     # Sanity check: surface libvirt state so the UI can decide before sending
     # graceful vs. destructive commands (e.g. "shutdown" is a no-op on a stopped VM).
     domain, lookup_error = await _resolve_domain(vm_id)
     if lookup_error:
         await _record_vm_action(vm_id, action, False, lookup_error)
-        raise HTTPException(status_code=404, detail=lookup_error)
+        status = 503 if "connection is not available" in lookup_error else 404
+        raise HTTPException(status_code=status, detail=lookup_error)
 
     try:
-        info = domain.info()
+        info = await _run_libvirt(domain.info, timeout=5.0)
         current_state = info[0]
     except Exception as exc:
         await _record_vm_action(vm_id, action, False, f"Could not read domain state: {exc}")
         raise HTTPException(status_code=503, detail=f"Could not read VM state: {exc}")
 
     # Skip no-ops so the UI does not log a misleading failure.
-    if action in ("start",) and current_state == libvirt.VIR_DOMAIN_RUNNING:
+    stopped_states = (libvirt.VIR_DOMAIN_SHUTOFF, libvirt.VIR_DOMAIN_CRASHED)
+    if action == "start" and current_state == libvirt.VIR_DOMAIN_RUNNING:
         msg = f"VM '{vm_id}' is already running."
         await _record_vm_action(vm_id, action, True, msg)
         return {"success": True, "message": msg, "state": "running", "noop": True}
-    if action in ("shutdown", "reboot", "poweroff", "destroy") and current_state == libvirt.VIR_DOMAIN_SHUTOFF:
+    if action in ("shutdown", "reboot", "poweroff", "destroy") and current_state in stopped_states:
         msg = f"VM '{vm_id}' is already stopped."
         await _record_vm_action(vm_id, action, True, msg)
         return {"success": True, "message": msg, "state": "shutoff", "noop": True}
@@ -720,19 +990,77 @@ async def control_vm(vm_id: str, action: str, payload: Optional[VMActionRequest]
         await _record_vm_action(vm_id, action, True, msg)
         return {"success": True, "message": msg, "state": "running", "noop": True}
 
-    error = await _run_virsh_action(action, vm_id)
+    # Reject transitions libvirt cannot satisfy, with a clear explanation
+    # instead of a raw driver error.
+    if action == "resume" and current_state not in (
+        libvirt.VIR_DOMAIN_PAUSED, libvirt.VIR_DOMAIN_PMSUSPENDED
+    ):
+        detail = f"VM '{vm_id}' is not paused, so it cannot be resumed."
+        await _record_vm_action(vm_id, action, False, detail)
+        raise HTTPException(status_code=409, detail=detail)
+    if action in ("suspend", "shutdown", "reboot") and current_state != libvirt.VIR_DOMAIN_RUNNING:
+        detail = f"VM '{vm_id}' is not running, so it cannot be {action}ed."
+        await _record_vm_action(vm_id, action, False, detail)
+        raise HTTPException(status_code=409, detail=detail)
+
+    # 1) Preferred: native libvirt API over a read-write connection.
+    handled, error = await _run_native_action(action, vm_id)
+    used_fallback = False
+
+    # 2) Fallback: narrowly scoped `sudo virsh` (unprivileged deployments).
+    if not handled:
+        used_fallback = True
+        error = await _run_virsh_action(action, vm_id)
+
     if error:
         await _record_vm_action(vm_id, action, False, error)
-        raise HTTPException(status_code=403, detail=error)
+        low = error.lower()
+        status = 403 if ("not authorized" in low or "denied" in low or "polkit" in low) else 502
+        raise HTTPException(status_code=status, detail=error)
 
     friendly = {
         "start": "started", "shutdown": "shut down", "reboot": "rebooted",
         "poweroff": "powered off", "destroy": "force-stopped",
         "suspend": "suspended", "resume": "resumed",
     }[action]
-    message = f"VM '{vm_id}' {friendly} successfully."
+
+    # Report the post-action state so the UI can refresh with confidence.
+    # `shutdown`/`reboot` are asynchronous requests to the guest OS: virsh
+    # returns immediately and the guest may take a while to actually stop.
+    new_state = await _read_domain_state(vm_id)
+    pending = action in ("shutdown", "reboot") and new_state == "running"
+    if pending:
+        message = (f"{friendly.capitalize()} request sent to '{vm_id}'. "
+                   f"The guest OS is completing the operation.")
+    else:
+        message = f"VM '{vm_id}' {friendly} successfully."
+
     await _record_vm_action(vm_id, action, True, message)
-    return {"success": True, "message": message}
+    return {
+        "success": True,
+        "message": message,
+        "state": new_state,
+        "pending": pending,
+        "via": "virsh" if used_fallback else "libvirt",
+    }
+
+
+async def _read_domain_state(vm_id: str) -> Optional[str]:
+    """Best-effort read of a domain's current state name after an action."""
+    state_names = {
+        libvirt.VIR_DOMAIN_NOSTATE: "no_state", libvirt.VIR_DOMAIN_RUNNING: "running",
+        libvirt.VIR_DOMAIN_BLOCKED: "blocked", libvirt.VIR_DOMAIN_PAUSED: "paused",
+        libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown", libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
+        libvirt.VIR_DOMAIN_CRASHED: "crashed", libvirt.VIR_DOMAIN_PMSUSPENDED: "pmsuspended",
+    }
+    try:
+        domain, error = await _resolve_domain(vm_id)
+        if error or domain is None:
+            return None
+        info = await _run_libvirt(domain.info, timeout=5.0)
+        return state_names.get(info[0], "unknown")
+    except Exception:
+        return None
 
 
 @app.get("/api/vms/log")
@@ -768,15 +1096,18 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
     }
 
     # Run blocking libvirt call in thread executor with timeout
+    global libvirt_conn
     try:
-        loop = asyncio.get_running_loop()
-        executor = _get_libvirt_executor()
-        domains = await asyncio.wait_for(
-            loop.run_in_executor(executor, lambda: libvirt_conn.listAllDomains(0)),
-            timeout=10.0
-        )
+        conn = libvirt_conn
+        domains = await _run_libvirt(lambda: conn.listAllDomains(0), timeout=10.0)
     except asyncio.TimeoutError:
         logger.warning("Timed out listing libvirt domains")
+        return None
+    except libvirt.libvirtError as exc:
+        # Drop the handle so the next poll dials a fresh connection instead of
+        # reusing a socket that libvirtd already closed.
+        logger.warning("Could not list libvirt domains: %s", exc)
+        libvirt_conn = None
         return None
     except Exception as exc:
         logger.warning("Could not list libvirt domains: %s", exc)

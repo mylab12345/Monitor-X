@@ -15,7 +15,7 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 - **Safe Diagnostic Console** — Approved read-only diagnostic presets (`df -h`, `free -h`, `ss -tulpn`, `systemctl --failed`, `dmesg -T`, `uname -a`) with command history. Arbitrary shell execution is intentionally disabled.
 - **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections).
 - **Service & VM Management** — Start, stop, restart, and reload systemd services, with an in-UI authorization status and actionable errors. Running libvirt/KVM guests show live vCPU, RAM, disk I/O, and network throughput metrics.
-- **KVM Guest Lifecycle Controls** — `Start`, `Shutdown`, `Reboot`, `Suspend`, `Resume`, and a destructive `Poweroff` for every libvirt domain discovered on the host, with a state-aware action matrix, bulk operations on multiple guests, KPI counters (Total / Running / Stopped / Paused / Other), search/filter/sort, an auto-refresh interval selector, and a built-in audit log of the last 50 control actions.
+- **KVM Guest Lifecycle Controls** — `Start`, `Shutdown`, `Reboot`, `Suspend`, `Resume`, and a destructive `Poweroff` for every libvirt domain discovered on the host, with a state-aware action matrix, bulk operations on multiple guests, KPI counters (Total / Running / Stopped / Paused / Other), search/filter/sort, an auto-refresh interval selector, and a built-in audit log of the last 50 control actions. Controls run through the libvirt API when MonitorX has read-write access and transparently fall back to a narrowly scoped `sudo virsh` policy otherwise; a dropped `libvirtd` connection is re-established automatically without restarting the dashboard.
 - **No Authentication Required** — Plug-and-play local/internal server monitoring.
 
 ---
@@ -47,7 +47,22 @@ To run MonitorX as a background systemd service that starts automatically on boo
 
 A dashboard process runs as your regular user, so plain `systemctl restart …` is normally rejected by systemd/polkit. The installer now creates a **limited passwordless sudo policy** only for MonitorX’s `start`, `stop`, `restart`, `reload`, `enable`, and `disable` actions on `.service` units, plus the two explicit remediation commands used by the Troubleshoot Hub (drop page cache and vacuum journals). It does **not** grant shell access.
 
-When `virsh` is detected, the installer additionally writes a separate `/etc/sudoers.d/monitorx-virsh` policy granting the dashboard’s user non-interactive `virsh --no-ask-password` access for `start`, `shutdown`, `reboot`, `poweroff`, `destroy`, `suspend`, and `resume` actions. The **VMs (Libvirt)** tab shows whether this policy is available, disables controls if it is not, and surfaces the exact `virsh` error rather than reporting a false success.
+### VM (libvirt/KVM) control authorization
+
+VM lifecycle controls use two independent paths, and the dashboard enables the buttons when **either** works:
+
+1. **Native libvirt (preferred).** The installer adds MonitorX’s user to the host’s `libvirt` (or `kvm`) group and sets `SupplementaryGroups=` in the unit file, so the backend opens a **read-write** connection to `qemu:///system` and drives guests through the libvirt API directly — no sudo, no subprocess, and precise error messages.
+2. **`sudo virsh` fallback.** When a read-write connection is unavailable, the installer’s `/etc/sudoers.d/monitorx-virsh` policy permits exactly the argv MonitorX runs:
+
+   ```
+   virsh --quiet --no-pkttyagent --connect qemu:///system <verb> -- <domain>
+   ```
+
+   for the verbs `start`, `shutdown`, `reboot`, `destroy`, `suspend`, and `resume`. Nothing else is granted — no shell, no `undefine`, no arbitrary arguments.
+
+The **VMs (Libvirt)** tab reports which mode is active, disables controls only when both paths fail, and surfaces the exact libvirt/`virsh` error instead of reporting a false success.
+
+> **Upgrading from an earlier version?** Releases before this fix generated a policy for `virsh --no-ask-password …`. That is a **systemctl** flag which `virsh` rejects outright, so every Start/Shutdown/Reboot silently failed — and `poweroff` isn’t a `virsh` verb at all (the correct one is `destroy`). Re-run `./systemd/install-service.sh` to replace the stale policy, then restart MonitorX.
 
 After updating an existing installation, run the installer once more and reload MonitorX:
 
