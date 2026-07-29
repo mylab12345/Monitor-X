@@ -42,12 +42,15 @@ EOF
 # The web process is intentionally unprivileged. Grant only the approved,
 # non-interactive service actions required by the dashboard; never grant a shell.
 SYSTEMCTL_BIN="$(command -v systemctl)"
+SYSCTL_BIN="$(command -v sysctl)"
+JOURNALCTL_BIN="$(command -v journalctl)"
 SUDOERS_DEST="/etc/sudoers.d/monitorx-systemctl"
 echo "[2/4] Installing limited service-control policy at $SUDOERS_DEST..."
 cat <<EOF | sudo tee "$SUDOERS_DEST" > /dev/null
 # Managed by MonitorX. Required for dashboard Start/Stop/Restart controls.
 Cmnd_Alias MONITORX_SYSTEMCTL = $SYSTEMCTL_BIN --no-ask-password start *.service, $SYSTEMCTL_BIN --no-ask-password stop *.service, $SYSTEMCTL_BIN --no-ask-password restart *.service, $SYSTEMCTL_BIN --no-ask-password reload *.service, $SYSTEMCTL_BIN --no-ask-password enable *.service, $SYSTEMCTL_BIN --no-ask-password disable *.service
-$CURRENT_USER ALL=(root) NOPASSWD: MONITORX_SYSTEMCTL
+Cmnd_Alias MONITORX_REMEDIATION = $SYSCTL_BIN -w vm.drop_caches=3, $JOURNALCTL_BIN --vacuum-time=2d
+$CURRENT_USER ALL=(root) NOPASSWD: MONITORX_SYSTEMCTL, MONITORX_REMEDIATION
 EOF
 sudo chmod 440 "$SUDOERS_DEST"
 sudo visudo -cf "$SUDOERS_DEST"

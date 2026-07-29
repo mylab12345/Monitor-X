@@ -3,14 +3,12 @@ Monitoring Dashboard Backend - FastAPI Application
 Provides real-time system monitoring via WebSocket and REST API
 """
 import asyncio
-import json
 import logging
 import os
 import platform
 import re
 import socket
 import shutil
-import subprocess
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -21,7 +19,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Requ
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import psutil
 
 # Optional imports for GPU monitoring
@@ -42,8 +40,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global state tracking for rate calculations
-connected_clients: List[WebSocket] = []
-system_stats_cache: Dict[str, Any] = {}
+# Network/disk rates are derived from a previous sample; serialize snapshots.
 stats_lock = asyncio.Lock()
 
 last_net_io = None
@@ -120,23 +117,23 @@ class SystemStats(BaseModel):
 
 
 class PingRequest(BaseModel):
-    host: str
-    count: Optional[int] = 4
+    host: str = Field(min_length=1, max_length=253)
+    count: int = Field(default=4, ge=1, le=10)
 
 
 class PortCheckRequest(BaseModel):
-    host: str
-    port: int
-    timeout: Optional[float] = 3.0
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(ge=1, le=65535)
+    timeout: float = Field(default=3.0, ge=0.1, le=10.0)
 
 
 class DNSCheckRequest(BaseModel):
-    domain: str
+    domain: str = Field(min_length=1, max_length=253)
 
 
 class RemediateRequest(BaseModel):
-    action: str
-    target: Optional[str] = None
+    action: str = Field(min_length=1, max_length=64)
+    target: Optional[str] = Field(default=None, max_length=128)
 
 
 class ConnectionManager:
@@ -450,7 +447,7 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
                 "id": domain_id,
                 "name": domain.name(),
                 "state": state_map.get(info[0], "unknown"),
-                "cpu_time": info[2],
+                "cpu_time": info[4],
                 "max_memory": info[1],
                 "memory": info[2],
                 "vcpus": info[3]
@@ -463,27 +460,24 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
 
 
 async def collect_all_stats() -> SystemStats:
-    """Collect all system statistics"""
-    cpu = await get_cpu_stats()
-    memory = await get_memory_stats()
-    disk = await get_disk_stats()
-    network = await get_network_stats()
-    gpu = await get_gpu_stats()
-    processes = await get_process_stats()
-    system = await get_system_info()
-    vms = await get_vm_stats()
-    
-    return SystemStats(
-        timestamp=datetime.now().isoformat(),
-        cpu=cpu,
-        memory=memory,
-        disk=disk,
-        network=network,
-        gpu=gpu,
-        processes=processes,
-        system=system,
-        vms=vms
-    )
+    """Collect a consistent stats snapshot.
+
+    Disk and network rates use previous samples, so serializing collection avoids
+    concurrent REST/WebSocket requests corrupting those calculations.
+    """
+    async with stats_lock:
+        cpu = await get_cpu_stats()
+        memory = await get_memory_stats()
+        disk = await get_disk_stats()
+        network = await get_network_stats()
+        gpu = await get_gpu_stats()
+        processes = await get_process_stats()
+        system = await get_system_info()
+        vms = await get_vm_stats()
+        return SystemStats(
+            timestamp=datetime.now().isoformat(), cpu=cpu, memory=memory, disk=disk,
+            network=network, gpu=gpu, processes=processes, system=system, vms=vms
+        )
 
 
 async def broadcast_stats():
@@ -615,8 +609,10 @@ async def get_process_detail(pid: int):
 
 
 @app.post("/api/processes/{pid}/kill")
-async def kill_process(pid: int, signal: int = 15):
-    """Kill a process (default SIGTERM=15, SIGKILL=9)"""
+async def kill_process(pid: int, signal: int = Query(15)):
+    """Terminate a process with SIGTERM or SIGKILL."""
+    if signal not in (9, 15):
+        raise HTTPException(status_code=400, detail="Only SIGTERM (15) and SIGKILL (9) are allowed.")
     try:
         proc = psutil.Process(pid)
         proc.send_signal(signal)
@@ -630,26 +626,21 @@ async def kill_process(pid: int, signal: int = 15):
         raise HTTPException(status_code=403, detail="Access denied")
 
 
-# System control endpoints
-@app.post("/api/system/reboot")
+# Power actions are intentionally not exposed to unauthenticated dashboard clients.
+# Service-level actions are available through the constrained service-control API below.
+@app.post("/api/system/reboot", status_code=403)
 async def reboot_system():
-    try:
-        await asyncio.create_subprocess_exec("systemctl", "reboot")
-        return {"success": True, "message": "Reboot initiated"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=403, detail="Reboot is disabled from the unauthenticated dashboard.")
 
 
-@app.post("/api/system/shutdown")
+@app.post("/api/system/shutdown", status_code=403)
 async def shutdown_system():
-    try:
-        await asyncio.create_subprocess_exec("systemctl", "poweroff")
-        return {"success": True, "message": "Shutdown initiated"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=403, detail="Shutdown is disabled from the unauthenticated dashboard.")
 
 
 SYSTEMCTL_BIN = shutil.which("systemctl") or "/usr/bin/systemctl"
+SYSCTL_BIN = shutil.which("sysctl") or "/usr/sbin/sysctl"
+JOURNALCTL_BIN = shutil.which("journalctl") or "/usr/bin/journalctl"
 SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@_.:-]*\.service$")
 SERVICE_ACTIONS = ("start", "stop", "restart", "reload", "enable", "disable")
 
@@ -1150,7 +1141,7 @@ async def troubleshoot_ping(req: PingRequest):
     if not re.match(r'^[a-zA-Z0-9.-]+$', host):
         raise HTTPException(status_code=400, detail="Invalid hostname or IP address format")
     
-    count = min(max(1, req.count or 4), 10)
+    count = req.count
     try:
         proc = await asyncio.create_subprocess_exec(
             "ping", "-c", str(count), "-W", "3", host,
@@ -1184,7 +1175,7 @@ async def troubleshoot_port_check(req: PortCheckRequest):
     if not re.match(r'^[a-zA-Z0-9.-]+$', host) or not (1 <= port <= 65535):
         raise HTTPException(status_code=400, detail="Invalid host or port range")
     
-    timeout = req.timeout or 3.0
+    timeout = req.timeout
     start_time = time.time()
     try:
         conn = asyncio.open_connection(host, port)
@@ -1365,7 +1356,7 @@ async def perform_remediation(req: RemediateRequest):
     if action == "clear_pagecache":
         try:
             proc = await asyncio.create_subprocess_exec(
-                "sudo", "sysctl", "-w", "vm.drop_caches=3",
+                "sudo", "-n", SYSCTL_BIN, "-w", "vm.drop_caches=3",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -1419,7 +1410,7 @@ async def perform_remediation(req: RemediateRequest):
     elif action == "vacuum_journal":
         try:
             proc = await asyncio.create_subprocess_exec(
-                "journalctl", "--vacuum-time=2d",
+                "sudo", "-n", JOURNALCTL_BIN, "--vacuum-time=2d",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -1446,41 +1437,61 @@ async def perform_remediation(req: RemediateRequest):
         raise HTTPException(status_code=400, detail=f"Unsupported remediation action: {action}")
 
 
+SAFE_DIAGNOSTIC_COMMANDS = {
+    "df -h": ("df", "-h"),
+    "free -h": ("free", "-h"),
+    "ss -tulpn": ("ss", "-tulpn"),
+    "systemctl --failed": (SYSTEMCTL_BIN, "--no-ask-password", "--failed", "--no-pager"),
+    "uname -a": ("uname", "-a"),
+}
+
+
 @app.post("/api/commands/run")
 async def run_command(request: Request):
-    """Run a shell command safely"""
+    """Run one of the dashboard's explicitly approved, read-only diagnostics.
+
+    This endpoint is reachable from the browser and MonitorX has no authentication,
+    so accepting an arbitrary shell command would be remote code execution.
+    """
     try:
         body = await request.json()
-        cmd = body.get("command", "")
+        command = str(body.get("command", "")).strip()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    
-    if not cmd:
-        raise HTTPException(status_code=400, detail="No command provided")
-    
-    dangerous = ["rm -rf /", "mkfs", "dd if=", "shutdown", "reboot", "halt", "poweroff"]
-    for d in dangerous:
-        if d in cmd.lower():
-            raise HTTPException(status_code=403, detail=f"Blocked dangerous command pattern: {d}")
-    
+
+    if command == "dmesg -T | tail -n 25":
+        args = ("dmesg", "-T")
+        tail_lines = 25
+    else:
+        args = SAFE_DIAGNOSTIC_COMMANDS.get(command)
+        tail_lines = None
+    if not args:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the dashboard's approved diagnostic presets can be run. Arbitrary shell commands are disabled."
+        )
+
     try:
         proc = await asyncio.create_subprocess_exec(
-            "bash", "-c", cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        output = stdout.decode()
-        error = stderr.decode()
-        return {
-            "output": output,
-            "error": error,
-            "returncode": proc.returncode
-        }
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        output = stdout.decode(errors="replace")
+        if tail_lines:
+            output = "\n".join(output.splitlines()[-tail_lines:])
+        return {"output": output, "error": stderr.decode(errors="replace"), "returncode": proc.returncode}
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=500, detail="Command execution timed out (30s)")
+        try:
+            proc.kill()
+            await proc.communicate()
+        except ProcessLookupError:
+            pass
+        raise HTTPException(status_code=504, detail="Diagnostic command timed out after 15 seconds.")
+    except FileNotFoundError:
+        raise HTTPException(status_code=501, detail=f"Diagnostic command is unavailable: {args[0]}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Diagnostic command failed")
+        raise HTTPException(status_code=500, detail="Diagnostic command could not be executed.")
 
 
 if __name__ == "__main__":
