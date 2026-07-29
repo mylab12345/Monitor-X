@@ -1305,7 +1305,7 @@ canvas {
 .vm-audit-entry.failed .vm-audit-msg { color: #fda4af; }
 
 /* ==========================================================================
-   VM CONSOLE, RESIZE, SSH, CONTAINERS, PODS
+   VM CONSOLE, RESIZE, CONTAINERS, PODS
    ========================================================================== */
 
 /* VM Extra Actions Row */
@@ -1433,17 +1433,6 @@ canvas {
     gap: 10px;
     justify-content: flex-end;
     margin-top: 8px;
-}
-
-/* SSH Config */
-.ssh-info-text {
-    font-size: 0.85rem;
-    color: var(--text-muted);
-    margin-bottom: 16px;
-    padding: 10px 14px;
-    background: rgba(56, 189, 248, 0.08);
-    border: 1px solid rgba(56, 189, 248, 0.2);
-    border-radius: var(--radius-sm);
 }
 
 /* Container & Pod Panels */

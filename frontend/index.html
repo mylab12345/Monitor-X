@@ -678,43 +678,6 @@
         </div>
     </div>
 
-    <!-- VM SSH Config Modal -->
-    <div class="modal" id="ssh-config-modal">
-        <div class="modal-content" style="max-width: 520px;">
-            <div class="modal-header">
-                <h3>🔑 SSH Config — <span id="ssh-vm-name"></span></h3>
-                <button class="modal-close" id="ssh-modal-close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <p class="ssh-info-text">Configure SSH access to this VM to enable Docker container monitoring inside the VM.</p>
-                <div class="resize-form">
-                    <div class="resize-field">
-                        <label>SSH Host (IP or hostname)</label>
-                        <input type="text" id="ssh-host" class="search-input" placeholder="e.g. 192.168.122.100">
-                    </div>
-                    <div class="resize-field">
-                        <label>SSH Port</label>
-                        <input type="number" id="ssh-port" class="search-input" value="22" min="1" max="65535">
-                    </div>
-                    <div class="resize-field">
-                        <label>SSH User</label>
-                        <input type="text" id="ssh-user" class="search-input" placeholder="e.g. root" value="root">
-                    </div>
-                    <div class="resize-field">
-                        <label>SSH Key Path (optional)</label>
-                        <input type="text" id="ssh-key-path" class="search-input" placeholder="e.g. ~/.ssh/id_rsa">
-                    </div>
-                    <div class="resize-actions">
-                        <button class="btn btn-danger btn-sm" id="ssh-remove-config">Remove Config</button>
-                        <div style="flex:1"></div>
-                        <button class="btn btn-outline" id="ssh-cancel">Cancel</button>
-                        <button class="btn btn-primary" id="ssh-save">Save SSH Config</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <!-- Container Logs Modal -->
     <div class="modal" id="container-logs-modal">
         <div class="modal-content" style="max-width: 800px;">

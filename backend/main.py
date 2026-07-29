@@ -215,7 +215,6 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
     asyncio.create_task(broadcast_stats())
-    await _load_ssh_configs()
     logger.info("Monitoring Dashboard started")
     yield
     # Shutdown
@@ -295,14 +294,6 @@ class VMResizeRequest(BaseModel):
     """Payload for resizing VM CPU and/or memory."""
     vcpus: Optional[int] = Field(default=None, ge=1, le=256, description="New number of vCPUs.")
     memory_mb: Optional[int] = Field(default=None, ge=256, le=1048576, description="New memory in MiB.")
-
-
-class SSHConfigRequest(BaseModel):
-    """Payload for setting SSH connection details for a VM."""
-    host: str = Field(min_length=1, max_length=253, description="IP or hostname of the VM.")
-    port: int = Field(default=22, ge=1, le=65535)
-    user: str = Field(min_length=1, max_length=64, description="SSH username.")
-    key_path: Optional[str] = Field(default=None, max_length=512, description="Path to SSH private key.")
 
 
 # Approved libvirt domain control actions exposed to the dashboard.
@@ -779,115 +770,6 @@ async def get_kubernetes_pods() -> Optional[List[Dict[str, Any]]]:
         return None
 
 
-# =============================================================================
-# PER-VM CONTAINER MONITORING (SSH-BASED)
-# =============================================================================
-
-_vm_ssh_configs: Dict[str, Dict[str, Any]] = {}
-_vm_ssh_configs_lock = asyncio.Lock()
-_SSH_CONFIG_PATH = Path(__file__).resolve().parent.parent / ".vm-ssh-config.json"
-
-
-async def _load_ssh_configs():
-    """Load SSH configs from disk on startup."""
-    global _vm_ssh_configs
-    try:
-        if _SSH_CONFIG_PATH.exists():
-            data = json.loads(_SSH_CONFIG_PATH.read_text())
-            _vm_ssh_configs = data if isinstance(data, dict) else {}
-    except Exception:
-        _vm_ssh_configs = {}
-
-
-async def _save_ssh_configs():
-    """Persist SSH configs to disk."""
-    try:
-        _SSH_CONFIG_PATH.write_text(json.dumps(_vm_ssh_configs, indent=2))
-    except Exception as e:
-        logger.warning("Could not save SSH configs: %s", e)
-
-
-async def _ssh_exec(config: Dict[str, Any], command: str, timeout: float = 15.0) -> Optional[str]:
-    """Execute a command on a remote VM via SSH. Returns stdout or None on failure."""
-    ssh_bin = shutil.which("ssh")
-    if not ssh_bin:
-        return None
-    cmd = [
-        ssh_bin, "-o", "StrictHostKeyChecking=no",
-        "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-        "-p", str(config.get("port", 22)),
-    ]
-    key = config.get("key_path", "")
-    if key and os.path.isfile(key):
-        cmd.extend(["-i", key])
-    user = config.get("user", "root")
-    host = config.get("host", "")
-    if not host:
-        return None
-    cmd.extend([f"{user}@{host}", command])
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        if proc.returncode != 0:
-            return None
-        return stdout.decode(errors="replace")
-    except Exception:
-        return None
-
-
-async def get_vm_containers(vm_id: str) -> Optional[Dict[str, Any]]:
-    """Get Docker containers running inside a VM via SSH."""
-    async with _vm_ssh_configs_lock:
-        config = _vm_ssh_configs.get(vm_id)
-    if not config:
-        return None
-    output = await _ssh_exec(config, "docker ps -a --no-trunc --format '{{json .}}'")
-    if output is None:
-        return {"vm_id": vm_id, "containers": [], "total": 0, "running": 0,
-                "error": "SSH connection failed. Check SSH configuration."}
-    containers = []
-    for line in output.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            raw = json.loads(line)
-            containers.append({
-                "id": raw.get("ID", "")[:12],
-                "name": raw.get("Name", ""),
-                "image": raw.get("Image", ""),
-                "status": raw.get("Status", ""),
-                "state": raw.get("State", ""),
-                "ports": raw.get("Ports", ""),
-                "running": raw.get("State", "").lower() == "running",
-            })
-        except json.JSONDecodeError:
-            continue
-    stats_output = await _ssh_exec(config, "docker stats --no-stream --format '{{json .}}'", timeout=20)
-    if stats_output:
-        stats_map = {}
-        for line in stats_output.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-                stats_map[raw.get("Name", "")] = {
-                    "cpu_percent": float(raw.get("CPUPerc", "0%").replace("%", "").strip() or 0),
-                    "mem_usage": raw.get("MemUsage", ""),
-                    "net_io": raw.get("NetIO", ""),
-                }
-            except (json.JSONDecodeError, ValueError):
-                continue
-        for c in containers:
-            if c["name"] in stats_map:
-                c["stats"] = stats_map[c["name"]]
-    return {"vm_id": vm_id, "containers": containers, "total": len(containers),
-            "running": sum(1 for c in containers if c.get("running"))}
-
-
 def _virsh_present() -> bool:
     """True when a virsh binary is actually available to execute."""
     return bool(shutil.which(VIRSH_BIN) or Path(VIRSH_BIN).exists())
@@ -1221,6 +1103,79 @@ async def _run_native_action(action: str, vm_id: str):
         return True, _humanize_vm_error(str(exc), action)
 
 
+# =============================================================================
+# VM RESIZE ENDPOINT (must be before the generic /{action} route)
+# =============================================================================
+
+@app.post("/api/vms/{vm_id}/resize")
+async def resize_vm(vm_id: str, payload: VMResizeRequest):
+    """Resize VM CPU and/or memory via libvirt API."""
+    if not LIBVIRT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="libvirt is not installed on this host.")
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        raise HTTPException(status_code=400, detail="Invalid VM identifier.")
+    if payload.vcpus is None and payload.memory_mb is None:
+        raise HTTPException(status_code=400, detail="Provide at least one of: vcpus, memory_mb.")
+
+    domain, lookup_error = await _resolve_domain(vm_id)
+    if lookup_error:
+        raise HTTPException(status_code=404, detail=lookup_error)
+
+    messages = []
+
+    if payload.vcpus is not None:
+        try:
+            conn, _ = await _ensure_libvirt_rw_conn()
+            target = await _resolve_domain(vm_id, conn=conn) if conn else (domain, None)
+            tgt = target[0] if target and target[0] else domain
+            await _run_libvirt(
+                lambda: tgt.setVcpusFlags(payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_CURRENT),
+                timeout=10.0,
+            )
+            messages.append(f"vCPUs set to {payload.vcpus}")
+        except libvirt.libvirtError as exc:
+            msg = str(exc)
+            if "read only" in msg.lower() or "denied" in msg.lower():
+                cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus))
+                if cmd:
+                    err = await _run_virsh_modify(cmd)
+                    messages.append(f"vCPUs set to {payload.vcpus} (via virsh)" if not err else f"vCPUs: {err}")
+                else:
+                    messages.append("vCPUs: permission denied and virsh unavailable")
+            else:
+                messages.append(f"vCPUs: {msg}")
+        except Exception as exc:
+            messages.append(f"vCPUs: {exc}")
+
+    if payload.memory_mb is not None:
+        mem_kib = payload.memory_mb * 1024
+        try:
+            conn, _ = await _ensure_libvirt_rw_conn()
+            target = await _resolve_domain(vm_id, conn=conn) if conn else (domain, None)
+            tgt = target[0] if target and target[0] else domain
+            await _run_libvirt(
+                lambda: tgt.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_CURRENT),
+                timeout=10.0,
+            )
+            messages.append(f"Memory set to {payload.memory_mb} MiB")
+        except libvirt.libvirtError as exc:
+            msg = str(exc)
+            if "read only" in msg.lower() or "denied" in msg.lower():
+                cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), "--config")
+                if cmd:
+                    err = await _run_virsh_modify(cmd)
+                    messages.append(f"Memory set to {payload.memory_mb} MiB (via virsh)" if not err else f"Memory: {err}")
+                else:
+                    messages.append("Memory: permission denied and virsh unavailable")
+            else:
+                messages.append(f"Memory: {msg}")
+        except Exception as exc:
+            messages.append(f"Memory: {exc}")
+
+    await _record_vm_action(vm_id, "resize", True, "; ".join(messages) or "Resize requested")
+    return {"success": True, "message": "; ".join(messages), "vm_id": vm_id}
+
+
 @app.post("/api/vms/{vm_id}/{action}")
 async def control_vm(vm_id: str, action: str, payload: Optional[VMActionRequest] = None):
     """Perform a libvirt domain action (start, shutdown, poweroff, reboot, ...).
@@ -1361,171 +1316,6 @@ async def vm_action_log(limit: int = Query(20, ge=1, le=_VM_ACTION_LOG_LIMIT)):
     async with _vm_action_log_lock:
         recent = list(reversed(_vm_action_log[-limit:]))
     return {"entries": recent, "total": len(_vm_action_log)}
-
-
-# =============================================================================
-# VM SSH CONFIGURATION ENDPOINTS
-# =============================================================================
-
-@app.get("/api/vms/{vm_id}/ssh-config")
-async def get_vm_ssh_config(vm_id: str):
-    """Get SSH configuration for a VM."""
-    async with _vm_ssh_configs_lock:
-        config = _vm_ssh_configs.get(vm_id, {})
-    return {"vm_id": vm_id, "configured": bool(config), **config}
-
-
-@app.post("/api/vms/{vm_id}/ssh-config")
-async def set_vm_ssh_config(vm_id: str, payload: SSHConfigRequest):
-    """Set SSH configuration for a VM to enable container monitoring."""
-    config = {"host": payload.host, "port": payload.port,
-              "user": payload.user, "key_path": payload.key_path or ""}
-    async with _vm_ssh_configs_lock:
-        _vm_ssh_configs[vm_id] = config
-    await _save_ssh_configs()
-    return {"success": True, "message": f"SSH config saved for VM '{vm_id}'.", **config}
-
-
-@app.delete("/api/vms/{vm_id}/ssh-config")
-async def delete_vm_ssh_config(vm_id: str):
-    """Remove SSH configuration for a VM."""
-    async with _vm_ssh_configs_lock:
-        removed = _vm_ssh_configs.pop(vm_id, None)
-    await _save_ssh_configs()
-    if removed:
-        return {"success": True, "message": f"SSH config removed for VM '{vm_id}'."}
-    raise HTTPException(status_code=404, detail=f"No SSH config for VM '{vm_id}'.")
-
-
-@app.get("/api/vms/{vm_id}/containers")
-async def get_vm_container_list(vm_id: str):
-    """Get Docker containers running inside a VM via SSH."""
-    result = await get_vm_containers(vm_id)
-    if result is None:
-        raise HTTPException(status_code=404,
-                            detail=f"SSH not configured for VM '{vm_id}'. Set up SSH config first.")
-    return result
-
-
-# =============================================================================
-# VM RESIZE ENDPOINT
-# =============================================================================
-
-@app.post("/api/vms/{vm_id}/resize")
-async def resize_vm(vm_id: str, payload: VMResizeRequest):
-    """Resize VM CPU and/or memory via libvirt API.
-
-    Only running or paused VMs can be resized. The change takes effect
-    immediately for CPU and on next boot for memory (unless the VM supports
-    hot-plug).
-    """
-    if not LIBVIRT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="libvirt is not installed on this host.")
-    if not VM_ID_PATTERN.fullmatch(vm_id):
-        raise HTTPException(status_code=400, detail="Invalid VM identifier.")
-    if payload.vcpus is None and payload.memory_mb is None:
-        raise HTTPException(status_code=400,
-                            detail="Provide at least one of: vcpus, memory_mb.")
-
-    domain, lookup_error = await _resolve_domain(vm_id)
-    if lookup_error:
-        raise HTTPException(status_code=404, detail=lookup_error)
-
-    # Use read-write connection for modification
-    conn, conn_error = await _ensure_libvirt_rw_conn()
-    if conn is None:
-        # Try virsh fallback
-        errors = []
-        if payload.vcpus is not None:
-            cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus))
-            if cmd:
-                err = await _run_virsh_modify(cmd)
-                if err:
-                    errors.append(f"vCPUs: {err}")
-            else:
-                errors.append("vCPUs: virsh/sudo not available")
-        if payload.memory_mb is not None:
-            mem_kib = payload.memory_mb * 1024
-            cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), "--config")
-            if cmd:
-                err = await _run_virsh_modify(cmd)
-                if err:
-                    errors.append(f"Memory: {err}")
-            else:
-                errors.append("Memory: virsh/sudo not available")
-        if errors:
-            raise HTTPException(status_code=502, detail="; ".join(errors))
-        # Re-resolve on the rw connection for the domain info read below
-        domain2, err2 = await _resolve_domain(vm_id, conn=conn if conn else None)
-        if domain2:
-            domain = domain2
-
-    messages = []
-
-    if payload.vcpus is not None:
-        try:
-            target_domain = domain
-            if conn:
-                target_domain, _ = await _resolve_domain(vm_id, conn=conn)
-                if not target_domain:
-                    target_domain = domain
-            await _run_libvirt(
-                lambda: target_domain.setVcpusFlags(payload.vcpus,
-                                                     libvirt.VIR_DOMAIN_AFFECT_CURRENT),
-                timeout=10.0,
-            )
-            messages.append(f"vCPUs set to {payload.vcpus}")
-        except libvirt.libvirtError as exc:
-            msg = str(exc)
-            if "read only" in msg.lower() or "denied" in msg.lower():
-                # Fallback to virsh
-                cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus))
-                if cmd:
-                    err = await _run_virsh_modify(cmd)
-                    if err:
-                        messages.append(f"vCPUs: {err}")
-                    else:
-                        messages.append(f"vCPUs set to {payload.vcpus} (via virsh)")
-                else:
-                    messages.append(f"vCPUs: permission denied and virsh unavailable")
-            else:
-                messages.append(f"vCPUs: {msg}")
-        except Exception as exc:
-            messages.append(f"vCPUs: {exc}")
-
-    if payload.memory_mb is not None:
-        mem_kib = payload.memory_mb * 1024
-        try:
-            target_domain = domain
-            if conn:
-                target_domain, _ = await _resolve_domain(vm_id, conn=conn)
-                if not target_domain:
-                    target_domain = domain
-            await _run_libvirt(
-                lambda: target_domain.setMemoryFlags(mem_kib,
-                                                      libvirt.VIR_DOMAIN_AFFECT_CURRENT),
-                timeout=10.0,
-            )
-            messages.append(f"Memory set to {payload.memory_mb} MiB")
-        except libvirt.libvirtError as exc:
-            msg = str(exc)
-            if "read only" in msg.lower() or "denied" in msg.lower():
-                cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), "--config")
-                if cmd:
-                    err = await _run_virsh_modify(cmd)
-                    if err:
-                        messages.append(f"Memory: {err}")
-                    else:
-                        messages.append(f"Memory set to {payload.memory_mb} MiB (via virsh)")
-                else:
-                    messages.append(f"Memory: permission denied and virsh unavailable")
-            else:
-                messages.append(f"Memory: {msg}")
-        except Exception as exc:
-            messages.append(f"Memory: {exc}")
-
-    await _record_vm_action(vm_id, "resize", True, "; ".join(messages) or "Resize requested")
-    return {"success": True, "message": "; ".join(messages), "vm_id": vm_id}
 
 
 def _build_virsh_modify_command(subcmd: str, vm_id: str, *args) -> List[str]:

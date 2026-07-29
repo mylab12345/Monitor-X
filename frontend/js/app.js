@@ -45,8 +45,6 @@ const state = {
     resizeVmId: null,
     resizeVcpus: 2,
     resizeMemMb: 2048,
-    // SSH config state
-    sshVmId: null,
     // Container stats cache
     containerStats: {},
 };
@@ -1074,9 +1072,6 @@ function vmExtraButtons(vm) {
     const currentMemMb = Math.round((vm.memory_total || vm.max_memory || 0) / 1024);
     html += `<button type="button" class="btn btn-sm btn-outline vm-resize-btn" data-vm-resize="${id}" data-vm-resize-name="${name}" data-vm-vcpus="${vm.vcpus || 1}" data-vm-mem="${currentMemMb}" title="Resize CPU/RAM">⚙️ Resize</button>`;
 
-    // SSH Config button
-    html += `<button type="button" class="btn btn-sm btn-outline vm-ssh-btn" data-vm-ssh="${id}" data-vm-ssh-name="${name}" title="SSH Config for Container Monitoring">🔑 SSH</button>`;
-
     return html;
 }
 
@@ -1176,7 +1171,6 @@ function renderVms(vms) {
                     <div class="vm-stat"><span>Domain ID</span><span>${vm.id >= 0 ? vm.id : '—'}</span></div>
                     <div class="vm-stat"><span>Disks / NICs</span><span>${(vm.disks || []).length} / ${(vm.interfaces || []).length}</span></div>
                 </div>
-                ${vm._vm_containers ? renderVmContainers(vm._vm_containers) : ''}
                 ${rateStatus ? `<p class="vm-rate-status">${rateStatus}</p>` : ''}
                 ${renderVmActions(vm, canControl)}
             </article>`;
@@ -1222,22 +1216,6 @@ function initVmDelegation(container) {
                 parseInt(resizeBtn.dataset.vmVcpus) || 2,
                 parseInt(resizeBtn.dataset.vmMem) || 2048
             );
-            return;
-        }
-        // Handle SSH Config button
-        const sshBtn = e.target.closest('[data-vm-ssh]');
-        if (sshBtn && container.contains(sshBtn)) {
-            e.preventDefault();
-            e.stopPropagation();
-            openSshConfigModal(sshBtn.dataset.vmSsh, sshBtn.dataset.vmSshName);
-            return;
-        }
-        // Handle Container Logs button
-        const logsBtn = e.target.closest('[data-container-logs]');
-        if (logsBtn && container.contains(logsBtn)) {
-            e.preventDefault();
-            e.stopPropagation();
-            showContainerLogs(logsBtn.dataset.containerLogs, logsBtn.dataset.containerLogsName);
             return;
         }
     });
@@ -1762,81 +1740,6 @@ function closeResizeModal() {
 
 
 /* ==========================================================================
-   SSH CONFIG PER VM
-   ========================================================================== */
-
-async function openSshConfigModal(vmId, vmName) {
-    state.sshVmId = vmId;
-    document.getElementById('ssh-vm-name').textContent = vmName || vmId;
-
-    // Load existing config
-    document.getElementById('ssh-host').value = '';
-    document.getElementById('ssh-port').value = '22';
-    document.getElementById('ssh-user').value = 'root';
-    document.getElementById('ssh-key-path').value = '';
-
-    try {
-        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/ssh-config`);
-        if (res.ok) {
-            const config = await res.json();
-            if (config.configured) {
-                document.getElementById('ssh-host').value = config.host || '';
-                document.getElementById('ssh-port').value = config.port || 22;
-                document.getElementById('ssh-user').value = config.user || 'root';
-                document.getElementById('ssh-key-path').value = config.key_path || '';
-            }
-        }
-    } catch (e) {}
-
-    document.getElementById('ssh-config-modal').classList.add('show');
-}
-
-async function saveSshConfig() {
-    if (!state.sshVmId) return;
-    const host = document.getElementById('ssh-host').value.trim();
-    const port = parseInt(document.getElementById('ssh-port').value) || 22;
-    const user = document.getElementById('ssh-user').value.trim() || 'root';
-    const keyPath = document.getElementById('ssh-key-path').value.trim() || null;
-
-    if (!host) {
-        showToast('SSH host is required.', 'warning');
-        return;
-    }
-
-    try {
-        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(state.sshVmId)}/ssh-config`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ host, port, user, key_path: keyPath }),
-        });
-        const result = await res.json();
-        if (!res.ok) throw new Error(result.detail || 'Save failed');
-        showToast(result.message || 'SSH config saved', 'success');
-        document.getElementById('ssh-config-modal').classList.remove('show');
-        fetchVms();
-    } catch (e) {
-        showToast(`SSH config save failed: ${e.message}`, 'error');
-    }
-}
-
-async function removeSshConfig() {
-    if (!state.sshVmId) return;
-    try {
-        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(state.sshVmId)}/ssh-config`, {
-            method: 'DELETE',
-        });
-        if (res.ok || res.status === 404) {
-            showToast('SSH config removed', 'info');
-            document.getElementById('ssh-config-modal').classList.remove('show');
-            fetchVms();
-        }
-    } catch (e) {
-        showToast(`Error: ${e.message}`, 'error');
-    }
-}
-
-
-/* ==========================================================================
    DOCKER CONTAINERS
    ========================================================================== */
 
@@ -1992,44 +1895,6 @@ function renderPods(pods) {
     });
     html += '</div>';
     content.innerHTML = html;
-}
-
-
-/* ==========================================================================
-   PER-VM CONTAINER DISPLAY
-   ========================================================================== */
-
-function renderVmContainers(containerData) {
-    if (!containerData || !containerData.containers || containerData.containers.length === 0) {
-        return `<div class="vm-containers-section">
-            <span class="vm-containers-label">🐳 Containers: <b>0</b></span>
-        </div>`;
-    }
-    const running = containerData.running || 0;
-    const total = containerData.total || 0;
-    let html = `<div class="vm-containers-section">
-        <span class="vm-containers-label">🐳 Containers: <b>${running}</b> running / <b>${total}</b> total</span>
-        <div class="vm-containers-list">`;
-    containerData.containers.forEach(c => {
-        const stateClass = c.running ? 'running' : 'stopped';
-        html += `<div class="vm-container-chip ${stateClass}">
-            <span class="vm-container-dot ${stateClass}"></span>
-            <span>${escapeHtml(c.name)}</span>
-            ${c.stats ? `<span class="vm-container-stats">${c.stats.cpu_percent}% CPU</span>` : ''}
-        </div>`;
-    });
-    html += `</div></div>`;
-    return html;
-}
-
-async function fetchVmContainers(vmId) {
-    try {
-        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/containers`);
-        if (!res.ok) return null;
-        return await res.json();
-    } catch (e) {
-        return null;
-    }
 }
 
 
@@ -2345,21 +2210,6 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('resize-mem-input')?.addEventListener('input', (e) => {
         document.getElementById('resize-mem-slider').value = Math.min(parseInt(e.target.value) || 256, 65536);
     });
-
-    // SSH Config Modal
-    document.getElementById('ssh-modal-close')?.addEventListener('click', () => {
-        document.getElementById('ssh-config-modal').classList.remove('show');
-    });
-    document.getElementById('ssh-config-modal')?.addEventListener('click', (e) => {
-        if (e.target === document.getElementById('ssh-config-modal')) {
-            e.target.classList.remove('show');
-        }
-    });
-    document.getElementById('ssh-cancel')?.addEventListener('click', () => {
-        document.getElementById('ssh-config-modal').classList.remove('show');
-    });
-    document.getElementById('ssh-save')?.addEventListener('click', saveSshConfig);
-    document.getElementById('ssh-remove-config')?.addEventListener('click', removeSshConfig);
 
     // Container Logs Modal
     document.getElementById('container-logs-close')?.addEventListener('click', () => {
