@@ -1,44 +1,45 @@
+/* MonitorX v2.0 - Application Logic */
 const API_BASE = '';
 const WS_URL = `ws://${window.location.host}/ws`;
 
 let ws = null;
 let reconnectInterval = null;
 let statsData = null;
+let autoTailInterval = null;
+let healthData = null;
+
+// History buffer for sparkline charts (last 30 samples)
+const historyBuffer = {
+    cpu: new Array(30).fill(0),
+    mem: new Array(30).fill(0),
+    netRx: new Array(30).fill(0),
+    netTx: new Array(30).fill(0)
+};
 
 const state = {
     currentTab: 'dashboard',
-    processFilter: 'all',
+    currentSubTab: 'health-hub',
+    processFilter: 'cpu',
     processSearch: '',
-    allProcesses: [],
-    autoRefresh: true
+    logLevel: 'all',
+    logLines: 100,
+    logAutoTail: false,
+    cmdHistory: [],
+    cmdHistoryIndex: -1
 };
 
+/* Format Helpers */
 function formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-function formatUptime(seconds) {
-    const d = Math.floor(seconds / 86400);
-    const h = Math.floor((seconds % 86400) / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    if (d > 0) return `${d}d ${h}h ${m}m`;
-    if (h > 0) return `${h}h ${m}m`;
-    return `${m}m`;
-}
-
-function cpuColor(percent) {
-    if (percent > 80) return 'danger';
-    if (percent > 60) return 'warning';
-    return 'normal';
-}
-
-function statusClass(status) {
-    const map = { running: 'success', sleeping: 'info', stopped: 'warning', zombie: 'danger', idle: 'info', waiting: 'warning' };
-    return map[status?.toLowerCase()] || '';
+function formatSpeed(bytesPerSec) {
+    if (!bytesPerSec || bytesPerSec === 0) return '0 B/s';
+    return formatBytes(bytesPerSec) + '/s';
 }
 
 function showToast(message, type = 'info') {
@@ -47,9 +48,21 @@ function showToast(message, type = 'info') {
     toast.className = `toast ${type}`;
     toast.textContent = message;
     container.appendChild(toast);
-    setTimeout(() => toast.remove(), 4000);
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 0.4s ease';
+        setTimeout(() => toast.remove(), 400);
+    }, 4000);
 }
 
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/* WebSocket Connection */
 function connectWebSocket() {
     ws = new WebSocket(WS_URL);
 
@@ -66,7 +79,7 @@ function connectWebSocket() {
             updateDashboard(statsData);
             updateLastUpdate();
         } catch (e) {
-            console.error('Error parsing message:', e);
+            console.error('Error parsing WebSocket frame:', e);
         }
     };
 
@@ -86,89 +99,131 @@ function connectWebSocket() {
     };
 }
 
+/* Dashboard Updates */
 function updateDashboard(data) {
     if (!data) return;
 
     updateCpu(data.cpu);
     updateMemory(data.memory);
     updateDisk(data.disk);
-    updateGpu(data.gpu);
     updateNetwork(data.network);
+    updateGpu(data.gpu);
     updateSystem(data.system);
     updateTopProcesses(data.processes);
-    checkIssues(data);
-    updateUptime(data.system);
+    checkOSIssues(data);
+    updateCharts(data);
+
+    if (state.currentTab === 'processes') {
+        filterProcesses();
+    }
 }
 
 function updateCpu(cpu) {
+    if (!cpu) return;
     document.getElementById('cpu-total').textContent = cpu.percent_total.toFixed(1) + '%';
     document.getElementById('cpu-cores').textContent = cpu.count_logical;
-    document.getElementById('cpu-load').textContent = cpu.load_1min.toFixed(1) + ', ' + cpu.load_5min.toFixed(1) + ', ' + cpu.load_15min.toFixed(1);
+    document.getElementById('cpu-load').textContent = `${cpu.load_1min.toFixed(2)}, ${cpu.load_5min.toFixed(2)}, ${cpu.load_15min.toFixed(2)}`;
     document.getElementById('cpu-freq').textContent = (cpu.frequency_current / 1000).toFixed(2) + ' GHz';
 
     const barsContainer = document.getElementById('cpu-bars');
     barsContainer.innerHTML = '';
     if (cpu.percent_per_core) {
-        for (const pct of cpu.percent_per_core) {
+        cpu.percent_per_core.forEach((pct, idx) => {
             const bar = document.createElement('div');
             bar.className = 'cpu-bar';
             const fill = document.createElement('div');
             fill.className = 'cpu-bar-fill';
             fill.style.height = Math.min(pct, 100) + '%';
-            if (pct > 80) fill.classList.add('danger');
-            else if (pct > 60) fill.classList.add('warning');
+            if (pct > 85) fill.classList.add('danger');
+            else if (pct > 65) fill.classList.add('warning');
             bar.appendChild(fill);
-            bar.title = pct.toFixed(1) + '%';
+            bar.title = `Core ${idx}: ${pct.toFixed(1)}%`;
             barsContainer.appendChild(bar);
-        }
+        });
     }
 }
 
 function updateMemory(mem) {
+    if (!mem) return;
     document.getElementById('ram-percent').textContent = mem.percent + '%';
-    document.getElementById('ram-bar').style.width = mem.percent + '%';
-    document.getElementById('ram-bar').parentElement.className = 'progress-bar ' + (mem.percent > 80 ? 'progress-bar-danger' : mem.percent > 60 ? 'progress-bar-warning' : 'progress-bar-success');
-    document.getElementById('ram-used').textContent = formatBytes(mem.used) + ' / ' + formatBytes(mem.total);
+    const fill = document.getElementById('ram-bar');
+    fill.style.width = mem.percent + '%';
+    if (mem.percent > 85) fill.style.background = 'var(--danger)';
+    else if (mem.percent > 70) fill.style.background = 'var(--warning)';
+    else fill.style.background = 'var(--accent)';
+
+    document.getElementById('ram-used').textContent = formatBytes(mem.used);
     document.getElementById('ram-free').textContent = formatBytes(mem.available);
+    document.getElementById('ram-cached').textContent = formatBytes((mem.buffers || 0) + (mem.cached || 0));
     document.getElementById('ram-swap').textContent = mem.swap_percent + '%';
 }
 
 function updateDisk(disk) {
+    if (!disk) return;
     const list = document.getElementById('disk-list');
     list.innerHTML = '';
-    disk.partitions.forEach(p => {
+    (disk.partitions || []).forEach(p => {
         const item = document.createElement('div');
         item.className = 'disk-item';
-        item.innerHTML = `<span>${p.mountpoint} (${p.fstype})</span><span>${p.percent.toFixed(1)}% (${formatBytes(p.used)}/${formatBytes(p.total)})</span>`;
+        item.innerHTML = `
+            <span><b>${p.mountpoint}</b> (${p.fstype})</span>
+            <span><b>${p.percent.toFixed(1)}%</b> (${formatBytes(p.used)} / ${formatBytes(p.total)})</span>
+        `;
         list.appendChild(item);
     });
-    document.getElementById('disk-percent').textContent = disk.partitions.length > 0 ? disk.partitions[0].percent.toFixed(1) + '%' : '0%';
-    document.getElementById('disk-read').textContent = formatBytes(disk.io_read_bytes);
-    document.getElementById('disk-write').textContent = formatBytes(disk.io_write_bytes);
+    
+    const rootPart = disk.partitions?.[0];
+    document.getElementById('disk-percent').textContent = rootPart ? `${rootPart.percent.toFixed(1)}%` : '0%';
+    document.getElementById('disk-read-speed').textContent = formatSpeed(disk.read_bytes_sec);
+    document.getElementById('disk-write-speed').textContent = formatSpeed(disk.write_bytes_sec);
+}
+
+function updateNetwork(net) {
+    if (!net) return;
+    document.getElementById('net-conn').textContent = net.connections_count || 0;
+    document.getElementById('net-rx-speed').textContent = formatSpeed(net.rx_bytes_sec);
+    document.getElementById('net-tx-speed').textContent = formatSpeed(net.tx_bytes_sec);
+
+    const list = document.getElementById('net-list');
+    list.innerHTML = '';
+    for (const [name, stats] of Object.entries(net.interfaces || {})) {
+        if (name === 'lo') continue;
+        const item = document.createElement('div');
+        item.className = 'net-item';
+        item.innerHTML = `
+            <span><b>${name}</b></span>
+            <span>↓ ${formatBytes(stats.bytes_recv)} | ↑ ${formatBytes(stats.bytes_sent)}</span>
+        `;
+        list.appendChild(item);
+    }
 }
 
 function updateGpu(gpus) {
     const content = document.getElementById('gpu-content');
     if (!gpus || gpus.length === 0) {
-        content.innerHTML = '<p class="no-data">No GPU detected</p>';
+        content.innerHTML = '<p class="no-data">No NVIDIA GPU detected or NVML disabled</p>';
         document.getElementById('gpu-total').textContent = 'N/A';
         return;
     }
 
     let html = '<div class="gpu-grid">';
     gpus.forEach(gpu => {
-        html += `<div class="gpu-item">
-            <div class="gpu-item-header"><span>${gpu.name}</span><span>${gpu.temperature}°C</span></div>
-            <div class="gpu-bars">
-                <div class="gpu-bar"><div class="gpu-bar-fill" style="width:${gpu.utilization_gpu}%"></div></div>
-                <div class="gpu-bar"><div class="gpu-bar-fill" style="width:${gpu.utilization_memory}%"></div></div>
-            </div>
-            <div class="gpu-stats">
-                <span>GPU: ${gpu.utilization_gpu}%</span>
-                <span>MEM: ${gpu.utilization_memory}%</span>
-                <span>Power: ${gpu.power_draw}W</span>
-            </div>
-        </div>`;
+        html += `
+            <div class="gpu-item">
+                <div class="gpu-item-header">
+                    <span>${gpu.name}</span>
+                    <span>${gpu.temperature}°C</span>
+                </div>
+                <div class="gpu-bars">
+                    <div class="gpu-bar"><div class="gpu-bar-fill" style="width:${gpu.utilization_gpu}%"></div></div>
+                    <div class="gpu-bar"><div class="gpu-bar-fill" style="width:${gpu.utilization_memory}%"></div></div>
+                </div>
+                <div class="gpu-stats">
+                    <span>GPU: ${gpu.utilization_gpu}%</span>
+                    <span>VRAM: ${gpu.utilization_memory}%</span>
+                    <span>Power: ${gpu.power_draw}W / ${gpu.power_limit}W</span>
+                </div>
+            </div>`;
     });
     html += '</div>';
     content.innerHTML = html;
@@ -177,28 +232,16 @@ function updateGpu(gpus) {
     document.getElementById('gpu-total').textContent = avgGpu.toFixed(1) + '%';
 }
 
-function updateNetwork(net) {
-    document.getElementById('net-conn').textContent = net.connections_count;
-    const list = document.getElementById('net-list');
-    list.innerHTML = '';
-    for (const [name, stats] of Object.entries(net.interfaces)) {
-        if (name === 'lo') continue;
-        const item = document.createElement('div');
-        item.className = 'net-item';
-        item.innerHTML = `<span>${name}</span><span>↑ ${formatBytes(stats.bytes_sent)} ↓ ${formatBytes(stats.bytes_recv)}</span>`;
-        list.appendChild(item);
-    }
-}
-
 function updateSystem(sys) {
+    if (!sys) return;
     const info = document.getElementById('system-info');
     info.innerHTML = `
-        <span><span>Host:</span><b>${sys.hostname}</b></span>
-        <span><span>OS:</span><b>${sys.platform} ${sys.platform_release}</b></span>
-        <span><span>Kernel:</span><b>${sys.platform_version}</b></span>
-        <span><span>Arch:</span><b>${sys.architecture}</b></span>
+        <span><span>Hostname:</span><b>${sys.hostname}</b></span>
+        <span><span>OS Platform:</span><b>${sys.platform} ${sys.platform_release}</b></span>
+        <span><span>Kernel Version:</span><b>${sys.platform_version.substring(0, 20)}</b></span>
+        <span><span>Architecture:</span><b>${sys.architecture}</b></span>
         <span><span>Uptime:</span><b>${sys.uptime_str}</b></span>
-        <span><span>Boot:</span><b>${sys.boot_time}</b></span>
+        <span><span>Boot Time:</span><b>${sys.boot_time}</b></span>
     `;
     document.getElementById('hostname').textContent = sys.hostname;
     document.getElementById('uptime').textContent = 'Uptime: ' + sys.uptime_str;
@@ -206,122 +249,191 @@ function updateSystem(sys) {
 
 function updateTopProcesses(processes) {
     const tbody = document.getElementById('top-processes-body');
+    if (!tbody) return;
     tbody.innerHTML = '';
-    (processes || []).forEach(p => {
+    (processes || []).slice(0, 10).forEach(p => {
         const row = document.createElement('tr');
-        row.innerHTML = `<td>${p.pid}</td><td>${p.name}</td><td>${p.cpu_percent}%</td><td>${p.memory_percent}%</td><td>${p.memory_mb}</td><td>${p.status}</td><td>${p.username}</td>`;
         row.style.cursor = 'pointer';
+        row.innerHTML = `
+            <td><b>${p.pid}</b></td>
+            <td>${p.name}</td>
+            <td><b class="${p.cpu_percent > 50 ? 'text-danger' : ''}">${p.cpu_percent}%</b></td>
+            <td>${p.memory_percent}%</td>
+            <td>${p.memory_mb} MB</td>
+            <td><span class="badge ${p.status === 'running' ? 'badge-success' : 'badge-warning'}">${p.status}</span></td>
+            <td>${p.username}</td>
+            <td>${p.threads || 1}</td>
+        `;
         row.addEventListener('click', () => showProcessDetail(p.pid));
         tbody.appendChild(row);
     });
 }
 
-function updateAllProcesses(processes, data) {
-    const tbody = document.getElementById('all-processes-body');
-    if (!tbody) return;
-    tbody.innerHTML = '';
-    (data.processes || []).forEach(p => {
-        const row = document.createElement('tr');
-        row.innerHTML = `<td><input type="checkbox" class="proc-check" value="${p.pid}"></td><td>${p.pid}</td><td>${p.name}</td><td>${p.cpu_percent}%</td><td>${p.memory_percent}%</td><td>${p.memory_mb}</td><td>${p.status}</td><td>${p.username}</td><td>${p.create_time}</td><td><button class="btn btn-sm btn-danger" onclick="killProcess(${p.pid})">Kill</button></td>`;
-        tbody.appendChild(row);
-    });
-}
+function checkOSIssues(data) {
+    const critical = [];
+    const warning = [];
 
-function checkIssues(data) {
-    const issues = [];
+    if (data.cpu && data.cpu.percent_total > 85) critical.push(`Critical CPU load: ${data.cpu.percent_total.toFixed(1)}%`);
+    else if (data.cpu && data.cpu.percent_total > 70) warning.push(`Elevated CPU usage: ${data.cpu.percent_total.toFixed(1)}%`);
 
-    if (data.cpu && data.cpu.percent_total > 80) {
-        issues.push({ type: 'danger', msg: `High CPU usage: ${data.cpu.percent_total.toFixed(1)}%` });
-    }
-
-    if (data.memory && data.memory.percent > 85) {
-        issues.push({ type: 'danger', msg: `High memory usage: ${data.memory.percent}%` });
-    } else if (data.memory && data.memory.percent > 70) {
-        issues.push({ type: 'warning', msg: `Memory usage moderate: ${data.memory.percent}%` });
-    }
+    if (data.memory && data.memory.percent > 90) critical.push(`RAM usage critically high: ${data.memory.percent}%`);
+    else if (data.memory && data.memory.percent > 80) warning.push(`RAM usage elevated: ${data.memory.percent}%`);
 
     if (data.disk && data.disk.partitions) {
         data.disk.partitions.forEach(p => {
-            if (p.percent > 90) {
-                issues.push({ type: 'danger', msg: `Disk full on ${p.mountpoint}: ${p.percent.toFixed(1)}%` });
-            } else if (p.percent > 80) {
-                issues.push({ type: 'warning', msg: `Disk usage high on ${p.mountpoint}: ${p.percent.toFixed(1)}%` });
-            }
+            if (p.percent > 90) critical.push(`Partition ${p.mountpoint} is nearly full: ${p.percent.toFixed(1)}%`);
+            else if (p.percent > 80) warning.push(`Partition ${p.mountpoint} storage high: ${p.percent.toFixed(1)}%`);
         });
     }
 
-    if (data.swap && data.swap.percent > 50) {
-        issues.push({ type: 'warning', msg: `Heavy swap usage: ${data.swap.percent}%` });
+    if (data.processes) {
+        const zombies = data.processes.filter(p => p.status === 'zombie' || p.status === 'uninterruptible sleep');
+        if (zombies.length > 0) warning.push(`${zombies.length} process(es) in zombie or disk-sleep state.`);
     }
 
-    if (data.processes && data.processes.length > 0) {
-        const zombieProcs = data.processes.filter(p => p.status === 'zombie' || p.status === 'stopped');
-        if (zombieProcs.length > 0) {
-            issues.push({ type: 'warning', msg: `${zombieProcs.length} zombie/stopped process(es) detected` });
-        }
-    }
+    document.getElementById('issues-count-critical').textContent = `${critical.length} Critical`;
+    document.getElementById('issues-count-warning').textContent = `${warning.length} Warnings`;
 
-    if (data.vms && data.vms.length > 0) {
-        const crashedVMs = data.vms.filter(v => v.state === 'crashed');
-        if (crashedVMs.length > 0) {
-            issues.push({ type: 'danger', msg: `${crashedVMs.length} VM(s) in crashed state` });
-        }
-    }
+    const list = document.getElementById('issues-list');
+    list.innerHTML = '';
 
-    if (data.gpu) {
-        data.gpu.forEach(g => {
-            if (g.temperature > 85) {
-                issues.push({ type: 'danger', msg: `GPU ${g.index} overheating: ${g.temperature}°C` });
-            }
-        });
-    }
-
-    document.getElementById('issues-count').textContent = issues.length;
-    const issuesList = document.getElementById('issues-list');
-    issuesList.innerHTML = '';
-
-    if (issues.length === 0) {
-        issuesList.innerHTML = '<div class="issue-item success">✓ System looks healthy</div>';
+    if (critical.length === 0 && warning.length === 0) {
+        list.innerHTML = '<div class="issue-item success">✓ All core system monitors report healthy status.</div>';
     } else {
-        issues.forEach(i => {
-            const item = document.createElement('div');
-            item.className = `issue-item ${i.type}`;
-            item.innerHTML = `<span class="check-status ${i.type === 'danger' ? 'error' : i.type === 'warning' ? 'warn' : 'ok'}">⚠</span> ${i.msg}`;
-            issuesList.appendChild(item);
+        critical.forEach(msg => {
+            list.innerHTML += `<div class="issue-item danger"><span>🚨 <b>CRITICAL:</b> ${msg}</span><button class="btn btn-sm btn-danger" onclick="switchToTroubleshoot()">Fix in Troubleshoot →</button></div>`;
+        });
+        warning.forEach(msg => {
+            list.innerHTML += `<div class="issue-item warning"><span>⚠️ <b>WARNING:</b> ${msg}</span><button class="btn btn-sm btn-warning" onclick="switchToTroubleshoot()">Investigate →</button></div>`;
         });
     }
+}
+
+/* Canvas Sparklines */
+function updateCharts(data) {
+    if (!data) return;
+
+    // Push new values
+    historyBuffer.cpu.shift();
+    historyBuffer.cpu.push(data.cpu?.percent_total || 0);
+
+    historyBuffer.mem.shift();
+    historyBuffer.mem.push(data.memory?.percent || 0);
+
+    historyBuffer.netRx.shift();
+    historyBuffer.netRx.push((data.network?.rx_bytes_sec || 0) / 1024); // KB/s
+
+    historyBuffer.netTx.shift();
+    historyBuffer.netTx.push((data.network?.tx_bytes_sec || 0) / 1024); // KB/s
+
+    document.getElementById('cpu-chart-val').textContent = `${data.cpu?.percent_total.toFixed(1)}%`;
+    document.getElementById('mem-chart-val').textContent = `${data.memory?.percent}%`;
+    document.getElementById('net-chart-val').textContent = `↓ ${formatSpeed(data.network?.rx_bytes_sec)} | ↑ ${formatSpeed(data.network?.tx_bytes_sec)}`;
+
+    drawSparkline('cpu-canvas', historyBuffer.cpu, '#3b82f6', 100);
+    drawSparkline('mem-canvas', historyBuffer.mem, '#22c55e', 100);
+    drawDoubleSparkline('net-canvas', historyBuffer.netRx, historyBuffer.netTx, '#22c55e', '#3b82f6');
+}
+
+function drawSparkline(canvasId, data, color, maxVal = 100) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width = canvas.parentElement.clientWidth || 300;
+    const height = canvas.height = 60;
+
+    ctx.clearRect(0, 0, width, height);
+    if (data.length < 2) return;
+
+    const step = width / (data.length - 1);
+    ctx.beginPath();
+    ctx.moveTo(0, height - (data[0] / maxVal) * height);
+
+    for (let i = 1; i < data.length; i++) {
+        const x = i * step;
+        const y = height - (data[i] / maxVal) * height;
+        ctx.lineTo(x, Math.max(2, Math.min(height - 2, y)));
+    }
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Fill gradient
+    ctx.lineTo(width, height);
+    ctx.lineTo(0, height);
+    ctx.closePath();
+    ctx.fillStyle = color + '22';
+    ctx.fill();
+}
+
+function drawDoubleSparkline(canvasId, data1, data2, color1, color2) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width = canvas.parentElement.clientWidth || 300;
+    const height = canvas.height = 60;
+
+    ctx.clearRect(0, 0, width, height);
+
+    const maxVal = Math.max(...data1, ...data2, 10); // Auto scale min 10 KB/s
+    const step = width / (data1.length - 1);
+
+    // Line 1
+    ctx.beginPath();
+    ctx.moveTo(0, height - (data1[0] / maxVal) * height);
+    for (let i = 1; i < data1.length; i++) {
+        ctx.lineTo(i * step, height - (data1[i] / maxVal) * height);
+    }
+    ctx.strokeStyle = color1;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Line 2
+    ctx.beginPath();
+    ctx.moveTo(0, height - (data2[0] / maxVal) * height);
+    for (let i = 1; i < data2.length; i++) {
+        ctx.lineTo(i * step, height - (data2[i] / maxVal) * height);
+    }
+    ctx.strokeStyle = color2;
+    ctx.lineWidth = 2;
+    ctx.stroke();
 }
 
 function updateLastUpdate() {
     document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
 }
 
+/* Modal for Process Inspector */
 async function showProcessDetail(pid) {
     try {
         const res = await fetch(`${API_BASE}/api/processes/${pid}`);
-        if (!res.ok) throw new Error('Process not found');
+        if (!res.ok) throw new Error('Process terminated or non-existent');
         const proc = await res.json();
 
         const modal = document.getElementById('process-modal');
         const body = document.getElementById('modal-body');
         body.innerHTML = `
-            <div class="system-info" style="margin-bottom:12px;">
-                <span><span>PID:</span><b>${proc.pid}</b></span>
-                <span><span>Name:</span><b>${proc.name}</b></span>
-                <span><span>Status:</span><b>${proc.status}</b></span>
-                <span><span>User:</span><b>${proc.username}</b></span>
-                <span><span>CPU%:</span><b>${proc.cpu_percent}%</b></span>
-                <span><span>MEM%:</span><b>${proc.memory_percent}%</b></span>
-                <span><span>Threads:</span><b>${proc.num_threads}</b></span>
-                <span><span>FDs:</span><b>${proc.num_fds}</b></span>
-                <span><span>Started:</span><b>${proc.create_time}</b></span>
+            <div class="system-info" style="margin-bottom:14px;">
+                <span><span>Process PID:</span><b>${proc.pid}</b></span>
+                <span><span>Process Name:</span><b>${proc.name}</b></span>
+                <span><span>Execution State:</span><b>${proc.status}</b></span>
+                <span><span>User Owner:</span><b>${proc.username}</b></span>
+                <span><span>CPU Usage:</span><b>${proc.cpu_percent}%</b></span>
+                <span><span>RAM Usage:</span><b>${proc.memory_percent}% (${proc.memory_info?.rss ? (proc.memory_info.rss/1024/1024).toFixed(1) : 0} MB)</b></span>
+                <span><span>Threads Count:</span><b>${proc.num_threads}</b></span>
+                <span><span>Open File Descriptors:</span><b>${proc.num_fds}</b></span>
+                <span><span>Launch Time:</span><b>${proc.create_time}</b></span>
             </div>
-            <h4 style="margin-bottom:6px;">Command Line</h4>
-            <pre style="background:var(--bg-primary);padding:8px;border-radius:4px;font-size:0.75rem;">${(proc.cmdline || []).join(' ')}</pre>
-            <h4 style="margin:10px 0 6px;">Open Files (${proc.open_files.length})</h4>
-            <pre style="background:var(--bg-primary);padding:8px;border-radius:4px;font-size:0.7rem;max-height:150px;overflow-y:auto;">${(proc.open_files || []).map(f => f.path || '').join('\n')}</pre>
-            <h4 style="margin:10px 0 6px;">Network Connections (${proc.connections.length})</h4>
-            <pre style="background:var(--bg-primary);padding:8px;border-radius:4px;font-size:0.7rem;max-height:150px;overflow-y:auto;">${(proc.connections || []).map(c => `${c.status || ''} ${c.laddr || ''} -> ${c.raddr || ''}`).join('\n')}</pre>
+            <h4 style="margin-bottom:6px;font-size:0.85rem;color:var(--text-secondary);">Command Line Command</h4>
+            <pre style="background:var(--bg-primary);padding:10px;border-radius:6px;font-size:0.8rem;border:1px solid var(--border);">${escapeHtml((proc.cmdline || []).join(' ') || proc.exe || proc.name)}</pre>
+            <h4 style="margin:12px 0 6px;font-size:0.85rem;color:var(--text-secondary);">Open File Handles (${proc.open_files.length})</h4>
+            <pre style="background:var(--bg-primary);padding:10px;border-radius:6px;font-size:0.75rem;max-height:140px;overflow-y:auto;border:1px solid var(--border);">${escapeHtml((proc.open_files || []).map(f => f.path || '').join('\n') || 'None reported')}</pre>
+            <h4 style="margin:12px 0 6px;font-size:0.85rem;color:var(--text-secondary);">Active Socket Connections (${proc.connections.length})</h4>
+            <pre style="background:var(--bg-primary);padding:10px;border-radius:6px;font-size:0.75rem;max-height:140px;overflow-y:auto;border:1px solid var(--border);">${escapeHtml((proc.connections || []).map(c => `${c.status || 'CONNECTED'} ${c.laddr ? c.laddr.ip + ':' + c.laddr.port : ''} -> ${c.raddr ? c.raddr.ip + ':' + c.raddr.port : ''}`).join('\n') || 'No active sockets')}</pre>
+            <div style="margin-top:16px;display:flex;justify-content:flex-end;">
+                <button class="btn btn-danger" onclick="killProcess(${proc.pid})">💀 Terminate Process (SIGKILL)</button>
+            </div>
         `;
         modal.classList.add('show');
     } catch (e) {
@@ -330,15 +442,18 @@ async function showProcessDetail(pid) {
 }
 
 async function killProcess(pid, signal = 15) {
-    if (!confirm(`Kill process ${pid} with SIG${signal === 9 ? 'KILL' : 'TERM'}?`)) return;
+    if (!confirm(`Are you sure you want to terminate PID ${pid}?`)) return;
     try {
-        const res = await fetch(`${API_BASE}/api/processes/${pid}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ signal })
+        const res = await fetch(`${API_BASE}/api/processes/${pid}/kill?signal=${signal}`, {
+            method: 'POST'
         });
-        if (res.ok) showToast(`Process ${pid} killed`, 'success');
-        else showToast('Failed to kill process', 'error');
+        if (res.ok) {
+            showToast(`Process ${pid} terminated successfully`, 'success');
+            document.getElementById('process-modal').classList.remove('show');
+            fetchStats();
+        } else {
+            showToast('Failed to terminate process', 'error');
+        }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
@@ -351,167 +466,354 @@ async function fetchStats() {
         statsData = data;
         updateDashboard(data);
         updateLastUpdate();
-        if (state.currentTab === 'processes') updateAllProcesses(null, data);
     } catch (e) {
         console.error('Fetch error:', e);
     }
 }
 
-/* Tab Navigation */
-document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-        btn.classList.add('active');
-        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-        state.currentTab = btn.dataset.tab;
+/* ==========================================================================
+   TROUBLESHOOT MODE IMPLEMENTATION
+   ========================================================================== */
 
-        if (state.currentTab === 'processes') fetchStats();
-        if (state.currentTab === 'vms') fetchVms();
-        if (state.currentTab === 'services') fetchServices();
-        if (state.currentTab === 'troubleshoot') runTroubleshootChecks();
-    });
-});
-
-/* Refresh Button */
-document.getElementById('refresh-btn').addEventListener('click', () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send('ping');
-    }
-    fetchStats();
-    showToast('Refreshed', 'info');
-});
-
-/* Theme Toggle */
-document.getElementById('theme-toggle').addEventListener('click', () => {
-    document.body.classList.toggle('light-theme');
-    const theme = document.body.classList.contains('light-theme') ? 'light' : 'dark';
-    document.getElementById('theme-toggle').textContent = theme === 'dark' ? '🌙' : '☀️';
-});
-
-/* Troubleshoot Checks */
-document.getElementById('run-checks').addEventListener('click', runTroubleshootChecks);
-
-async function runTroubleshootChecks() {
-    const checks = document.getElementById('sys-checks');
-    checks.innerHTML = '<p>Running checks...</p>';
-
-    const results = [];
-
-    results.push({ name: 'CPU Load', ok: statsData?.cpu?.percent_total < 80, detail: `${statsData?.cpu?.percent_total || 0}%` });
-    results.push({ name: 'Memory Usage', ok: statsData?.memory?.percent < 85, detail: `${statsData?.memory?.percent || 0}%` });
-    results.push({ name: 'Swap Usage', ok: statsData?.memory?.swap_percent < 50, detail: `${statsData?.memory?.swap_percent || 0}%` });
-
-    if (statsData?.disk?.partitions) {
-        statsData.disk.partitions.forEach(p => {
-            results.push({ name: `Disk ${p.mountpoint}`, ok: p.percent < 90, detail: `${p.percent.toFixed(1)}%` });
-        });
-    }
-
-    results.push({ name: 'GPU Temp', ok: true, detail: statsData?.gpu ? 'Detected' : 'No GPU' });
-    results.push({ name: 'VM Status', ok: true, detail: statsData?.vms ? `${statsData.vms.length} VM(s)` : 'No VMs' });
-    results.push({ name: 'System Uptime', ok: true, detail: statsData?.system?.uptime_str || 'N/A' });
-    results.push({ name: 'Boot Health', ok: true, detail: statsData?.system?.boot_time || 'N/A' });
-
-    checks.innerHTML = results.map(r => `
-        <div class="check-item">
-            <span class="check-status ${r.ok ? 'ok' : 'error'}">${r.ok ? '✓' : '✗'}</span>
-            <span>${r.name}</span>
-            <span style="margin-left:auto;color:var(--text-muted)">${r.detail}</span>
-        </div>
-    `).join('');
+function switchToTroubleshoot() {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    const btn = document.querySelector('[data-tab="troubleshoot"]');
+    if (btn) btn.classList.add('active');
+    document.getElementById('tab-troubleshoot').classList.add('active');
+    state.currentTab = 'troubleshoot';
+    runFullHealthScan();
 }
 
-/* Recent Errors */
-document.getElementById('refresh-errors').addEventListener('click', refreshErrors);
-
-async function refreshErrors() {
-    const container = document.getElementById('recent-errors');
-    container.innerHTML = '<p>Checking system logs...</p>';
+async function runFullHealthScan() {
+    const btn = document.getElementById('run-full-scan-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Scanning System...';
 
     try {
-        const res = await fetch(`${API_BASE}/api/system/logs?lines=20`);
-        let logs = [];
-        if (res.ok) logs = await res.json();
+        const res = await fetch(`${API_BASE}/api/troubleshoot/health-check`);
+        if (!res.ok) throw new Error('Health check failed');
+        healthData = await res.json();
 
-        if (logs.length === 0) {
-            container.innerHTML = '<p class="no-data">No recent errors found</p>';
-            return;
+        updateHealthGauge(healthData.health_score);
+        renderHealthChecks(healthData.checks);
+
+        document.getElementById('pill-critical').textContent = `${healthData.summary.critical} Critical`;
+        document.getElementById('pill-warning').textContent = `${healthData.summary.warning} Warnings`;
+        document.getElementById('pill-ok').textContent = `${healthData.summary.ok} Passing`;
+
+        document.getElementById('health-summary-text').textContent =
+            healthData.health_score > 85 ? 'System is running smoothly without major bottlenecks.' :
+            healthData.health_score > 65 ? 'System has active warnings that require attention.' :
+            'Critical issues detected requiring immediate remediation!';
+
+        document.getElementById('last-scan-time').textContent = `Last Scan: ${new Date().toLocaleTimeString()}`;
+        showToast('Diagnostic scan complete', 'info');
+    } catch (e) {
+        showToast('Error running health scan: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '⚡ Run Diagnostic Scan';
+    }
+}
+
+function updateHealthGauge(score) {
+    const valText = document.getElementById('health-score-val');
+    valText.textContent = score;
+
+    const circle = document.getElementById('health-circle');
+    circle.setAttribute('stroke-dasharray', `${score}, 100`);
+
+    if (score > 85) circle.style.stroke = 'var(--success)';
+    else if (score > 65) circle.style.stroke = 'var(--warning)';
+    else circle.style.stroke = 'var(--danger)';
+}
+
+function renderHealthChecks(checks) {
+    const container = document.getElementById('checks-grid-container');
+    container.innerHTML = '';
+
+    checks.forEach(c => {
+        const card = document.createElement('div');
+        card.className = 'check-card';
+
+        const statusBadgeClass =
+            c.status === 'critical' ? 'badge-danger' :
+            c.status === 'warning' ? 'badge-warning' : 'badge-success';
+
+        const statusIcon =
+            c.status === 'critical' ? '🔴 CRITICAL' :
+            c.status === 'warning' ? '⚠️ WARNING' : '✅ PASS';
+
+        let fixButtonHtml = '';
+        if (c.action === 'clear_pagecache') {
+            fixButtonHtml = `<button class="btn btn-sm btn-warning" onclick="remediateAction('clear_pagecache')">⚡ Clear RAM Cache</button>`;
+        } else if (c.action === 'vacuum_journal') {
+            fixButtonHtml = `<button class="btn btn-sm btn-warning" onclick="remediateAction('vacuum_journal')">⚡ Vacuum Journal Logs</button>`;
+        } else if (c.action === 'restart_failed_services') {
+            fixButtonHtml = `<button class="btn btn-sm btn-danger" onclick="remediateAction('restart_failed_services')">⚡ Restart Failed Services</button>`;
+        } else if (c.action === 'view_bottlenecks') {
+            fixButtonHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('bottlenecks')">🔥 Open Bottleneck Finder</button>`;
+        } else if (c.action === 'view_logs') {
+            fixButtonHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('log-inspector')">📋 Inspect Logs</button>`;
+        } else if (c.action === 'run_net_diag') {
+            fixButtonHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('net-suite')">🌐 Open Network Suite</button>`;
+        } else if (c.action === 'view_processes') {
+            fixButtonHtml = `<button class="btn btn-sm btn-primary" onclick="switchTab('processes')">📋 Open Process Manager</button>`;
         }
 
-        const errors = logs.filter(l => /error|fail|critical|panic|oom|kill/.test(l.toLowerCase()));
-        if (errors.length === 0) {
-            container.innerHTML = '<p class="no-data">No errors in recent logs</p>';
-            return;
-        }
-
-        container.innerHTML = errors.map(e => `
-            <div class="check-item">
-                <span class="check-status error">⚠</span>
-                <span style="font-size:0.8rem;word-break:break-all">${escapeHtml(e)}</span>
+        card.innerHTML = `
+            <div>
+                <div class="check-card-header">
+                    <span class="check-card-title">${c.category}: ${c.name}</span>
+                    <span class="badge ${statusBadgeClass}">${statusIcon}</span>
+                </div>
+                <div class="check-card-val">${escapeHtml(c.value)}</div>
+                <div class="check-card-msg">${escapeHtml(c.message)}</div>
             </div>
-        `).join('');
+            <div class="check-card-footer">
+                ${fixButtonHtml}
+            </div>
+        `;
+        container.appendChild(card);
+    });
+}
+
+async function remediateAction(action, target = null) {
+    if (!confirm(`Execute automated fix action: ${action}?`)) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/remediate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, target })
+        });
+        const result = await res.json();
+        if (result.success) {
+            showToast(`Action success: ${result.message}`, 'success');
+            runFullHealthScan();
+        } else {
+            showToast(`Action failed: ${result.message}`, 'error');
+        }
+    } catch (e) {
+        showToast('Remediation error: ' + e.message, 'error');
+    }
+}
+
+/* Log Inspector */
+async function fetchLogs() {
+    const container = document.getElementById('logs-container');
+    const level = state.logLevel;
+    const lines = state.logLines;
+    const search = document.getElementById('log-search-input').value;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/logs?lines=${lines}&level=${level}&search=${encodeURIComponent(search)}`);
+        if (!res.ok) throw new Error('Failed to fetch system logs');
+        const data = await res.json();
+
+        container.innerHTML = '';
+        if (!data.logs || data.logs.length === 0) {
+            container.innerHTML = '<p class="no-data">No log entries matching criteria.</p>';
+            return;
+        }
+
+        data.logs.forEach(l => {
+            const line = document.createElement('div');
+            line.className = `log-line log-${l.level}`;
+            line.textContent = l.text;
+            container.appendChild(line);
+        });
+
+        if (state.logAutoTail) {
+            container.scrollTop = container.scrollHeight;
+        }
     } catch (e) {
         container.innerHTML = `<p class="issue-item danger">Error: ${e.message}</p>`;
     }
 }
 
-/* Resource Analysis */
-async function analyzeResources() {
-    const container = document.getElementById('resource-analysis');
-    if (!statsData) { container.innerHTML = '<p>No data yet</p>'; return; }
+/* Network Suite Tools */
+async function runPingTest() {
+    const host = document.getElementById('ping-host-input').value.trim();
+    const resultsBox = document.getElementById('ping-results-box');
+    if (!host) return;
 
-    let html = '';
-    const cpu = statsData.cpu?.percent_total || 0;
-    const mem = statsData.memory?.percent || 0;
-    const disk = statsData.disk?.partitions?.[0]?.percent || 0;
-
-    html += `<div class="check-item"><span class="check-status ${cpu > 80 ? 'error' : cpu > 60 ? 'warn' : 'ok'}"></span> CPU: ${cpu.toFixed(1)}% - ${cpu > 80 ? 'Critical' : cpu > 60 ? 'Warning' : 'Normal'}</div>`;
-    html += `<div class="check-item"><span class="check-status ${mem > 85 ? 'error' : mem > 70 ? 'warn' : 'ok'}"></span> Memory: ${mem}% - ${mem > 85 ? 'Critical' : mem > 70 ? 'Warning' : 'Normal'}</div>`;
-    html += `<div class="check-item"><span class="check-status ${disk > 90 ? 'error' : disk > 80 ? 'warn' : 'ok'}"></span> Disk: ${disk.toFixed(1)}% - ${disk > 90 ? 'Critical' : disk > 80 ? 'Warning' : 'Normal'}</div>`;
-
-    const topMem = statsData.processes?.slice(0, 3) || [];
-    html += '<h4 style="margin-top:8px;">Top Memory Consumers</h4>';
-    topMem.forEach(p => {
-        html += `<div class="check-item"><span class="check-status ${p.memory_percent > 10 ? 'warn' : 'ok'}"></span> ${p.name} (${p.pid}) - ${p.memory_percent}%</div>`;
-    });
-
-    container.innerHTML = html;
-}
-
-/* Network Diagnostics */
-document.getElementById('run-net-diag').addEventListener('click', runNetDiag);
-
-async function runNetDiag() {
-    const container = document.getElementById('net-diagnostics');
-    container.innerHTML = '<p>Running network diagnostics...</p>';
-
+    resultsBox.innerHTML = '<p class="text-muted">Pinging ' + escapeHtml(host) + '...</p>';
     try {
-        const res = await fetch(`${API_BASE}/api/system/net-diag`);
-        if (res.ok) {
-            const data = await res.json();
-            container.innerHTML = `<pre style="font-size:0.75rem">${JSON.stringify(data, null, 2)}</pre>`;
+        const res = await fetch(`${API_BASE}/api/troubleshoot/ping`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host, count: 4 })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+            resultsBox.innerHTML = `
+                <div style="color:var(--success);margin-bottom:6px;"><b>✓ Ping Successful:</b> ${data.packet_loss_percent}% loss</div>
+                <div><b>Latency:</b> Min ${data.min_rtt}ms | Avg ${data.avg_rtt}ms | Max ${data.max_rtt}ms</div>
+                <pre style="margin-top:8px;font-size:0.75rem;background:var(--bg-secondary);padding:6px;border-radius:4px;">${escapeHtml(data.raw_output)}</pre>
+            `;
         } else {
-            container.innerHTML = '<p class="issue-item danger">Network diagnostics endpoint not available</p>';
+            resultsBox.innerHTML = `<div style="color:var(--danger)"><b>✗ Ping Failed to ${escapeHtml(host)}</b></div><pre style="font-size:0.75rem">${escapeHtml(data.raw_output || data.error)}</pre>`;
         }
     } catch (e) {
-        container.innerHTML = '<p>Network check: unavailable</p>';
+        resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
     }
 }
 
-/* Command Runner */
-document.getElementById('run-cmd').addEventListener('click', runCommand);
-document.getElementById('cmd-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') runCommand();
-});
+async function runPortTest() {
+    const host = document.getElementById('port-host-input').value.trim();
+    const port = parseInt(document.getElementById('port-num-input').value);
+    const resultsBox = document.getElementById('port-results-box');
 
-async function runCommand() {
+    if (!host || !port) return;
+    resultsBox.innerHTML = '<p class="text-muted">Testing connection to ' + escapeHtml(host) + ':' + port + '...</p>';
+
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/port-check`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host, port })
+        });
+        const data = await res.json();
+
+        if (data.open) {
+            resultsBox.innerHTML = `<div style="color:var(--success)"><b>✓ OPEN:</b> Port ${port} on ${escapeHtml(host)} is listening (${data.latency_ms} ms)</div>`;
+        } else {
+            resultsBox.innerHTML = `<div style="color:var(--danger)"><b>✗ CLOSED / UNREACHABLE:</b> ${escapeHtml(data.message)}</div>`;
+        }
+    } catch (e) {
+        resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+    }
+}
+
+async function runDnsTest() {
+    const domain = document.getElementById('dns-host-input').value.trim();
+    const resultsBox = document.getElementById('dns-results-box');
+    if (!domain) return;
+
+    resultsBox.innerHTML = '<p class="text-muted">Resolving ' + escapeHtml(domain) + '...</p>';
+
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/dns-lookup`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain })
+        });
+        const data = await res.json();
+
+        let html = `<div><b>Domain:</b> ${escapeHtml(domain)}</div>`;
+        if (data.resolutions.local?.success) {
+            html += `<div style="color:var(--success)"><b>Local Resolver (${data.resolutions.local.latency_ms}ms):</b> ${data.resolutions.local.ips.join(', ')}</div>`;
+        } else {
+            html += `<div style="color:var(--danger)"><b>Local Resolver:</b> Failed (${data.resolutions.local?.error})</div>`;
+        }
+
+        if (data.resolutions.google_dns?.success) {
+            html += `<div style="color:var(--accent)"><b>Google DNS (8.8.8.8):</b> ${data.resolutions.google_dns.ips.join(', ')}</div>`;
+        } else {
+            html += `<div style="color:var(--danger)"><b>Google DNS:</b> Failed</div>`;
+        }
+
+        resultsBox.innerHTML = html;
+    } catch (e) {
+        resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+    }
+}
+
+async function fetchListeningPorts() {
+    const tbody = document.getElementById('ports-table-body');
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted">Scanning active listening sockets...</td></tr>';
+
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/network-ports`);
+        if (!res.ok) throw new Error('Failed to fetch listening ports');
+        const ports = await res.json();
+
+        tbody.innerHTML = '';
+        if (ports.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="no-data">No open listening ports detected.</td></tr>';
+            return;
+        }
+
+        ports.forEach(p => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td><b>${p.port}</b></td>
+                <td><span class="badge ${p.protocol === 'TCP' ? 'badge-success' : 'badge-warning'}">${p.protocol}</span></td>
+                <td>${p.ip}</td>
+                <td>${p.pid || 'N/A'}</td>
+                <td><b>${p.process}</b></td>
+            `;
+            tbody.appendChild(row);
+        });
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Error: ${e.message}</td></tr>`;
+    }
+}
+
+/* Bottleneck Finder */
+async function fetchBottlenecks() {
+    const cpuBox = document.getElementById('cpu-hogs-box');
+    const memBox = document.getElementById('mem-hogs-box');
+    const stuckBox = document.getElementById('stuck-procs-box');
+
+    cpuBox.innerHTML = '<p class="text-muted">Loading...</p>';
+    memBox.innerHTML = '<p class="text-muted">Loading...</p>';
+    stuckBox.innerHTML = '<p class="text-muted">Loading...</p>';
+
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/bottlenecks`);
+        if (!res.ok) throw new Error('Failed to fetch resource bottlenecks');
+        const data = await res.json();
+
+        // CPU Hogs
+        cpuBox.innerHTML = (data.cpu_hogs || []).map(p => `
+            <div class="disk-item" style="margin-bottom:6px;">
+                <span><b>${p.name}</b> (PID ${p.pid})</span>
+                <span><b class="text-danger">${p.cpu_percent}% CPU</b></span>
+            </div>
+        `).join('');
+
+        // Memory Hogs
+        memBox.innerHTML = (data.memory_hogs || []).map(p => `
+            <div class="disk-item" style="margin-bottom:6px;">
+                <span><b>${p.name}</b> (PID ${p.pid})</span>
+                <span><b>${p.memory_mb} MB RAM</b> (${p.memory_percent}%)</span>
+            </div>
+        `).join('');
+
+        // Stuck / Zombies
+        if (!data.stuck_processes || data.stuck_processes.length === 0) {
+            stuckBox.innerHTML = '<p class="no-data">✓ No zombie or hung processes detected.</p>';
+        } else {
+            stuckBox.innerHTML = data.stuck_processes.map(p => `
+                <div class="issue-item danger">
+                    <span><b>${p.name}</b> (PID ${p.pid}) - State: <b>${p.status}</b></span>
+                    <button class="btn btn-sm btn-danger" onclick="remediateAction('kill_process', '${p.pid}')">💀 Terminate Process</button>
+                </div>
+            `).join('');
+        }
+    } catch (e) {
+        cpuBox.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+    }
+}
+
+/* Terminal & Command Runner */
+async function executeCommand(cmdText = null) {
     const input = document.getElementById('cmd-input');
     const output = document.getElementById('cmd-output');
-    const cmd = input.value.trim();
+    const statusTag = document.getElementById('cmd-status-tag');
+
+    const cmd = cmdText || input.value.trim();
     if (!cmd) return;
 
-    output.textContent = 'Running...';
+    output.textContent = `$ ${cmd}\nRunning command...`;
+    statusTag.textContent = 'Running';
+    statusTag.className = 'cmd-status-badge badge-warning';
+
+    state.cmdHistory.push(cmd);
+    state.cmdHistoryIndex = state.cmdHistory.length;
 
     try {
         const res = await fetch(`${API_BASE}/api/commands/run`, {
@@ -519,33 +821,98 @@ async function runCommand() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ command: cmd })
         });
+
         if (res.ok) {
-            const data = await res.json();
-            output.textContent = data.output || 'No output';
+            const result = await res.json();
+            output.textContent = `$ ${cmd}\n\n` + (result.output || result.error || '[Process completed with no output]');
+            statusTag.textContent = `Exit Code: ${result.returncode}`;
+            statusTag.className = `cmd-status-badge ${result.returncode === 0 ? 'badge-success' : 'badge-danger'}`;
         } else {
-            output.textContent = 'Command failed: ' + (await res.text());
+            const errText = await res.text();
+            output.textContent = `$ ${cmd}\n\nCommand Failed:\n${errText}`;
+            statusTag.textContent = 'Error';
+            statusTag.className = 'cmd-status-badge badge-danger';
         }
     } catch (e) {
-        output.textContent = 'Error: ' + e.message;
+        output.textContent = `$ ${cmd}\n\nExecution Error: ${e.message}`;
+        statusTag.textContent = 'Error';
+        statusTag.className = 'cmd-status-badge badge-danger';
     }
 }
 
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+/* Sub-Tab Navigation inside Troubleshoot */
+function switchSubTab(subtabId) {
+    document.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.sub-tab-content').forEach(c => c.classList.remove('active'));
+
+    const btn = document.querySelector(`[data-subtab="${subtabId}"]`);
+    if (btn) btn.classList.add('active');
+    const content = document.getElementById(`subtab-${subtabId}`);
+    if (content) content.classList.add('active');
+
+    state.currentSubTab = subtabId;
+
+    if (subtabId === 'health-hub' && !healthData) runFullHealthScan();
+    if (subtabId === 'log-inspector') fetchLogs();
+    if (subtabId === 'net-suite') fetchListeningPorts();
+    if (subtabId === 'bottlenecks') fetchBottlenecks();
 }
 
-/* Modal Close */
-document.getElementById('close-modal').addEventListener('click', () => {
-    document.getElementById('process-modal').classList.remove('show');
-});
+function switchTab(tabId) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
 
-document.getElementById('process-modal').addEventListener('click', (e) => {
-    if (e.target === document.getElementById('process-modal')) {
-        e.target.classList.remove('show');
+    const btn = document.querySelector(`[data-tab="${tabId}"]`);
+    if (btn) btn.classList.add('active');
+    document.getElementById(`tab-${tabId}`).classList.add('active');
+    state.currentTab = tabId;
+
+    if (tabId === 'processes') fetchStats();
+    if (tabId === 'vms') fetchVms();
+    if (tabId === 'services') fetchServices();
+    if (tabId === 'troubleshoot') switchSubTab(state.currentSubTab || 'health-hub');
+}
+
+/* Process Filtering & Sorting */
+function filterProcesses() {
+    const tbody = document.getElementById('all-processes-body');
+    if (!tbody || !statsData?.processes) return;
+
+    let procs = [...statsData.processes];
+    const search = state.processSearch;
+    const filter = state.processFilter;
+
+    if (search) {
+        procs = procs.filter(p => p.name.toLowerCase().includes(search) || String(p.pid).includes(search) || p.username.toLowerCase().includes(search));
     }
-});
+
+    if (filter === 'cpu') procs.sort((a, b) => b.cpu_percent - a.cpu_percent);
+    else if (filter === 'mem') procs.sort((a, b) => b.memory_percent - a.memory_percent);
+    else if (filter === 'pid') procs.sort((a, b) => a.pid - b.pid);
+    else if (filter === 'name') procs.sort((a, b) => a.name.localeCompare(b.name));
+
+    tbody.innerHTML = '';
+    procs.forEach(p => {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td><input type="checkbox" class="proc-check" value="${p.pid}"></td>
+            <td><b>${p.pid}</b></td>
+            <td>${p.name}</td>
+            <td><b class="${p.cpu_percent > 50 ? 'text-danger' : ''}">${p.cpu_percent}%</b></td>
+            <td>${p.memory_percent}%</td>
+            <td>${p.memory_mb} MB</td>
+            <td><span class="badge ${p.status === 'running' ? 'badge-success' : 'badge-warning'}">${p.status}</span></td>
+            <td>${p.username}</td>
+            <td>${p.threads || 1}</td>
+            <td style="font-size:0.75rem">${p.create_time}</td>
+            <td>
+                <button class="btn btn-sm btn-outline" onclick="showProcessDetail(${p.pid})">Inspect</button>
+                <button class="btn btn-sm btn-danger" onclick="killProcess(${p.pid})">Kill</button>
+            </td>
+        `;
+        tbody.appendChild(row);
+    });
+}
 
 /* VMs */
 async function fetchVms() {
@@ -553,14 +920,14 @@ async function fetchVms() {
     try {
         const res = await fetch(`${API_BASE}/api/stats/vms`);
         if (res.status === 404) {
-            container.innerHTML = '<p class="no-data">VM monitoring not available (libvirt not installed)</p>';
+            container.innerHTML = '<p class="no-data">VM monitoring unavailable (libvirt daemon not running or not installed)</p>';
             return;
         }
         const vms = await res.json();
-        document.getElementById('vm-count').textContent = vms.length + ' VM(s)';
+        document.getElementById('vm-count').textContent = vms.length + ' VMs';
 
         if (vms.length === 0) {
-            container.innerHTML = '<p class="no-data">No VMs found</p>';
+            container.innerHTML = '<p class="no-data">No active or defined VMs found on hypervisor.</p>';
             return;
         }
 
@@ -571,10 +938,10 @@ async function fetchVms() {
                     <span class="vm-state ${vm.state}">${vm.state.toUpperCase()}</span>
                 </div>
                 <div class="vm-stats">
-                    <div class="vm-stat"><span>ID</span><span>${vm.id}</span></div>
+                    <div class="vm-stat"><span>VM ID</span><span>${vm.id}</span></div>
                     <div class="vm-stat"><span>vCPUs</span><span>${vm.vcpus}</span></div>
-                    <div class="vm-stat"><span>Memory</span><span>${formatBytes(vm.memory * 1024)}</span></div>
-                    <div class="vm-stat"><span>Max Mem</span><span>${formatBytes(vm.max_memory * 1024)}</span></div>
+                    <div class="vm-stat"><span>Allocated Memory</span><span>${formatBytes(vm.memory * 1024)}</span></div>
+                    <div class="vm-stat"><span>Max Memory</span><span>${formatBytes(vm.max_memory * 1024)}</span></div>
                 </div>
             </div>
         `).join('');
@@ -587,11 +954,11 @@ async function fetchVms() {
 async function fetchServices() {
     try {
         const res = await fetch(`${API_BASE}/api/services`);
-        if (!res.ok) throw new Error('Failed to fetch services');
+        if (!res.ok) throw new Error('Failed to fetch system services');
         const services = await res.json();
         renderServices(services);
     } catch (e) {
-        console.error('Error fetching services:', e);
+        showToast('Error fetching services: ' + e.message, 'error');
     }
 }
 
@@ -602,17 +969,12 @@ function renderServices(services) {
 
     const filter = document.getElementById('service-filter').value;
     const search = document.getElementById('service-search').value.toLowerCase();
-    state.allServices = services;
 
     let filtered = services;
-    if (filter !== 'all') {
-        filtered = filtered.filter(s => {
-            if (filter === 'running') return s.active === 'active';
-            if (filter === 'stopped') return s.active !== 'active';
-            if (filter === 'failed') return s.active === 'failed';
-            return true;
-        });
-    }
+    if (filter === 'running') filtered = filtered.filter(s => s.active === 'active');
+    else if (filter === 'stopped') filtered = filtered.filter(s => s.active !== 'active');
+    else if (filter === 'failed') filtered = filtered.filter(s => s.active === 'failed' || s.sub === 'failed');
+
     if (search) {
         filtered = filtered.filter(s => s.name.toLowerCase().includes(search) || s.description.toLowerCase().includes(search));
     }
@@ -622,10 +984,10 @@ function renderServices(services) {
         row.innerHTML = `
             <td><b>${s.name}</b></td>
             <td>${s.load}</td>
-            <td>${s.active}</td>
+            <td><span class="badge ${s.active === 'active' ? 'badge-success' : s.active === 'failed' ? 'badge-danger' : 'badge-warning'}">${s.active}</span></td>
             <td>${s.sub}</td>
-            <td style="font-size:0.8rem">${s.description}</td>
-            <td class="service-actions">
+            <td style="font-size:0.8rem">${escapeHtml(s.description)}</td>
+            <td>
                 ${s.active !== 'active' ? `<button class="btn btn-sm btn-success" onclick="controlService('${s.name}','start')">Start</button>` : ''}
                 ${s.active === 'active' ? `<button class="btn btn-sm btn-warning" onclick="controlService('${s.name}','stop')">Stop</button>` : ''}
                 <button class="btn btn-sm btn-primary" onclick="controlService('${s.name}','restart')">Restart</button>
@@ -635,68 +997,169 @@ function renderServices(services) {
     });
 }
 
-document.getElementById('service-filter').addEventListener('change', () => {
-    if (state.allServices) renderServices(state.allServices);
-});
-
-document.getElementById('service-search').addEventListener('input', () => {
-    if (state.allServices) renderServices(state.allServices);
-});
-
 async function controlService(name, action) {
-    if (!confirm(`${action.toUpperCase()} service ${name}?`)) return;
+    if (!confirm(`Are you sure you want to ${action.toUpperCase()} service ${name}?`)) return;
     try {
         const res = await fetch(`${API_BASE}/api/services/${name}/${action}`, { method: 'POST' });
         if (res.ok) {
-            showToast(`Service ${name} ${action}ed`, 'success');
+            showToast(`Service ${name} ${action}ed successfully`, 'success');
             fetchServices();
         } else {
-            showToast('Failed to control service', 'error');
+            showToast(`Failed to ${action} service`, 'error');
         }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
 }
 
-/* Process Kill from processes tab */
-document.getElementById('kill-selected').addEventListener('click', () => {
-    const checked = document.querySelectorAll('.proc-check:checked');
-    if (checked.length === 0) { showToast('No processes selected', 'warning'); return; }
-    if (!confirm(`Kill ${checked.length} selected process(es)?`)) return;
-    checked.forEach(c => killProcess(parseInt(c.value)));
+/* Event Listeners Initialization */
+document.addEventListener('DOMContentLoaded', () => {
+    // Tab switching
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    // Sub tab switching
+    document.querySelectorAll('.sub-tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => switchSubTab(btn.dataset.subtab));
+    });
+
+    // Troubleshoot Scan
+    document.getElementById('run-full-scan-btn').addEventListener('click', runFullHealthScan);
+
+    // Refresh button
+    document.getElementById('refresh-btn').addEventListener('click', () => {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
+        fetchStats();
+        if (state.currentTab === 'troubleshoot') runFullHealthScan();
+        showToast('Refreshed data', 'info');
+    });
+
+    // Theme toggle
+    document.getElementById('theme-toggle').addEventListener('click', () => {
+        document.body.classList.toggle('light-theme');
+        const isLight = document.body.classList.contains('light-theme');
+        document.getElementById('theme-toggle').textContent = isLight ? '☀️' : '🌙';
+    });
+
+    // View All Procs button
+    document.getElementById('view-all-procs-btn')?.addEventListener('click', () => switchTab('processes'));
+
+    // Process Search & Filter
+    document.getElementById('proc-search')?.addEventListener('input', (e) => {
+        state.processSearch = e.target.value.toLowerCase();
+        filterProcesses();
+    });
+
+    document.getElementById('proc-filter')?.addEventListener('change', (e) => {
+        state.processFilter = e.target.value;
+        filterProcesses();
+    });
+
+    document.getElementById('select-all-proc')?.addEventListener('change', (e) => {
+        document.querySelectorAll('.proc-check').forEach(c => c.checked = e.target.checked);
+    });
+
+    document.getElementById('kill-selected')?.addEventListener('click', () => {
+        const checked = document.querySelectorAll('.proc-check:checked');
+        if (checked.length === 0) { showToast('No processes selected', 'warning'); return; }
+        if (!confirm(`Kill ${checked.length} selected process(es)?`)) return;
+        checked.forEach(c => killProcess(parseInt(c.value)));
+    });
+
+    // Log Inspector Controls
+    document.querySelectorAll('.level-pill').forEach(pill => {
+        pill.addEventListener('click', () => {
+            document.querySelectorAll('.level-pill').forEach(p => p.classList.remove('active'));
+            pill.classList.add('active');
+            state.logLevel = pill.dataset.level;
+            fetchLogs();
+        });
+    });
+
+    document.getElementById('log-lines-select')?.addEventListener('change', (e) => {
+        state.logLines = parseInt(e.target.value);
+        fetchLogs();
+    });
+
+    document.getElementById('log-search-input')?.addEventListener('input', () => fetchLogs());
+    document.getElementById('fetch-logs-btn')?.addEventListener('click', () => fetchLogs());
+
+    document.getElementById('copy-logs-btn')?.addEventListener('click', () => {
+        const container = document.getElementById('logs-container');
+        navigator.clipboard.writeText(container.textContent);
+        showToast('Logs copied to clipboard', 'success');
+    });
+
+    document.getElementById('log-autotail-toggle')?.addEventListener('change', (e) => {
+        state.logAutoTail = e.target.checked;
+        if (state.logAutoTail) {
+            autoTailInterval = setInterval(fetchLogs, 2000);
+            showToast('Auto-Tail streaming active', 'info');
+        } else {
+            if (autoTailInterval) clearInterval(autoTailInterval);
+            showToast('Auto-Tail paused', 'info');
+        }
+    });
+
+    // Network Suite Tool Events
+    document.getElementById('run-ping-btn')?.addEventListener('click', runPingTest);
+    document.getElementById('run-port-btn')?.addEventListener('click', runPortTest);
+    document.getElementById('run-dns-btn')?.addEventListener('click', runDnsTest);
+    document.getElementById('refresh-ports-btn')?.addEventListener('click', fetchListeningPorts);
+
+    // Terminal Command Runner
+    document.getElementById('run-cmd')?.addEventListener('click', () => executeCommand());
+    document.getElementById('clear-cmd-btn')?.addEventListener('click', () => {
+        document.getElementById('cmd-output').textContent = 'Ready to execute commands.';
+        document.getElementById('cmd-status-tag').textContent = 'Ready';
+        document.getElementById('cmd-status-tag').className = 'cmd-status-badge';
+    });
+
+    document.getElementById('cmd-input')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            executeCommand();
+        } else if (e.key === 'ArrowUp') {
+            if (state.cmdHistory.length > 0 && state.cmdHistoryIndex > 0) {
+                state.cmdHistoryIndex--;
+                e.target.value = state.cmdHistory[state.cmdHistoryIndex];
+            }
+        } else if (e.key === 'ArrowDown') {
+            if (state.cmdHistoryIndex < state.cmdHistory.length - 1) {
+                state.cmdHistoryIndex++;
+                e.target.value = state.cmdHistory[state.cmdHistoryIndex];
+            } else {
+                state.cmdHistoryIndex = state.cmdHistory.length;
+                e.target.value = '';
+            }
+        }
+    });
+
+    document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const cmd = btn.dataset.cmd;
+            document.getElementById('cmd-input').value = cmd;
+            executeCommand(cmd);
+        });
+    });
+
+    // Services Filters
+    document.getElementById('service-filter')?.addEventListener('change', fetchServices);
+    document.getElementById('service-search')?.addEventListener('input', fetchServices);
+    document.getElementById('refresh-services-btn')?.addEventListener('click', fetchServices);
+
+    // Modal Close
+    document.getElementById('close-modal')?.addEventListener('click', () => {
+        document.getElementById('process-modal').classList.remove('show');
+    });
+
+    document.getElementById('process-modal')?.addEventListener('click', (e) => {
+        if (e.target === document.getElementById('process-modal')) {
+            e.target.classList.remove('show');
+        }
+    });
+
+    // Startup initialization
+    connectWebSocket();
+    fetchStats();
 });
-
-/* Process Search/Filter */
-document.getElementById('proc-search').addEventListener('input', (e) => {
-    state.processSearch = e.target.value.toLowerCase();
-    filterProcesses();
-});
-
-document.getElementById('proc-filter').addEventListener('change', (e) => {
-    state.processFilter = e.target.value;
-    filterProcesses();
-});
-
-function filterProcesses() {
-    const tbody = document.getElementById('all-processes-body');
-    if (!tbody || !statsData?.processes) return;
-
-    let procs = statsData.processes;
-    if (state.processSearch) {
-        procs = procs.filter(p => p.name.toLowerCase().includes(state.processSearch) || String(p.pid).includes(state.processSearch));
-    }
-    if (state.processFilter === 'cpu') procs.sort((a, b) => b.cpu_percent - a.cpu_percent);
-    else if (state.processFilter === 'mem') procs.sort((a, b) => b.memory_percent - a.memory_percent);
-    else if (state.processFilter === 'pid') procs.sort((a, b) => a.pid - b.pid);
-
-    updateAllProcesses(procs, statsData);
-}
-
-/* Select All */
-document.getElementById('select-all-proc')?.addEventListener('change', (e) => {
-    document.querySelectorAll('.proc-check').forEach(c => c.checked = e.target.checked);
-});
-
-/* Initialize */
-connectWebSocket();
-fetchStats();

@@ -3,153 +3,217 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>System Monitoring Dashboard</title>
+    <title>MonitorX - Real-Time System Monitoring & Troubleshooting</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/styles.css">
 </head>
 <body>
     <div class="app-container">
+        <!-- Modern Header -->
         <header class="app-header">
             <div class="header-left">
-                <h1 class="logo">🖥️ MonitorX</h1>
-                <span class="hostname" id="hostname">-</span>
+                <div class="logo-box">
+                    <span class="logo-icon">⚡</span>
+                    <h1 class="logo">MonitorX</h1>
+                    <span class="version-tag">v2.0 PRO</span>
+                </div>
+                <div class="host-badge">
+                    <span class="host-dot"></span>
+                    <span id="hostname">detecting host...</span>
+                </div>
             </div>
             <div class="header-right">
                 <div class="status-indicator" id="ws-status">
                     <span class="status-dot connected"></span>
-                    <span id="ws-status-text">Connected</span>
+                    <span id="ws-status-text">Live WebSocket</span>
                 </div>
-                <span class="uptime" id="uptime">-</span>
-                <button class="btn-icon" id="refresh-btn" title="Refresh">🔄</button>
-                <button class="btn-icon" id="theme-toggle" title="Toggle Theme">🌙</button>
+                <div class="uptime-badge" id="uptime">Uptime: --</div>
+                <button class="btn-icon" id="refresh-btn" title="Refresh Dashboard">🔄</button>
+                <button class="btn-icon" id="theme-toggle" title="Toggle Light/Dark Theme">🌙</button>
             </div>
         </header>
 
+        <!-- Glass Navigation Bar -->
         <nav class="tab-nav">
-            <button class="tab-btn active" data-tab="dashboard">📊 Dashboard</button>
-            <button class="tab-btn" data-tab="processes">📋 Processes</button>
-            <button class="tab-btn" data-tab="troubleshoot">🔧 Troubleshoot</button>
-            <button class="tab-btn" data-tab="vms">🐳 VMs</button>
-            <button class="tab-btn" data-tab="services">⚙️ Services</button>
+            <button class="tab-btn active" data-tab="dashboard">
+                <span class="tab-icon">📊</span> Dashboard
+            </button>
+            <button class="tab-btn" data-tab="processes">
+                <span class="tab-icon">📋</span> Processes
+            </button>
+            <button class="tab-btn highlight-tab" data-tab="troubleshoot">
+                <span class="tab-icon">🔧</span> Troubleshoot Hub
+            </button>
+            <button class="tab-btn" data-tab="vms">
+                <span class="tab-icon">🐳</span> VMs (Libvirt)
+            </button>
+            <button class="tab-btn" data-tab="services">
+                <span class="tab-icon">⚙️</span> Systemd Services
+            </button>
         </nav>
 
+        <!-- Main Workspace -->
         <main class="main-content">
-            <!-- Dashboard Tab -->
+            <!-- TAB 1: DASHBOARD -->
             <div class="tab-content active" id="tab-dashboard">
+                <!-- Sparkline Trend Charts Banner -->
+                <div class="charts-row">
+                    <div class="chart-card">
+                        <div class="chart-header">
+                            <span><span class="dot-accent blue"></span> CPU Utilization (30s)</span>
+                            <span class="chart-value" id="cpu-chart-val">0%</span>
+                        </div>
+                        <canvas id="cpu-canvas" height="65"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <div class="chart-header">
+                            <span><span class="dot-accent green"></span> Memory Usage (30s)</span>
+                            <span class="chart-value" id="mem-chart-val">0%</span>
+                        </div>
+                        <canvas id="mem-canvas" height="65"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <div class="chart-header">
+                            <span><span class="dot-accent purple"></span> Network Bandwidth Rate</span>
+                            <span class="chart-value" id="net-chart-val">↓ 0 KB/s | ↑ 0 KB/s</span>
+                        </div>
+                        <canvas id="net-canvas" height="65"></canvas>
+                    </div>
+                </div>
+
+                <!-- Primary Metrics Grid -->
                 <div class="metrics-grid">
                     <!-- CPU Card -->
                     <div class="metric-card" id="cpu-card">
                         <div class="card-header">
-                            <h2>CPU</h2>
+                            <h2>CPU Utilization</h2>
                             <span class="metric-value" id="cpu-total">0%</span>
                         </div>
                         <div class="cpu-bars" id="cpu-bars"></div>
-                        <div class="card-footer">
-                            <span>Cores: <b id="cpu-cores">0</b></span>
-                            <span>Load: <b id="cpu-load">0,0,0</b></span>
-                            <span>Freq: <b id="cpu-freq">0 MHz</b></span>
+                        <div class="card-footer-grid">
+                            <div>Logical Cores: <b id="cpu-cores">0</b></div>
+                            <div>Clock Frequency: <b id="cpu-freq">0 GHz</b></div>
+                            <div class="full-row">Load Average (1/5/15m): <b id="cpu-load">0, 0, 0</b></div>
                         </div>
                     </div>
 
                     <!-- RAM Card -->
                     <div class="metric-card" id="ram-card">
                         <div class="card-header">
-                            <h2>Memory</h2>
+                            <h2>System Memory</h2>
                             <span class="metric-value" id="ram-percent">0%</span>
                         </div>
                         <div class="progress-bar">
-                            <div class="progress-fill" id="ram-bar"></div>
+                            <div class="progress-fill" id="ram-bar" style="width: 0%;"></div>
                         </div>
-                        <div class="card-footer">
-                            <span>Used: <b id="ram-used">0 MB</b></span>
-                            <span>Free: <b id="ram-free">0 MB</b></span>
-                            <span>Swap: <b id="ram-swap">0%</b></span>
+                        <div class="card-footer-grid">
+                            <div>Used RAM: <b id="ram-used">0 MB</b></div>
+                            <div>Available: <b id="ram-free">0 MB</b></div>
+                            <div>Buffers/Cache: <b id="ram-cached">0 MB</b></div>
+                            <div>Swap Used: <b id="ram-swap">0%</b></div>
                         </div>
                     </div>
 
                     <!-- Disk Card -->
                     <div class="metric-card" id="disk-card">
                         <div class="card-header">
-                            <h2>Disk</h2>
+                            <h2>Storage Drives & I/O</h2>
                             <span class="metric-value" id="disk-percent">0%</span>
                         </div>
                         <div class="disk-list" id="disk-list"></div>
-                        <div class="card-footer">
-                            <span>Read: <b id="disk-read">0</b></span>
-                            <span>Write: <b id="disk-write">0</b></span>
-                        </div>
-                    </div>
-
-                    <!-- GPU Card -->
-                    <div class="metric-card" id="gpu-card">
-                        <div class="card-header">
-                            <h2>GPU</h2>
-                            <span class="metric-value" id="gpu-total">N/A</span>
-                        </div>
-                        <div id="gpu-content">
-                            <p class="no-data">No GPU detected</p>
+                        <div class="card-footer-grid">
+                            <div>Disk Read Speed: <b id="disk-read-speed">0 B/s</b></div>
+                            <div>Disk Write Speed: <b id="disk-write-speed">0 B/s</b></div>
                         </div>
                     </div>
 
                     <!-- Network Card -->
                     <div class="metric-card" id="network-card">
                         <div class="card-header">
-                            <h2>Network</h2>
-                            <span class="metric-value" id="net-conn">0</span>
+                            <h2>Network Throughput</h2>
+                            <div class="net-speed-badges">
+                                <span class="badge rx-badge">↓ <b id="net-rx-speed">0 KB/s</b></span>
+                                <span class="badge tx-badge">↑ <b id="net-tx-speed">0 KB/s</b></span>
+                            </div>
                         </div>
                         <div class="net-list" id="net-list"></div>
+                        <div class="card-footer-grid">
+                            <div>Active Inet Connections: <b id="net-conn">0</b></div>
+                        </div>
+                    </div>
+
+                    <!-- GPU Card -->
+                    <div class="metric-card" id="gpu-card">
+                        <div class="card-header">
+                            <h2>GPU Accelerators</h2>
+                            <span class="metric-value" id="gpu-total">N/A</span>
+                        </div>
+                        <div id="gpu-content">
+                            <p class="no-data">No NVIDIA GPU hardware detected</p>
+                        </div>
                     </div>
 
                     <!-- System Info Card -->
                     <div class="metric-card" id="system-card">
                         <div class="card-header">
-                            <h2>System</h2>
+                            <h2>System Metadata</h2>
                         </div>
                         <div class="system-info" id="system-info"></div>
                     </div>
                 </div>
 
-                <!-- OS Issues Panel -->
+                <!-- OS Live Alerts Banner -->
                 <div class="issues-panel">
                     <div class="card-header">
-                        <h2>⚠️ OS Issues & Alerts</h2>
-                        <span class="badge" id="issues-count">0</span>
+                        <h2>⚠️ Real-Time OS Diagnostics & Alerts</h2>
+                        <div class="issue-badges">
+                            <span class="badge badge-danger" id="issues-count-critical">0 Critical</span>
+                            <span class="badge badge-warning" id="issues-count-warning">0 Warning</span>
+                        </div>
                     </div>
                     <div class="issues-list" id="issues-list"></div>
                 </div>
 
-                <!-- Top Processes Row -->
+                <!-- Top Processes -->
                 <div class="top-processes">
                     <div class="card-header">
-                        <h2>🔥 Top Processes</h2>
+                        <h2>🔥 Top Process Consumers</h2>
+                        <button class="btn btn-sm btn-outline" id="view-all-procs-btn">View All Processes →</button>
                     </div>
-                    <table class="data-table compact">
-                        <thead>
-                            <tr>
-                                <th>PID</th>
-                                <th>Name</th>
-                                <th>CPU%</th>
-                                <th>MEM%</th>
-                                <th>MEM (MB)</th>
-                                <th>Status</th>
-                                <th>User</th>
-                            </tr>
-                        </thead>
-                        <tbody id="top-processes-body"></tbody>
-                    </table>
+                    <div class="table-container">
+                        <table class="data-table compact">
+                            <thead>
+                                <tr>
+                                    <th>PID</th>
+                                    <th>Process Name</th>
+                                    <th>CPU %</th>
+                                    <th>RAM %</th>
+                                    <th>RSS Memory</th>
+                                    <th>Status</th>
+                                    <th>User</th>
+                                    <th>Threads</th>
+                                </tr>
+                            </thead>
+                            <tbody id="top-processes-body"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
 
-            <!-- Processes Tab -->
+            <!-- TAB 2: PROCESSES MANAGER -->
             <div class="tab-content" id="tab-processes">
                 <div class="process-controls">
-                    <input type="text" id="proc-search" placeholder="Search processes..." class="search-input">
+                    <input type="text" id="proc-search" placeholder="🔍 Search process name, PID, or user..." class="search-input">
                     <select id="proc-filter" class="filter-select">
-                        <option value="all">All</option>
-                        <option value="cpu">Sort by CPU</option>
-                        <option value="mem">Sort by Memory</option>
+                        <option value="cpu">Sort by CPU %</option>
+                        <option value="mem">Sort by RAM %</option>
                         <option value="pid">Sort by PID</option>
+                        <option value="name">Sort by Name</option>
                     </select>
-                    <button class="btn" id="kill-selected">Kill Selected</button>
+                    <button class="btn btn-danger" id="kill-selected">💀 Terminate Selected</button>
                 </div>
                 <div class="table-container">
                     <table class="data-table" id="processes-table">
@@ -158,11 +222,12 @@
                                 <th><input type="checkbox" id="select-all-proc"></th>
                                 <th>PID</th>
                                 <th>Name</th>
-                                <th>CPU%</th>
-                                <th>MEM%</th>
-                                <th>MEM (MB)</th>
+                                <th>CPU %</th>
+                                <th>RAM %</th>
+                                <th>RSS (MB)</th>
                                 <th>Status</th>
                                 <th>User</th>
+                                <th>Threads</th>
                                 <th>Started</th>
                                 <th>Actions</th>
                             </tr>
@@ -172,43 +237,206 @@
                 </div>
             </div>
 
-            <!-- Troubleshoot Tab -->
+            <!-- TAB 3: TROUBLESHOOT MODE CENTER (FEATURED) -->
             <div class="tab-content" id="tab-troubleshoot">
-                <div class="troubleshoot-grid">
-                    <div class="troubleshoot-section">
-                        <h3>🔍 System Checks</h3>
-                        <div id="sys-checks"></div>
-                        <button class="btn btn-primary" id="run-checks">Run All Checks</button>
+                <!-- Master Health Gauge Card -->
+                <div class="troubleshoot-header-card">
+                    <div class="scorecard-left">
+                        <div class="health-gauge">
+                            <svg viewBox="0 0 36 36" class="circular-chart">
+                                <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                                <path class="circle" id="health-circle" stroke-dasharray="100, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                                <text x="18" y="20.35" class="percentage" id="health-score-val">100</text>
+                            </svg>
+                        </div>
+                        <div class="scorecard-text">
+                            <h2>System Health Index</h2>
+                            <p id="health-summary-text">Automated diagnostic scanner active...</p>
+                            <div class="health-pills">
+                                <span class="pill pill-danger" id="pill-critical">0 Critical</span>
+                                <span class="pill pill-warning" id="pill-warning">0 Warnings</span>
+                                <span class="pill pill-success" id="pill-ok">0 Passing</span>
+                            </div>
+                        </div>
                     </div>
-                    <div class="troubleshoot-section">
-                        <h3>📋 Recent Errors</h3>
-                        <div id="recent-errors"></div>
-                        <button class="btn btn-primary" id="refresh-errors">Refresh</button>
-                    </div>
-                    <div class="troubleshoot-section">
-                        <h3>📊 Resource Analysis</h3>
-                        <div id="resource-analysis"></div>
-                    </div>
-                    <div class="troubleshoot-section">
-                        <h3>🐛 Network Diagnostics</h3>
-                        <div id="net-diagnostics"></div>
-                        <button class="btn btn-primary" id="run-net-diag">Run Network Test</button>
+                    <div class="scorecard-right">
+                        <button class="btn btn-primary btn-lg glow-btn" id="run-full-scan-btn">⚡ Run Diagnostic Scan</button>
+                        <span class="last-scan-time" id="last-scan-time">Last Scan: Never</span>
                     </div>
                 </div>
-                <div class="troubleshoot-section full-width">
-                    <h3>📝 Command Runner</h3>
-                    <div class="command-runner">
-                        <input type="text" id="cmd-input" placeholder="Enter command to run..." class="search-input">
-                        <button class="btn btn-primary" id="run-cmd">Run</button>
+
+                <!-- Troubleshoot Sub Tabs -->
+                <div class="sub-tab-nav">
+                    <button class="sub-tab-btn active" data-subtab="health-hub">🏥 Health Scan & Fix Hub</button>
+                    <button class="sub-tab-btn" data-subtab="log-inspector">📋 Log Inspector</button>
+                    <button class="sub-tab-btn" data-subtab="net-suite">🌐 Network Suite</button>
+                    <button class="sub-tab-btn" data-subtab="bottlenecks">🔥 Bottleneck Finder</button>
+                    <button class="sub-tab-btn" data-subtab="command-runner">⚡ Terminal & Presets</button>
+                </div>
+
+                <!-- SUB-TAB 1: HEALTH SCAN & FIX HUB -->
+                <div class="sub-tab-content active" id="subtab-health-hub">
+                    <div class="checks-grid" id="checks-grid-container">
+                        <p class="loading-text">Click "Run Diagnostic Scan" to perform automated checks.</p>
                     </div>
-                    <pre id="cmd-output" class="cmd-output"></pre>
+                </div>
+
+                <!-- SUB-TAB 2: LOG INSPECTOR -->
+                <div class="sub-tab-content" id="subtab-log-inspector">
+                    <div class="log-controls-bar">
+                        <div class="control-group">
+                            <label>Lines:</label>
+                            <select id="log-lines-select" class="filter-select">
+                                <option value="50">50 Lines</option>
+                                <option value="100" selected>100 Lines</option>
+                                <option value="200">200 Lines</option>
+                                <option value="500">500 Lines</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label>Severity:</label>
+                            <div class="level-pills">
+                                <button class="level-pill active" data-level="all">All</button>
+                                <button class="level-pill pill-err" data-level="error">🔴 Error</button>
+                                <button class="level-pill pill-warn" data-level="warning">⚠️ Warn</button>
+                                <button class="level-pill pill-inf" data-level="info">ℹ️ Info</button>
+                            </div>
+                        </div>
+                        <div class="control-group flex-1">
+                            <input type="text" id="log-search-input" placeholder="🔍 Filter log text or regex..." class="search-input">
+                        </div>
+                        <div class="control-group">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="log-autotail-toggle">
+                                <span class="slider"></span>
+                                <span class="toggle-label">Live Auto-Tail</span>
+                            </label>
+                        </div>
+                        <button class="btn btn-secondary" id="fetch-logs-btn">🔄 Refresh Logs</button>
+                        <button class="btn btn-outline" id="copy-logs-btn">📋 Copy Logs</button>
+                    </div>
+                    <div class="logs-window" id="logs-container">
+                        <p class="no-data">Loading system logs...</p>
+                    </div>
+                </div>
+
+                <!-- SUB-TAB 3: NETWORK SUITE -->
+                <div class="sub-tab-content" id="subtab-net-suite">
+                    <div class="troubleshoot-grid">
+                        <!-- Ping Tool Card -->
+                        <div class="troubleshoot-card">
+                            <h3>📡 ICMP Ping Latency Tester</h3>
+                            <div class="tool-form">
+                                <input type="text" id="ping-host-input" placeholder="e.g. 8.8.8.8 or google.com" value="8.8.8.8" class="search-input">
+                                <button class="btn btn-primary" id="run-ping-btn">Ping</button>
+                            </div>
+                            <div class="ping-results" id="ping-results-box">
+                                <p class="text-muted">Enter target host and click Ping to measure round-trip latency.</p>
+                            </div>
+                        </div>
+
+                        <!-- Port Checker Card -->
+                        <div class="troubleshoot-card">
+                            <h3>🔌 TCP Port Connectivity Tester</h3>
+                            <div class="tool-form-grid">
+                                <input type="text" id="port-host-input" placeholder="Host (e.g. 127.0.0.1)" value="127.0.0.1" class="search-input">
+                                <input type="number" id="port-num-input" placeholder="Port" value="8080" class="search-input" style="width: 100px;">
+                                <button class="btn btn-primary" id="run-port-btn">Test Port</button>
+                            </div>
+                            <div class="port-results" id="port-results-box">
+                                <p class="text-muted">Test connection to specific TCP server ports.</p>
+                            </div>
+                        </div>
+
+                        <!-- DNS Resolver Card -->
+                        <div class="troubleshoot-card">
+                            <h3>🔍 DNS Resolver Inspector</h3>
+                            <div class="tool-form">
+                                <input type="text" id="dns-host-input" placeholder="e.g. github.com" value="google.com" class="search-input">
+                                <button class="btn btn-primary" id="run-dns-btn">Resolve DNS</button>
+                            </div>
+                            <div class="dns-results" id="dns-results-box">
+                                <p class="text-muted">Compare local DNS resolution speed against Google Public DNS.</p>
+                            </div>
+                        </div>
+
+                        <!-- Active Listening Ports Card -->
+                        <div class="troubleshoot-card full-width">
+                            <div class="card-header">
+                                <h3>👂 Active Listening Ports & Bound Process Mapping</h3>
+                                <button class="btn btn-sm btn-secondary" id="refresh-ports-btn">🔄 Refresh Ports</button>
+                            </div>
+                            <div class="table-container">
+                                <table class="data-table compact">
+                                    <thead>
+                                        <tr>
+                                            <th>Port</th>
+                                            <th>Protocol</th>
+                                            <th>Bound Address</th>
+                                            <th>PID</th>
+                                            <th>Process Name</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="ports-table-body">
+                                        <tr><td colspan="5" class="text-muted">Click Refresh Ports to scan active listeners.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SUB-TAB 4: BOTTLENECK FINDER -->
+                <div class="sub-tab-content" id="subtab-bottlenecks">
+                    <div class="troubleshoot-grid">
+                        <div class="troubleshoot-card">
+                            <h3>🔥 Top CPU Hogs</h3>
+                            <div id="cpu-hogs-box"></div>
+                        </div>
+                        <div class="troubleshoot-card">
+                            <h3>💾 Top RAM Hogs</h3>
+                            <div id="mem-hogs-box"></div>
+                        </div>
+                        <div class="troubleshoot-card full-width">
+                            <h3>🧟 Stuck & Zombie Process Detector</h3>
+                            <div id="stuck-procs-box"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SUB-TAB 5: TERMINAL & COMMAND RUNNER -->
+                <div class="sub-tab-content" id="subtab-command-runner">
+                    <div class="troubleshoot-card full-width">
+                        <h3>⚡ Diagnostic Shell Command Presets</h3>
+                        <div class="preset-buttons">
+                            <button class="preset-btn" data-cmd="df -h">💾 Storage Usage (df -h)</button>
+                            <button class="preset-btn" data-cmd="free -h">🧠 RAM Usage (free -h)</button>
+                            <button class="preset-btn" data-cmd="ss -tulpn">🌐 Listening Ports (ss -tulpn)</button>
+                            <button class="preset-btn" data-cmd="systemctl --failed">⚙️ Failed Services</button>
+                            <button class="preset-btn" data-cmd="dmesg -T | tail -n 25">🐧 Kernel Dmesg Errors</button>
+                            <button class="preset-btn" data-cmd="uname -a">ℹ️ Kernel Version</button>
+                        </div>
+
+                        <div class="command-runner mt-12">
+                            <input type="text" id="cmd-input" placeholder="Type shell command (e.g. ps aux | head -n 10)..." class="search-input terminal-input">
+                            <button class="btn btn-primary" id="run-cmd">Execute</button>
+                            <button class="btn btn-outline" id="clear-cmd-btn">Clear Terminal</button>
+                        </div>
+                        <div class="terminal-box">
+                            <div class="terminal-header">
+                                <span>Console Output Window</span>
+                                <span class="cmd-status-badge" id="cmd-status-tag">Ready</span>
+                            </div>
+                            <pre id="cmd-output" class="cmd-output">Ready to execute shell diagnostic commands.</pre>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <!-- VMs Tab -->
+            <!-- TAB 4: VMS -->
             <div class="tab-content" id="tab-vms">
                 <div class="vms-header">
-                    <h2>Virtual Machines</h2>
+                    <h2>Virtual Machines (Libvirt / KVM)</h2>
                     <span class="badge" id="vm-count">0 VMs</span>
                 </div>
                 <div id="vm-list">
@@ -216,26 +444,29 @@
                 </div>
             </div>
 
-            <!-- Services Tab -->
+            <!-- TAB 5: SERVICES -->
             <div class="tab-content" id="tab-services">
-                <h2>System Services</h2>
+                <div class="vms-header">
+                    <h2>Systemd Services Management</h2>
+                    <button class="btn btn-secondary" id="refresh-services-btn">🔄 Refresh Services</button>
+                </div>
                 <div class="service-controls">
-                    <input type="text" id="service-search" placeholder="Search services..." class="search-input">
+                    <input type="text" id="service-search" placeholder="🔍 Search service name or description..." class="search-input">
                     <select id="service-filter" class="filter-select">
-                        <option value="all">All</option>
-                        <option value="running">Running</option>
-                        <option value="stopped">Stopped</option>
-                        <option value="failed">Failed</option>
+                        <option value="all">All States</option>
+                        <option value="running">Running / Active</option>
+                        <option value="stopped">Stopped / Inactive</option>
+                        <option value="failed">Failed / Crashed</option>
                     </select>
                 </div>
                 <div class="table-container">
                     <table class="data-table" id="services-table">
                         <thead>
                             <tr>
-                                <th>Name</th>
+                                <th>Service Name</th>
                                 <th>Load</th>
-                                <th>Active</th>
-                                <th>State</th>
+                                <th>Active Status</th>
+                                <th>Sub State</th>
                                 <th>Description</th>
                                 <th>Actions</th>
                             </tr>
@@ -246,25 +477,28 @@
             </div>
         </main>
 
+        <!-- Footer -->
         <footer class="app-footer">
-            <span>Monitoring Dashboard v1.0</span>
+            <span>MonitorX PRO v2.0</span>
+            <span>|</span>
+            <span>WebSocket Live Updates (2s)</span>
             <span>|</span>
             <span>Last Update: <span id="last-update">-</span></span>
         </footer>
     </div>
 
-    <!-- Process Detail Modal -->
+    <!-- Process Detail Inspector Modal -->
     <div class="modal" id="process-modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>Process Details</h3>
+                <h3>🔍 Detailed Process Inspector</h3>
                 <button class="modal-close" id="close-modal">&times;</button>
             </div>
             <div class="modal-body" id="modal-body"></div>
         </div>
     </div>
 
-    <!-- Toast Container -->
+    <!-- Toast Notifications -->
     <div class="toast-container" id="toast-container"></div>
 
     <script src="/static/js/app.js"></script>

@@ -7,14 +7,16 @@ import json
 import logging
 import os
 import platform
+import re
 import socket
 import subprocess
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -38,10 +40,15 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global state
+# Global state tracking for rate calculations
 connected_clients: List[WebSocket] = []
 system_stats_cache: Dict[str, Any] = {}
 stats_lock = asyncio.Lock()
+
+last_net_io = None
+last_net_time = None
+last_disk_io = None
+last_disk_time = None
 
 # Initialize NVML if available
 if NVML_AVAILABLE:
@@ -74,10 +81,13 @@ async def lifespan(app: FastAPI):
     if NVML_AVAILABLE:
         try:
             nvml.nvmlShutdown()
-        except:
+        except Exception:
             pass
     if libvirt_conn:
-        libvirt_conn.close()
+        try:
+            libvirt_conn.close()
+        except Exception:
+            pass
     logger.info("Monitoring Dashboard stopped")
 
 
@@ -86,8 +96,8 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 
 app = FastAPI(
     title="System Monitoring Dashboard",
-    description="Real-time system monitoring dashboard with WebSocket support",
-    version="1.0.0",
+    description="Real-time system monitoring dashboard with WebSocket support and Troubleshoot Suite",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -108,38 +118,24 @@ class SystemStats(BaseModel):
     vms: Optional[List[Dict[str, Any]]] = None
 
 
-class ProcessInfo(BaseModel):
-    pid: int
-    name: str
-    cpu_percent: float
-    memory_percent: float
-    memory_mb: float
-    status: str
-    username: str
-    create_time: str
+class PingRequest(BaseModel):
+    host: str
+    count: Optional[int] = 4
 
 
-class GPUInfo(BaseModel):
-    index: int
-    name: str
-    temperature: int
-    utilization_gpu: int
-    utilization_memory: int
-    memory_used: int
-    memory_total: int
-    memory_free: int
-    power_draw: float
-    power_limit: float
+class PortCheckRequest(BaseModel):
+    host: str
+    port: int
+    timeout: Optional[float] = 3.0
 
 
-class VMInfo(BaseModel):
-    id: int
-    name: str
-    state: str
-    cpu_time: int
-    max_memory: int
-    memory: int
-    vcpus: int
+class DNSCheckRequest(BaseModel):
+    domain: str
+
+
+class RemediateRequest(BaseModel):
+    action: str
+    target: Optional[str] = None
 
 
 class ConnectionManager:
@@ -174,8 +170,8 @@ manager = ConnectionManager()
 
 
 async def get_cpu_stats() -> Dict[str, Any]:
-    """Get CPU statistics"""
-    cpu_percent = psutil.cpu_percent(interval=0.5, percpu=True)
+    """Get CPU statistics without blocking interval"""
+    cpu_percent = psutil.cpu_percent(interval=None, percpu=True)
     cpu_freq = psutil.cpu_freq()
     cpu_count = psutil.cpu_count(logical=True)
     cpu_count_physical = psutil.cpu_count(logical=False)
@@ -184,8 +180,8 @@ async def get_cpu_stats() -> Dict[str, Any]:
     return {
         "percent_per_core": cpu_percent,
         "percent_total": sum(cpu_percent) / len(cpu_percent) if cpu_percent else 0,
-        "count_logical": cpu_count,
-        "count_physical": cpu_count_physical,
+        "count_logical": cpu_count or 1,
+        "count_physical": cpu_count_physical or 1,
         "frequency_current": cpu_freq.current if cpu_freq else 0,
         "frequency_min": cpu_freq.min if cpu_freq else 0,
         "frequency_max": cpu_freq.max if cpu_freq else 0,
@@ -206,6 +202,8 @@ async def get_memory_stats() -> Dict[str, Any]:
         "available": vm.available,
         "used": vm.used,
         "free": vm.free,
+        "buffers": getattr(vm, 'buffers', 0),
+        "cached": getattr(vm, 'cached', 0),
         "percent": vm.percent,
         "swap_total": swap.total,
         "swap_used": swap.used,
@@ -215,13 +213,23 @@ async def get_memory_stats() -> Dict[str, Any]:
 
 
 async def get_disk_stats() -> Dict[str, Any]:
-    """Get disk statistics"""
+    """Get disk statistics and transfer rate"""
+    global last_disk_io, last_disk_time
+    
     partitions = psutil.disk_partitions()
     disks = []
     
     for partition in partitions:
         try:
             usage = psutil.disk_usage(partition.mountpoint)
+            inode_percent = 0.0
+            try:
+                st = os.statvfs(partition.mountpoint)
+                if st.f_files > 0:
+                    inode_percent = round(((st.f_files - st.f_ffree) / st.f_files) * 100, 1)
+            except Exception:
+                pass
+
             disks.append({
                 "device": partition.device,
                 "mountpoint": partition.mountpoint,
@@ -229,27 +237,60 @@ async def get_disk_stats() -> Dict[str, Any]:
                 "total": usage.total,
                 "used": usage.used,
                 "free": usage.free,
-                "percent": (usage.used / usage.total * 100) if usage.total > 0 else 0
+                "percent": (usage.used / usage.total * 100) if usage.total > 0 else 0,
+                "inode_percent": inode_percent
             })
-        except PermissionError:
+        except (PermissionError, FileNotFoundError):
             continue
     
+    now = time.time()
     disk_io = psutil.disk_io_counters()
     
+    read_bytes_sec = 0.0
+    write_bytes_sec = 0.0
+    
+    if disk_io and last_disk_io and last_disk_time:
+        dt = max(now - last_disk_time, 0.1)
+        read_bytes_sec = max(0.0, (disk_io.read_bytes - last_disk_io.read_bytes) / dt)
+        write_bytes_sec = max(0.0, (disk_io.write_bytes - last_disk_io.write_bytes) / dt)
+    
+    last_disk_io = disk_io
+    last_disk_time = now
+
     return {
         "partitions": disks,
         "io_read_bytes": disk_io.read_bytes if disk_io else 0,
         "io_write_bytes": disk_io.write_bytes if disk_io else 0,
         "io_read_count": disk_io.read_count if disk_io else 0,
-        "io_write_count": disk_io.write_count if disk_io else 0
+        "io_write_count": disk_io.write_count if disk_io else 0,
+        "read_bytes_sec": round(read_bytes_sec, 1),
+        "write_bytes_sec": round(write_bytes_sec, 1)
     }
 
 
 async def get_network_stats() -> Dict[str, Any]:
-    """Get network statistics"""
+    """Get network statistics and transfer rates"""
+    global last_net_io, last_net_time
+    
+    now = time.time()
     net_io = psutil.net_io_counters(pernic=True)
     interfaces = {}
     
+    rx_bytes_sec = 0.0
+    tx_bytes_sec = 0.0
+    
+    if net_io and last_net_io and last_net_time:
+        dt = max(now - last_net_time, 0.1)
+        curr_rx = sum(stat.bytes_recv for stat in net_io.values())
+        curr_tx = sum(stat.bytes_sent for stat in net_io.values())
+        prev_rx = sum(stat.bytes_recv for stat in last_net_io.values())
+        prev_tx = sum(stat.bytes_sent for stat in last_net_io.values())
+        rx_bytes_sec = max(0.0, (curr_rx - prev_rx) / dt)
+        tx_bytes_sec = max(0.0, (curr_tx - prev_tx) / dt)
+
+    last_net_io = net_io
+    last_net_time = now
+
     for name, stats in net_io.items():
         interfaces[name] = {
             "bytes_sent": stats.bytes_sent,
@@ -262,12 +303,17 @@ async def get_network_stats() -> Dict[str, Any]:
             "dropout": stats.dropout
         }
     
-    # Get network connections count
-    connections = len(psutil.net_connections())
-    
+    connections_count = 0
+    try:
+        connections_count = len(psutil.net_connections(kind='inet'))
+    except Exception:
+        pass
+
     return {
         "interfaces": interfaces,
-        "connections_count": connections
+        "connections_count": connections_count,
+        "rx_bytes_sec": round(rx_bytes_sec, 1),
+        "tx_bytes_sec": round(tx_bytes_sec, 1)
     }
 
 
@@ -282,42 +328,37 @@ async def get_gpu_stats() -> Optional[List[Dict[str, Any]]]:
         for i in range(device_count):
             handle = nvml.nvmlDeviceGetHandleByIndex(i)
             
-            # Get GPU info
             name = nvml.nvmlDeviceGetName(handle)
             if isinstance(name, bytes):
                 name = name.decode('utf-8')
             
-            # Temperature
             try:
                 temp = nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU)
-            except:
+            except Exception:
                 temp = 0
             
-            # Utilization
             try:
                 util = nvml.nvmlDeviceGetUtilizationRates(handle)
                 gpu_util = util.gpu
                 mem_util = util.memory
-            except:
+            except Exception:
                 gpu_util = 0
                 mem_util = 0
             
-            # Memory
             try:
                 mem = nvml.nvmlDeviceGetMemoryInfo(handle)
                 mem_used = mem.used
                 mem_total = mem.total
                 mem_free = mem.free
-            except:
+            except Exception:
                 mem_used = mem_total = mem_free = 0
             
-            # Power
             try:
-                power_draw = nvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW to W
+                power_draw = nvml.nvmlDeviceGetPowerUsage(handle) / 1000.0
                 power_limit = nvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)[1] / 1000.0
-            except:
-                power_draw = 0
-                power_limit = 0
+            except Exception:
+                power_draw = 0.0
+                power_limit = 0.0
             
             gpus.append({
                 "index": i,
@@ -328,8 +369,8 @@ async def get_gpu_stats() -> Optional[List[Dict[str, Any]]]:
                 "memory_used": mem_used,
                 "memory_total": mem_total,
                 "memory_free": mem_free,
-                "power_draw": power_draw,
-                "power_limit": power_limit
+                "power_draw": round(power_draw, 1),
+                "power_limit": round(power_limit, 1)
             })
     except Exception as e:
         logger.error(f"Error getting GPU stats: {e}")
@@ -338,28 +379,27 @@ async def get_gpu_stats() -> Optional[List[Dict[str, Any]]]:
     return gpus if gpus else None
 
 
-async def get_process_stats(limit: int = 20) -> List[Dict[str, Any]]:
-    """Get top processes by CPU usage"""
+async def get_process_stats(limit: int = 30) -> List[Dict[str, Any]]:
+    """Get processes sorted by resource usage"""
     processes = []
     
-    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'memory_info', 'status', 'username', 'create_time']):
+    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'memory_info', 'status', 'username', 'create_time', 'num_threads']):
         try:
             info = proc.info
-            if info['cpu_percent'] is not None and info['cpu_percent'] > 0:
-                processes.append({
-                    "pid": info['pid'],
-                    "name": info['name'][:50] if info['name'] else "unknown",
-                    "cpu_percent": round(info['cpu_percent'], 1),
-                    "memory_percent": round(info['memory_percent'], 1) if info['memory_percent'] else 0,
-                    "memory_mb": round(info['memory_info'].rss / 1024 / 1024, 1) if info['memory_info'] else 0,
-                    "status": info['status'],
-                    "username": info['username'] or "unknown",
-                    "create_time": datetime.fromtimestamp(info['create_time']).strftime('%Y-%m-%d %H:%M:%S') if info['create_time'] else "unknown"
-                })
+            processes.append({
+                "pid": info['pid'],
+                "name": info['name'][:50] if info['name'] else "unknown",
+                "cpu_percent": round(info['cpu_percent'] or 0.0, 1),
+                "memory_percent": round(info['memory_percent'] or 0.0, 1),
+                "memory_mb": round((info['memory_info'].rss / 1024 / 1024) if info['memory_info'] else 0.0, 1),
+                "status": info['status'] or "unknown",
+                "username": info['username'] or "unknown",
+                "threads": info['num_threads'] or 1,
+                "create_time": datetime.fromtimestamp(info['create_time']).strftime('%Y-%m-%d %H:%M:%S') if info['create_time'] else "unknown"
+            })
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
     
-    # Sort by CPU usage and limit
     processes.sort(key=lambda x: x['cpu_percent'], reverse=True)
     return processes[:limit]
 
@@ -409,9 +449,9 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
                 "id": domain_id,
                 "name": domain.name(),
                 "state": state_map.get(info[0], "unknown"),
-                "cpu_time": info[2],  # CPU time in nanoseconds
-                "max_memory": info[1],  # Max memory in KB
-                "memory": info[2],  # Current memory in KB
+                "cpu_time": info[2],
+                "max_memory": info[1],
+                "memory": info[2],
                 "vcpus": info[3]
             })
     except Exception as e:
@@ -453,7 +493,7 @@ async def broadcast_stats():
             await manager.broadcast(stats.model_dump())
         except Exception as e:
             logger.error(f"Error broadcasting stats: {e}")
-        await asyncio.sleep(2)  # Update every 2 seconds
+        await asyncio.sleep(2)
 
 
 # REST API Endpoints
@@ -466,7 +506,6 @@ async def root():
 
 @app.get("/api/stats", response_model=SystemStats)
 async def get_stats():
-    """Get current system statistics via REST API"""
     return await collect_all_stats()
 
 
@@ -499,7 +538,7 @@ async def get_gpu():
 
 
 @app.get("/api/stats/processes")
-async def get_processes(limit: int = 20):
+async def get_processes(limit: int = 30):
     return await get_process_stats(limit)
 
 
@@ -517,7 +556,7 @@ async def get_vms():
 
 
 @app.get("/api/health")
-async def health_check():
+async def health_check_endpoint():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -531,14 +570,11 @@ async def health_check():
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        # Send initial stats immediately
         stats = await collect_all_stats()
         await websocket.send_json(stats.model_dump())
         
-        # Keep connection alive
         while True:
             data = await websocket.receive_text()
-            # Handle any client messages if needed
             if data == "ping":
                 await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
     except WebSocketDisconnect:
@@ -557,19 +593,19 @@ async def get_process_detail(pid: int):
         return {
             "pid": proc.pid,
             "name": proc.name(),
-            "exe": proc.exe(),
-            "cmdline": proc.cmdline(),
+            "exe": proc.exe() if hasattr(proc, 'exe') else "",
+            "cmdline": proc.cmdline() if hasattr(proc, 'cmdline') else [],
             "status": proc.status(),
-            "username": proc.username(),
+            "username": proc.username() if hasattr(proc, 'username') else "unknown",
             "create_time": datetime.fromtimestamp(proc.create_time()).isoformat(),
-            "cpu_percent": proc.cpu_percent(interval=0.5),
-            "memory_percent": proc.memory_percent(),
-            "memory_info": dict(proc.memory_info()._asdict()),
-            "num_threads": proc.num_threads(),
+            "cpu_percent": proc.cpu_percent(interval=0.1),
+            "memory_percent": round(proc.memory_percent(), 2),
+            "memory_info": dict(proc.memory_info()._asdict()) if hasattr(proc, 'memory_info') else {},
+            "num_threads": proc.num_threads() if hasattr(proc, 'num_threads') else 1,
             "num_fds": proc.num_fds() if hasattr(proc, 'num_fds') else 0,
             "connections": [conn._asdict() for conn in proc.connections()] if hasattr(proc, 'connections') else [],
-            "open_files": [f._asdict() for f in proc.open_files()] if proc.open_files() else [],
-            "environ": proc.environ() if hasattr(proc, 'environ') else {}
+            "open_files": [f._asdict() for f in proc.open_files()] if hasattr(proc, 'open_files') and proc.open_files() else [],
+            "environ": dict(list(proc.environ().items())[:20]) if hasattr(proc, 'environ') and proc.environ() else {}
         }
     except psutil.NoSuchProcess:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -596,7 +632,6 @@ async def kill_process(pid: int, signal: int = 15):
 # System control endpoints
 @app.post("/api/system/reboot")
 async def reboot_system():
-    """Reboot the system (requires root)"""
     try:
         await asyncio.create_subprocess_exec("systemctl", "reboot")
         return {"success": True, "message": "Reboot initiated"}
@@ -606,7 +641,6 @@ async def reboot_system():
 
 @app.post("/api/system/shutdown")
 async def shutdown_system():
-    """Shutdown the system (requires root)"""
     try:
         await asyncio.create_subprocess_exec("systemctl", "poweroff")
         return {"success": True, "message": "Shutdown initiated"}
@@ -619,7 +653,7 @@ async def list_services():
     """List systemd services"""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "systemctl", "list-units", "--type=service", "--no-pager", "--no-legend",
+            "systemctl", "list-units", "--type=service", "--no-pager", "--no-legend", "--all",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -643,7 +677,6 @@ async def list_services():
 
 @app.post("/api/services/{service_name}/{action}")
 async def control_service(service_name: str, action: str):
-    """Control a systemd service (start/stop/restart/status)"""
     valid_actions = ["start", "stop", "restart", "reload", "enable", "disable"]
     if action not in valid_actions:
         raise HTTPException(status_code=400, detail=f"Invalid action. Valid: {valid_actions}")
@@ -656,113 +689,730 @@ async def control_service(service_name: str, action: str):
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
-            raise HTTPException(status_code=500, detail=stderr.decode())
+            raise HTTPException(status_code=500, detail=stderr.decode() or f"Failed to {action} {service_name}")
         return {"success": True, "message": f"Service {service_name} {action}ed"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/system/net-diag")
-async def net_diagnostics():
-    """Run network diagnostics"""
-    results = {}
+# ==============================================================================
+# ENHANCED TROUBLESHOOT MODE APIS
+# ==============================================================================
+
+@app.get("/api/troubleshoot/health-check")
+async def troubleshoot_health_check():
+    """
+    Comprehensive automated system health diagnostic scanner.
+    Evaluates CPU, Load, RAM, Swap, Disk Space, Inodes, Services, Zombies,
+    Kernel Logs, Network, and File Descriptors.
+    Calculates overall Health Score (0-100) and actionable remediation advice.
+    """
+    checks = []
+    health_score = 100
     
-    # Check network interfaces
+    # 1. CPU & Load Average
+    cpu = await get_cpu_stats()
+    cores = cpu["count_logical"]
+    load1 = cpu["load_1min"]
+    cpu_pct = cpu["percent_total"]
+    
+    if cpu_pct > 85.0 or load1 > (cores * 2.0):
+        health_score -= 20
+        checks.append({
+            "id": "cpu_load",
+            "category": "CPU & Load",
+            "name": "CPU & Load Spikes",
+            "status": "critical",
+            "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
+            "message": f"CPU usage is critical ({cpu_pct:.1f}%) or 1m load ({load1}) exceeds core count by >2x.",
+            "remediation": "Identify and terminate runaway process from Bottlenecks view.",
+            "action": "view_bottlenecks"
+        })
+    elif cpu_pct > 70.0 or load1 > cores:
+        health_score -= 8
+        checks.append({
+            "id": "cpu_load",
+            "category": "CPU & Load",
+            "name": "CPU & Load Spikes",
+            "status": "warning",
+            "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
+            "message": f"CPU load elevated ({cpu_pct:.1f}%). System may experience latency.",
+            "remediation": "Monitor active processes for unexpected threads.",
+            "action": None
+        })
+    else:
+        checks.append({
+            "id": "cpu_load",
+            "category": "CPU & Load",
+            "name": "CPU & Load Spikes",
+            "status": "ok",
+            "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
+            "message": "CPU load and utilization are within normal parameters.",
+            "remediation": None,
+            "action": None
+        })
+
+    # 2. Memory & Swap
+    mem = await get_memory_stats()
+    mem_pct = mem["percent"]
+    swap_pct = mem["swap_percent"]
+    avail_mb = mem["available"] / 1024 / 1024
+    
+    if mem_pct > 90.0 or avail_mb < 500:
+        health_score -= 20
+        checks.append({
+            "id": "memory_swap",
+            "category": "Memory",
+            "name": "RAM & Swap Exhaustion",
+            "status": "critical",
+            "value": f"{mem_pct}% RAM used ({avail_mb:.0f} MB free), {swap_pct}% Swap",
+            "message": f"Memory critically low! Risk of OOM (Out Of Memory) process kills.",
+            "remediation": "Clear page cache or restart high memory consumers.",
+            "action": "clear_pagecache"
+        })
+    elif mem_pct > 80.0 or swap_pct > 50.0:
+        health_score -= 8
+        checks.append({
+            "id": "memory_swap",
+            "category": "Memory",
+            "name": "RAM & Swap Exhaustion",
+            "status": "warning",
+            "value": f"{mem_pct}% RAM used, {swap_pct}% Swap used",
+            "message": "Memory or swap usage is elevated.",
+            "remediation": "Consider dropping page caches or expanding swap space.",
+            "action": "clear_pagecache"
+        })
+    else:
+        checks.append({
+            "id": "memory_swap",
+            "category": "Memory",
+            "name": "RAM & Swap Exhaustion",
+            "status": "ok",
+            "value": f"{mem_pct}% RAM used, {swap_pct}% Swap used ({avail_mb:.0f} MB available)",
+            "message": "System memory and swap levels are healthy.",
+            "remediation": None,
+            "action": None
+        })
+
+    # 3. Disk Space & Inodes
+    disk = await get_disk_stats()
+    disk_critical = False
+    disk_warning = False
+    disk_details = []
+    
+    for p in disk["partitions"]:
+        if p["percent"] > 90.0 or p["inode_percent"] > 90.0:
+            disk_critical = True
+            disk_details.append(f"{p['mountpoint']} ({p['percent']:.1f}% space, {p['inode_percent']}% inodes)")
+        elif p["percent"] > 80.0 or p["inode_percent"] > 80.0:
+            disk_warning = True
+            disk_details.append(f"{p['mountpoint']} ({p['percent']:.1f}% space)")
+
+    if disk_critical:
+        health_score -= 20
+        checks.append({
+            "id": "disk_inodes",
+            "category": "Storage",
+            "name": "Disk Space & Inodes",
+            "status": "critical",
+            "value": ", ".join(disk_details) or "High usage",
+            "message": "Disk space or inodes nearly full on partition(s)!",
+            "remediation": "Vacuum systemd journal or clean temp files.",
+            "action": "vacuum_journal"
+        })
+    elif disk_warning:
+        health_score -= 8
+        checks.append({
+            "id": "disk_inodes",
+            "category": "Storage",
+            "name": "Disk Space & Inodes",
+            "status": "warning",
+            "value": ", ".join(disk_details),
+            "message": "Disk usage high (>80%) on partition(s).",
+            "remediation": "Vacuum journal files or archive old log files.",
+            "action": "vacuum_journal"
+        })
+    else:
+        checks.append({
+            "id": "disk_inodes",
+            "category": "Storage",
+            "name": "Disk Space & Inodes",
+            "status": "ok",
+            "value": f"All {len(disk['partitions'])} partition(s) healthy",
+            "message": "Sufficient storage and inode availability.",
+            "remediation": None,
+            "action": None
+        })
+
+    # 4. Systemd Failed Services
+    failed_services = []
     try:
-        addrs = psutil.net_if_addrs()
-        results["interfaces"] = {}
-        for iface, addr_list in addrs.items():
-            results["interfaces"][iface] = [
-                {"family": str(a.family), "address": a.address, "netmask": a.netmask}
-                for a in addr_list
-            ]
-    except Exception as e:
-        results["interfaces_error"] = str(e)
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "list-units", "--state=failed", "--no-pager", "--no-legend",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        lines = stdout.decode().strip().split('\n')
+        for line in lines:
+            if line.strip():
+                failed_services.append(line.split()[0])
+    except Exception:
+        pass
+
+    if failed_services:
+        health_score -= 15 * len(failed_services)
+        checks.append({
+            "id": "systemd_services",
+            "category": "Services",
+            "name": "Systemd Service Health",
+            "status": "critical" if len(failed_services) > 1 else "warning",
+            "value": f"{len(failed_services)} failed unit(s): {', '.join(failed_services[:3])}",
+            "message": f"Found failed systemd service(s): {', '.join(failed_services)}",
+            "remediation": "Try restarting failed services.",
+            "action": "restart_failed_services"
+        })
+    else:
+        checks.append({
+            "id": "systemd_services",
+            "category": "Services",
+            "name": "Systemd Service Health",
+            "status": "ok",
+            "value": "0 failed services",
+            "message": "All systemd units are operating normally.",
+            "remediation": None,
+            "action": None
+        })
+
+    # 5. Zombie & Disk-Sleep (D State) Processes
+    all_procs = await get_process_stats(limit=200)
+    zombies = [p for p in all_procs if p["status"] == "zombie"]
+    d_states = [p for p in all_procs if p["status"] == "uninterruptible sleep" or p["status"] == "stopped"]
     
-    # Check network connections summary
+    if zombies or d_states:
+        health_score -= 10
+        msg_parts = []
+        if zombies: msg_parts.append(f"{len(zombies)} zombie process(es)")
+        if d_states: msg_parts.append(f"{len(d_states)} hung/stopped process(es)")
+        checks.append({
+            "id": "zombie_hung",
+            "category": "Processes",
+            "name": "Zombie & Hung Processes",
+            "status": "warning",
+            "value": ", ".join(msg_parts),
+            "message": f"Detected stuck process states: {', '.join(msg_parts)}.",
+            "remediation": "Inspect processes in Process Manager.",
+            "action": "view_processes"
+        })
+    else:
+        checks.append({
+            "id": "zombie_hung",
+            "category": "Processes",
+            "name": "Zombie & Hung Processes",
+            "status": "ok",
+            "value": "0 zombies or hung processes",
+            "message": "No defunct or uninterruptible sleep processes found.",
+            "remediation": None,
+            "action": None
+        })
+
+    # 6. Kernel & Log Errors (dmesg / journalctl)
+    kernel_errors = []
     try:
-        connections = psutil.net_connections(kind='inet')
-        results["total_connections"] = len(connections)
-        tcp_states = {}
-        for conn in connections:
-            state = conn.status
-            tcp_states[state] = tcp_states.get(state, 0) + 1
-        results["tcp_states"] = tcp_states
-    except Exception as e:
-        results["connections_error"] = str(e)
-    
-    # Check DNS resolution
+        proc = await asyncio.create_subprocess_exec(
+            "dmesg", "-T",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        out = stdout.decode().strip()
+        if out:
+            lines = [l for l in out.split('\n') if l.strip()]
+            for l in lines[-100:]:
+                if re.search(r'oom-killer|out of memory|panic|error|failed|corruption', l, re.I):
+                    kernel_errors.append(l[:120])
+    except Exception:
+        pass
+
+    if kernel_errors:
+        health_score -= 12
+        checks.append({
+            "id": "kernel_logs",
+            "category": "Kernel & Logs",
+            "name": "Critical System Errors",
+            "status": "warning",
+            "value": f"{len(kernel_errors)} recent error entries in kernel buffer",
+            "message": f"Recent critical error in dmesg: {kernel_errors[0]}",
+            "remediation": "Inspect full system logs in Log Inspector.",
+            "action": "view_logs"
+        })
+    else:
+        checks.append({
+            "id": "kernel_logs",
+            "category": "Kernel & Logs",
+            "name": "Critical System Errors",
+            "status": "ok",
+            "value": "Clean recent kernel logs",
+            "message": "No OOM-killer or kernel panic logs found recently.",
+            "remediation": None,
+            "action": None
+        })
+
+    # 7. Network & DNS Connectivity
+    dns_ok = False
+    ping_ok = False
     try:
-        import socket as sock
-        results["dns_google"] = sock.gethostbyname("google.com") != ""
-    except:
-        results["dns_google"] = False
-    
-    # Ping test
+        socket.gethostbyname("dns.google")
+        dns_ok = True
+    except Exception:
+        pass
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "ping", "-c", "1", "-W", "2", "8.8.8.8",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await proc.communicate()
-        results["ping_google_dns"] = proc.returncode == 0
-    except:
-        results["ping_google_dns"] = False
+        await proc.communicate()
+        ping_ok = (proc.returncode == 0)
+    except Exception:
+        pass
+
+    if not ping_ok or not dns_ok:
+        health_score -= 15
+        checks.append({
+            "id": "net_connectivity",
+            "category": "Network",
+            "name": "Network & DNS Connectivity",
+            "status": "warning",
+            "value": f"Ping: {'OK' if ping_ok else 'FAIL'}, DNS: {'OK' if dns_ok else 'FAIL'}",
+            "message": "Network ping test or DNS resolution failed.",
+            "remediation": "Run network diagnostic tests.",
+            "action": "run_net_diag"
+        })
+    else:
+        checks.append({
+            "id": "net_connectivity",
+            "category": "Network",
+            "name": "Network & DNS Connectivity",
+            "status": "ok",
+            "value": "Outbound Internet & DNS operational",
+            "message": "Outbound networking and DNS resolution function correctly.",
+            "remediation": None,
+            "action": None
+        })
+
+    health_score = max(0, min(100, health_score))
     
-    return results
+    status_summary = {
+        "critical": sum(1 for c in checks if c["status"] == "critical"),
+        "warning": sum(1 for c in checks if c["status"] == "warning"),
+        "ok": sum(1 for c in checks if c["status"] == "ok")
+    }
+
+    return {
+        "health_score": health_score,
+        "summary": status_summary,
+        "timestamp": datetime.now().isoformat(),
+        "checks": checks
+    }
 
 
-@app.get("/api/system/logs")
-async def system_logs(lines: int = 50):
-    """Get recent system logs"""
+@app.get("/api/troubleshoot/logs")
+async def troubleshoot_logs(
+    lines: int = Query(100, ge=1, le=1000),
+    level: str = Query("all"),
+    service: str = Query(""),
+    search: str = Query("")
+):
+    """
+    Enhanced log inspector with level filtering, unit selection, and keyword search.
+    Fallback to dmesg if journalctl lacks permissions.
+    """
+    raw_logs = []
+    
+    cmd = ["journalctl", "-n", str(lines), "--no-pager"]
+    if level == "error":
+        cmd.extend(["-p", "3"])
+    elif level == "warning":
+        cmd.extend(["-p", "4"])
+    elif level == "info":
+        cmd.extend(["-p", "6"])
+    if service:
+        cmd.extend(["-u", service])
+
     try:
         proc = await asyncio.create_subprocess_exec(
-            "journalctl", "-n", str(lines), "--no-pager",
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await proc.communicate()
-        output = stdout.decode().strip()
+        stdout, _ = await proc.communicate()
+        out_str = stdout.decode().strip()
         
-        if not output:
-            # Fallback to /var/log/syslog
+        if "No journal files were opened due to insufficient permissions" in out_str or not out_str:
             try:
-                with open("/var/log/syslog", "r") as f:
-                    all_lines = f.readlines()
-                    output = "".join(all_lines[-lines:])
-            except FileNotFoundError:
-                # Fallback to dmesg
-                proc2 = await asyncio.create_subprocess_exec(
-                    "dmesg", "-n", str(lines),
+                dmesg_proc = await asyncio.create_subprocess_exec(
+                    "dmesg", "-T",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                stdout2, stderr2 = await proc2.communicate()
-                output = stdout2.decode().strip()
+                d_out, _ = await dmesg_proc.communicate()
+                d_lines = [l for l in d_out.decode().strip().split('\n') if l.strip()]
+                raw_logs = d_lines[-lines:] if d_lines else []
+            except Exception:
+                raw_logs = [out_str or "Unable to read system logs due to permissions"]
+        else:
+            raw_logs = [l for l in out_str.split('\n') if not l.startswith("Hint:")]
+
+        parsed_logs = []
+        search_lower = search.lower()
         
-        return {"logs": output.split('\n') if output else []}
+        for line in raw_logs:
+            if not line:
+                continue
+            if search_lower and search_lower not in line.lower():
+                continue
+            
+            log_level = "info"
+            if re.search(r'error|fail|critical|panic|fatal|oom|corrupt', line, re.I):
+                log_level = "error"
+            elif re.search(r'warn|alert|denied|timeout|retry', line, re.I):
+                log_level = "warning"
+
+            if level == "all" or level == log_level:
+                parsed_logs.append({
+                    "text": line,
+                    "level": log_level
+                })
+
+        return {
+            "total": len(parsed_logs),
+            "lines": lines,
+            "level": level,
+            "service": service,
+            "logs": parsed_logs
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/troubleshoot/ping")
+async def troubleshoot_ping(req: PingRequest):
+    """Run ICMP ping test against specified host"""
+    host = req.host.strip()
+    if not re.match(r'^[a-zA-Z0-9.-]+$', host):
+        raise HTTPException(status_code=400, detail="Invalid hostname or IP address format")
+    
+    count = min(max(1, req.count or 4), 10)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", str(count), "-W", "3", host,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        out = stdout.decode()
+        
+        loss_match = re.search(r'(\d+)% packet loss', out)
+        rtt_match = re.search(r'(rtt|round-trip) min/avg/max/(mdev|stddev) = ([\d.]+)/([\d.]+)/([\d.]+)', out)
+        
+        return {
+            "success": proc.returncode == 0,
+            "host": host,
+            "raw_output": out or stderr.decode(),
+            "packet_loss_percent": float(loss_match.group(1)) if loss_match else (0.0 if proc.returncode == 0 else 100.0),
+            "min_rtt": float(rtt_match.group(3)) if rtt_match else None,
+            "avg_rtt": float(rtt_match.group(4)) if rtt_match else None,
+            "max_rtt": float(rtt_match.group(5)) if rtt_match else None
+        }
+    except Exception as e:
+        return {"success": False, "host": host, "error": str(e)}
+
+
+@app.post("/api/troubleshoot/port-check")
+async def troubleshoot_port_check(req: PortCheckRequest):
+    """Test TCP port connectivity"""
+    host = req.host.strip()
+    port = req.port
+    if not re.match(r'^[a-zA-Z0-9.-]+$', host) or not (1 <= port <= 65535):
+        raise HTTPException(status_code=400, detail="Invalid host or port range")
+    
+    timeout = req.timeout or 3.0
+    start_time = time.time()
+    try:
+        conn = asyncio.open_connection(host, port)
+        _, writer = await asyncio.wait_for(conn, timeout=timeout)
+        latency_ms = round((time.time() - start_time) * 1000, 2)
+        writer.close()
+        await writer.wait_closed()
+        return {
+            "host": host,
+            "port": port,
+            "open": True,
+            "latency_ms": latency_ms,
+            "message": f"Port {port} on {host} is OPEN ({latency_ms} ms)"
+        }
+    except asyncio.TimeoutError:
+        return {
+            "host": host,
+            "port": port,
+            "open": False,
+            "latency_ms": None,
+            "message": f"Connection to {host}:{port} timed out after {timeout}s"
+        }
+    except Exception as e:
+        return {
+            "host": host,
+            "port": port,
+            "open": False,
+            "latency_ms": None,
+            "message": f"Closed / unreachable: {str(e)}"
+        }
+
+
+@app.post("/api/troubleshoot/dns-lookup")
+async def troubleshoot_dns_lookup(req: DNSCheckRequest):
+    """Test DNS resolution across local resolver and Google Public DNS"""
+    domain = req.domain.strip()
+    if not re.match(r'^[a-zA-Z0-9.-]+$', domain):
+        raise HTTPException(status_code=400, detail="Invalid domain name format")
+    
+    results = {}
+    
+    # Local resolution
+    start_time = time.time()
+    try:
+        loop = asyncio.get_event_loop()
+        addrs = await loop.getaddrinfo(domain, None)
+        ips = list(set([a[4][0] for a in addrs]))
+        latency_ms = round((time.time() - start_time) * 1000, 2)
+        results["local"] = {"success": True, "ips": ips, "latency_ms": latency_ms}
+    except Exception as e:
+        results["local"] = {"success": False, "error": str(e)}
+
+    # Google DNS
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "dig", "+short", "+time=2", "@8.8.8.8", domain,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        out = stdout.decode().strip()
+        if out:
+            results["google_dns"] = {"success": True, "ips": [line.strip() for line in out.split('\n') if line.strip()]}
+        else:
+            results["google_dns"] = {"success": False, "error": "No response"}
+    except Exception:
+        results["google_dns"] = {"success": False, "error": "dig tool unavailable"}
+
+    return {"domain": domain, "resolutions": results}
+
+
+@app.get("/api/troubleshoot/network-ports")
+async def troubleshoot_network_ports():
+    """List active listening ports with bound address and process mapping"""
+    ports = []
+    
+    try:
+        connections = psutil.net_connections(kind='inet')
+        for conn in connections:
+            if conn.status == 'LISTEN':
+                ip, port = conn.laddr
+                pid = conn.pid
+                proc_name = "unknown"
+                if pid:
+                    try:
+                        proc_name = psutil.Process(pid).name()
+                    except Exception:
+                        pass
+                ports.append({
+                    "port": port,
+                    "protocol": "TCP" if conn.type == socket.SOCK_STREAM else "UDP",
+                    "ip": ip,
+                    "pid": pid,
+                    "process": proc_name
+                })
+    except Exception:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ss", "-tulpn",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+            lines = stdout.decode().strip().split('\n')
+            for line in lines[1:]:
+                parts = line.split()
+                if len(parts) >= 5:
+                    proto = parts[0].upper()
+                    laddr = parts[4]
+                    ip = laddr.rsplit(':', 1)[0] if ':' in laddr else '*'
+                    port_str = laddr.rsplit(':', 1)[1] if ':' in laddr else ''
+                    if port_str.isdigit():
+                        p_name = ""
+                        p_id = None
+                        if len(parts) >= 7 and 'users:' in parts[6]:
+                            match = re.search(r'\(\("([^"]+)",pid=(\d+)', parts[6])
+                            if match:
+                                p_name = match.group(1)
+                                p_id = int(match.group(2))
+                        ports.append({
+                            "port": int(port_str),
+                            "protocol": proto,
+                            "ip": ip,
+                            "pid": p_id,
+                            "process": p_name or "unknown"
+                        })
+        except Exception as e:
+            logger.error(f"Error getting listening ports: {e}")
+            
+    ports.sort(key=lambda x: x["port"])
+    return ports
+
+
+@app.get("/api/troubleshoot/bottlenecks")
+async def troubleshoot_bottlenecks():
+    """
+    Identifies top CPU, Memory, and Thread resource bottlenecks
+    along with stuck processes.
+    """
+    procs = []
+    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'memory_info', 'status', 'num_threads', 'username']):
+        try:
+            info = proc.info
+            procs.append({
+                "pid": info['pid'],
+                "name": info['name'] or "unknown",
+                "cpu_percent": round(info['cpu_percent'] or 0.0, 1),
+                "memory_percent": round(info['memory_percent'] or 0.0, 1),
+                "memory_mb": round((info['memory_info'].rss / 1024 / 1024) if info['memory_info'] else 0.0, 1),
+                "status": info['status'] or "unknown",
+                "threads": info['num_threads'] or 1,
+                "username": info['username'] or "unknown"
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    cpu_hogs = sorted(procs, key=lambda x: x['cpu_percent'], reverse=True)[:5]
+    mem_hogs = sorted(procs, key=lambda x: x['memory_mb'], reverse=True)[:5]
+    thread_hogs = sorted(procs, key=lambda x: x['threads'], reverse=True)[:5]
+    zombie_list = [p for p in procs if p['status'] in ('zombie', 'stopped', 'uninterruptible sleep')]
+
+    return {
+        "cpu_hogs": cpu_hogs,
+        "memory_hogs": mem_hogs,
+        "thread_hogs": thread_hogs,
+        "stuck_processes": zombie_list
+    }
+
+
+@app.post("/api/troubleshoot/remediate")
+async def perform_remediation(req: RemediateRequest):
+    """
+    Executes automated safe fix and remediation actions.
+    """
+    action = req.action
+    target = req.target
+
+    if action == "clear_pagecache":
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "sysctl", "-w", "vm.drop_caches=3",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                return {"success": True, "message": "RAM page cache cleared successfully!"}
+            else:
+                return {"success": False, "message": f"Sudo permissions required: {stderr.decode().strip() or 'Access denied'}"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    elif action == "restart_failed_services":
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl", "list-units", "--state=failed", "--no-pager", "--no-legend",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+            failed_units = [line.split()[0] for line in stdout.decode().strip().split('\n') if line.strip()]
+
+            if not failed_units:
+                return {"success": True, "message": "No failed services to restart."}
+
+            restarted = []
+            failed_restarts = []
+            for unit in failed_units:
+                p = await asyncio.create_subprocess_exec(
+                    "systemctl", "restart", unit,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await p.communicate()
+                if p.returncode == 0:
+                    restarted.append(unit)
+                else:
+                    failed_restarts.append(unit)
+
+            return {
+                "success": True,
+                "message": f"Attempted restart of {len(failed_units)} unit(s). Success: {len(restarted)}",
+                "restarted": restarted,
+                "failed": failed_restarts
+            }
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    elif action == "vacuum_journal":
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "journalctl", "--vacuum-time=2d",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            return {"success": proc.returncode == 0, "message": stdout.decode().strip() or stderr.decode().strip()}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    elif action == "kill_process":
+        if not target or not target.isdigit():
+            raise HTTPException(status_code=400, detail="Target PID required")
+        pid = int(target)
+        try:
+            proc = psutil.Process(pid)
+            pname = proc.name()
+            proc.kill()
+            return {"success": True, "message": f"Terminated process {pid} ({pname})"}
+        except psutil.NoSuchProcess:
+            return {"success": False, "message": f"Process {pid} no longer active"}
+        except psutil.AccessDenied:
+            return {"success": False, "message": f"Permission denied to terminate PID {pid}"}
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported remediation action: {action}")
+
+
 @app.post("/api/commands/run")
 async def run_command(request: Request):
-    """Run a shell command (dangerous - should be protected in production)"""
+    """Run a shell command safely"""
     try:
         body = await request.json()
         cmd = body.get("command", "")
-    except:
-        raise HTTPException(status_code=400, detail="Invalid request body")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     
     if not cmd:
         raise HTTPException(status_code=400, detail="No command provided")
     
-    # Block dangerous commands
     dangerous = ["rm -rf /", "mkfs", "dd if=", "shutdown", "reboot", "halt", "poweroff"]
     for d in dangerous:
         if d in cmd.lower():
-            raise HTTPException(status_code=403, detail=f"Blocked dangerous command: {d}")
+            raise HTTPException(status_code=403, detail=f"Blocked dangerous command pattern: {d}")
     
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -779,7 +1429,7 @@ async def run_command(request: Request):
             "returncode": proc.returncode
         }
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=500, detail="Command timed out")
+        raise HTTPException(status_code=500, detail="Command execution timed out (30s)")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
