@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="/static/css/nasa-theme.css">
     <link rel="stylesheet" href="/static/css/nexus-hud.css">
     <link rel="stylesheet" href="/static/css/dashboard-refresh.css">
+    <link rel="stylesheet" href="/static/css/fix-engine.css?v=20260805">
     <!-- xterm.js for VM Console -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
@@ -381,6 +382,31 @@
 
                 <!-- SUB-TAB 1: HEALTH SCAN & FIX HUB -->
                 <div class="sub-tab-content active" id="subtab-health-hub">
+                    <!-- Auto-Fix Engine: builds a repair plan from every scan -->
+                    <div class="fix-engine" id="fix-engine">
+                        <div class="fix-engine-head">
+                            <div class="fix-engine-title">
+                                <h3>🛠️ Auto-Fix Engine</h3>
+                                <p id="fix-engine-sub">Run a diagnostic scan to build an automatic repair plan for every issue it finds.</p>
+                            </div>
+                            <div class="fix-engine-actions">
+                                <span class="fix-summary-badge warn" id="fix-summary-badge">0 fixes available</span>
+                                <button class="btn btn-sm btn-outline" id="fix-review-btn" disabled title="Review and customize the repair plan before applying">📋 Review Fix Plan</button>
+                                <button class="btn btn-primary glow-btn" id="fix-all-btn" disabled>⚡ Fix All Issues (0)</button>
+                            </div>
+                        </div>
+                        <div class="fix-run-area" id="fix-run-area" hidden></div>
+                        <div class="fix-history-card">
+                            <div class="card-header">
+                                <h4>🕓 Remediation History</h4>
+                                <button class="btn btn-sm btn-outline" id="fix-history-refresh" title="Refresh remediation history">↻ Refresh</button>
+                            </div>
+                            <div id="fix-history-list">
+                                <p class="no-data">No automated fixes executed yet. Fixes run here are recorded automatically.</p>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="checks-grid" id="checks-grid-container">
                         <p class="loading-text">Click "Run Diagnostic Scan" to perform automated checks.</p>
                     </div>
@@ -824,6 +850,24 @@
                         <button class="btn btn-outline" id="webhook-save-btn">Save</button>
                         <button class="btn btn-sm btn-outline" id="webhook-test-btn">Send test</button>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Fix Plan Review Modal (Auto-Fix Engine) -->
+    <div class="modal" id="fix-plan-modal">
+        <div class="modal-content" style="max-width: 760px;">
+            <div class="modal-header">
+                <h3>📋 Fix Plan Review</h3>
+                <button class="modal-close" id="fix-plan-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="fix-plan-note">These are the repairs the scanner recommends. Uncheck anything you don't want to apply — the rest will run in sequence, and every result is recorded in Remediation History.</p>
+                <div id="fix-plan-list"><p class="no-data">Building plan…</p></div>
+                <div class="fix-plan-actions">
+                    <button class="btn btn-outline" id="fix-plan-cancel">Cancel</button>
+                    <button class="btn btn-primary" id="fix-plan-apply">⚡ Apply Selected Fixes</button>
                 </div>
             </div>
         </div>

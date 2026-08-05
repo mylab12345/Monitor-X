@@ -183,3 +183,46 @@ If you want **patch files** (diff format) to review first, say "generate diffs".
 - [ ] Process audit log endpoint — needs file storage design
 
 Server live: `0.0.0.0:8080` (PID 2026/2094/2096 — uvicorn workers).
+
+---
+
+## 7. Applied Patch Log (2026-08-05 — "Auto-Fix Engine")
+
+Rebuilt the Troubleshoot Hub into a self-healing fix center: every error the scan
+detects can be repaired **inside the hub**, individually or all at once.
+
+### Backend (`backend/main.py`)
+- [x] Remediation registry `FIX_ACTION_META` + `FIX_EXECUTORS`; all executions
+      audited via `audit_operation()` and timed (`duration_ms`).
+- [x] New fix actions: `restart_service` / `start_service` / `enable_service`
+      (validated against `SERVICE_NAME_PATTERN`), `reap_zombies` (SIGCHLD to
+      zombie parents, owner-guarded), `flush_dns` (resolvectl/systemd-resolve/nscd),
+      `clean_tmp` (find -mtime +7 in /tmp & /var/tmp), `restart_docker_container`.
+- [x] `kill_process` now enforces a UID-ownership guard (multi-user safety P0 from audit §3.2).
+- [x] Health scan upgraded to 11 checks: new *Journal Disk Footprint*, *Pending
+      Reboot*, *Exited Docker Containers*, *File Descriptor Pressure* checks; every
+      failing check carries `fix` / `fixes` metadata (label, level, target, sudo flag).
+      Failed services expose one button per unit; disk issues expose vacuum + tmp cleanup.
+- [x] New endpoints: `POST /api/troubleshoot/fix-all` (sequential batch runner with
+      auto-built plan from a fresh scan, confirm-gated, 40-action cap),
+      `GET /api/troubleshoot/fix-capabilities` (which fixes the environment can run),
+      `GET /api/troubleshoot/fix-history` (remediation audit trail).
+- [x] Backward-compatible aliases (`clear_dmesg`, `clear_logs`, `clear_kernel_buffer`).
+
+### Frontend
+- [x] `frontend/css/fix-engine.css` — Fix Engine console, run-progress rows, plan
+      modal, remediation history, per-card fix buttons (level-colored, disabled
+      when the environment can't run them).
+- [x] `frontend/index.html` — Auto-Fix Engine panel (Fix All Issues + Review Fix
+      Plan + Remediation History) atop the Health Scan & Fix Hub; Fix Plan review
+      modal with per-fix toggles and danger-level badges.
+- [x] `frontend/js/app.js` — plan builder (deduped from `fix`/`fixes` metadata),
+      sequential `runFixAll` with live per-item progress, inline per-card fix
+      results, capability-aware disabling, history loader, auto re-scan after fixes.
+
+### Verified live
+- Scan found `kernel_logs` warning (score 88) → `Fix All` cleared it → history
+  recorded → re-scan returned **score 100** (all checks passing).
+- Injection attempts rejected (`evil; rm -rf /` service target, unknown actions → 400);
+  real zombie process detected and SIGCHLD reaping verified; missing-tool actions
+  (flush_dns without a resolver) fail gracefully with a clear message.

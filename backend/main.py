@@ -9,6 +9,7 @@ import logging
 import os
 import platform
 import re
+import signal
 import socket
 import subprocess
 import sqlite3
@@ -2982,7 +2983,9 @@ async def troubleshoot_health_check():
             "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
             "message": f"CPU usage is critical ({cpu_pct:.1f}%) or 1m load ({load1}) exceeds core count by >2x.",
             "remediation": "Identify and terminate runaway process from Bottlenecks view.",
-            "action": "view_bottlenecks"
+            "action": "view_bottlenecks",
+            "fix": None,
+            "fixes": [],
         })
     elif cpu_pct > 70.0 or load1 > cores:
         health_score -= 8
@@ -2994,7 +2997,8 @@ async def troubleshoot_health_check():
             "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
             "message": f"CPU load elevated ({cpu_pct:.1f}%). System may experience latency.",
             "remediation": "Monitor active processes for unexpected threads.",
-            "action": None
+            "fix": None,
+            "fixes": [],
         })
     else:
         checks.append({
@@ -3005,7 +3009,7 @@ async def troubleshoot_health_check():
             "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
             "message": "CPU load and utilization are within normal parameters.",
             "remediation": None,
-            "action": None
+            "fix": None,
         })
 
     # 2. Memory & Swap
@@ -3024,7 +3028,7 @@ async def troubleshoot_health_check():
             "value": f"{mem_pct}% RAM used ({avail_mb:.0f} MB free), {swap_pct}% Swap",
             "message": f"Memory critically low! Risk of OOM (Out Of Memory) process kills.",
             "remediation": "Clear page cache or restart high memory consumers.",
-            "action": "clear_pagecache"
+            "fix": {"action": "clear_pagecache", "label": "⚡ Clear RAM Cache", "level": "warning", "sudo": True, "target": None},
         })
     elif mem_pct > 80.0 or swap_pct > 50.0:
         health_score -= 8
@@ -3036,7 +3040,7 @@ async def troubleshoot_health_check():
             "value": f"{mem_pct}% RAM used, {swap_pct}% Swap used",
             "message": "Memory or swap usage is elevated.",
             "remediation": "Consider dropping page caches or expanding swap space.",
-            "action": "clear_pagecache"
+            "fix": {"action": "clear_pagecache", "label": "⚡ Clear RAM Cache", "level": "warning", "sudo": True, "target": None},
         })
     else:
         checks.append({
@@ -3047,7 +3051,7 @@ async def troubleshoot_health_check():
             "value": f"{mem_pct}% RAM used, {swap_pct}% Swap used ({avail_mb:.0f} MB available)",
             "message": "System memory and swap levels are healthy.",
             "remediation": None,
-            "action": None
+            "fix": None,
         })
 
     # 3. Disk Space & Inodes
@@ -3074,7 +3078,11 @@ async def troubleshoot_health_check():
             "value": ", ".join(disk_details) or "High usage",
             "message": "Disk space or inodes nearly full on partition(s)!",
             "remediation": "Vacuum systemd journal or clean temp files.",
-            "action": "vacuum_journal"
+            "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+            "fixes": [
+                {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+                {"action": "clean_tmp", "label": "🧹 Clean Stale Temp Files", "level": "warning", "sudo": True, "target": None},
+            ],
         })
     elif disk_warning:
         health_score -= 8
@@ -3086,7 +3094,11 @@ async def troubleshoot_health_check():
             "value": ", ".join(disk_details),
             "message": "Disk usage high (>80%) on partition(s).",
             "remediation": "Vacuum journal files or archive old log files.",
-            "action": "vacuum_journal"
+            "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+            "fixes": [
+                {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+                {"action": "clean_tmp", "label": "🧹 Clean Stale Temp Files", "level": "warning", "sudo": True, "target": None},
+            ],
         })
     else:
         checks.append({
@@ -3097,7 +3109,7 @@ async def troubleshoot_health_check():
             "value": f"All {len(disk['partitions'])} partition(s) healthy",
             "message": "Sufficient storage and inode availability.",
             "remediation": None,
-            "action": None
+            "fix": None,
         })
 
     # 4. Systemd Failed Services
@@ -3116,6 +3128,22 @@ async def troubleshoot_health_check():
 
     if failed_services:
         health_score -= 15 * len(failed_services)
+        service_fixes = [{
+            "action": "restart_failed_services",
+            "label": "⚡ Restart All Failed Services",
+            "level": "critical" if len(failed_services) > 1 else "warning",
+            "sudo": True,
+            "target": None,
+        }]
+        # Individual per-unit restart buttons (capped so the card stays usable).
+        for unit in failed_services[:5]:
+            service_fixes.append({
+                "action": "restart_service",
+                "label": f"↻ Restart {unit}",
+                "level": "warning",
+                "sudo": True,
+                "target": unit,
+            })
         checks.append({
             "id": "systemd_services",
             "category": "Services",
@@ -3124,7 +3152,8 @@ async def troubleshoot_health_check():
             "value": f"{len(failed_services)} failed unit(s): {', '.join(failed_services[:3])}",
             "message": f"Found failed systemd service(s): {', '.join(failed_services)}",
             "remediation": "Try restarting failed services.",
-            "action": "restart_failed_services"
+            "fix": service_fixes[0],
+            "fixes": service_fixes,
         })
     else:
         checks.append({
@@ -3135,7 +3164,7 @@ async def troubleshoot_health_check():
             "value": "0 failed services",
             "message": "All systemd units are operating normally.",
             "remediation": None,
-            "action": None
+            "fix": None,
         })
 
     # 5. Zombie & Disk-Sleep (D State) Processes
@@ -3158,7 +3187,7 @@ async def troubleshoot_health_check():
             "value": ", ".join(msg_parts),
             "message": f"Detected stuck process states: {', '.join(msg_parts)}.",
             "remediation": "Inspect processes in Process Manager.",
-            "action": "view_processes"
+            "fix": {"action": "reap_zombies", "label": "🧟 Reap Zombies (SIGCHLD)", "level": "warning", "sudo": False, "target": None},
         })
     else:
         checks.append({
@@ -3169,7 +3198,7 @@ async def troubleshoot_health_check():
             "value": "0 zombies or hung processes",
             "message": "No defunct or uninterruptible sleep processes found.",
             "remediation": None,
-            "action": None
+            "fix": None,
         })
 
     # 6. Kernel & Log Errors (dmesg / journalctl)
@@ -3195,7 +3224,7 @@ async def troubleshoot_health_check():
             "value": f"{len(kernel_errors)} recent error entries in kernel buffer",
             "message": f"Recent critical error in dmesg: {kernel_errors[0]}",
             "remediation": "Clear kernel error buffer and system logs.",
-            "action": "clear_kernel_logs"
+            "fix": {"action": "clear_kernel_logs", "label": "🧹 Clear Kernel Logs", "level": "warning", "sudo": True, "target": None},
         })
     else:
         checks.append({
@@ -3206,7 +3235,7 @@ async def troubleshoot_health_check():
             "value": "Clean recent kernel logs",
             "message": "No OOM-killer or kernel panic logs found recently.",
             "remediation": None,
-            "action": None
+            "fix": None,
         })
 
     # 7. Network & DNS Connectivity
@@ -3229,6 +3258,11 @@ async def troubleshoot_health_check():
 
     if not ping_ok or not dns_ok:
         health_score -= 15
+        # DNS-only breakage is auto-fixable (flush the resolver cache); a
+        # total connectivity failure needs the network suite instead.
+        dns_fix = None
+        if ping_ok and not dns_ok:
+            dns_fix = {"action": "flush_dns", "label": "🌀 Flush DNS Cache", "level": "warning", "sudo": True, "target": None}
         checks.append({
             "id": "net_connectivity",
             "category": "Network",
@@ -3237,7 +3271,8 @@ async def troubleshoot_health_check():
             "value": f"Ping: {'OK' if ping_ok else 'FAIL'}, DNS: {'OK' if dns_ok else 'FAIL'}",
             "message": "Network ping test or DNS resolution failed.",
             "remediation": "Run network diagnostic tests.",
-            "action": "run_net_diag"
+            "action": "run_net_diag" if not dns_fix else None,
+            "fix": dns_fix,
         })
     else:
         checks.append({
@@ -3248,8 +3283,175 @@ async def troubleshoot_health_check():
             "value": "Outbound Internet & DNS operational",
             "message": "Outbound networking and DNS resolution function correctly.",
             "remediation": None,
-            "action": None
+            "fix": None,
         })
+
+    # 8. Journal disk footprint (journald can silently eat a whole partition)
+    journal_usage_human = None
+    journal_usage_gb = 0.0
+    journal_readable = False
+    try:
+        returncode, stdout, _ = await _run_cmd([JOURNALCTL_BIN, "--disk-usage"], timeout=10.0)
+        if returncode == 0:
+            text = stdout.decode(errors="replace")
+            m = re.search(r'([\d.]+)\s*([KMGTP]?)i?B', text)
+            if m:
+                value, unit = float(m.group(1)), m.group(2)
+                mult = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}.get(unit.upper(), 1)
+                journal_usage_gb = value * mult / (1024 ** 3)
+                journal_usage_human = f"{value:.1f} {unit}B".strip()
+                journal_readable = True
+    except Exception:
+        pass
+
+    if journal_readable and journal_usage_gb >= 2.0:
+        health_score -= 12
+        checks.append({
+            "id": "journal_size",
+            "category": "Storage",
+            "name": "Journal Disk Footprint",
+            "status": "critical",
+            "value": f"Journal uses {journal_usage_human} on disk",
+            "message": "The systemd journal is consuming significant disk space and may pressure the root partition.",
+            "remediation": "Vacuum journal files or archive old log files.",
+            "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+        })
+    elif journal_readable and journal_usage_gb >= 0.5:
+        health_score -= 5
+        checks.append({
+            "id": "journal_size",
+            "category": "Storage",
+            "name": "Journal Disk Footprint",
+            "status": "warning",
+            "value": f"Journal uses {journal_usage_human} on disk",
+            "message": "The systemd journal is growing; consider vacuuming entries older than a few days.",
+            "remediation": "Vacuum journal files or archive old log files.",
+            "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+        })
+    else:
+        checks.append({
+            "id": "journal_size",
+            "category": "Storage",
+            "name": "Journal Disk Footprint",
+            "status": "ok",
+            "value": journal_usage_human or "Journal usage not exposed",
+            "message": "Journal disk footprint is within normal bounds.",
+            "remediation": None,
+            "fix": None,
+        })
+
+    # 9. Pending reboot (e.g. kernel updated under the running system)
+    reboot_required = (Path("/var/run/reboot-required").exists()
+                       or Path("/run/reboot-required").exists())
+    if reboot_required:
+        health_score -= 5
+        checks.append({
+            "id": "reboot_required",
+            "category": "Kernel & Logs",
+            "name": "Pending Reboot",
+            "status": "warning",
+            "value": "reboot-required marker present",
+            "message": "A kernel or core package update is pending. The host should be rebooted during the next maintenance window.",
+            "remediation": "Reboot the host when convenient (reboot is intentionally not exposed to the unauthenticated dashboard).",
+            "fix": None,
+        })
+    else:
+        checks.append({
+            "id": "reboot_required",
+            "category": "Kernel & Logs",
+            "name": "Pending Reboot",
+            "status": "ok",
+            "value": "No pending reboot",
+            "message": "No reboot-required marker present.",
+            "remediation": None,
+            "fix": None,
+        })
+
+    # 10. Exited / crashed Docker containers (only when the CLI exists)
+    docker_bin = shutil.which("docker")
+    if docker_bin:
+        exited_containers = []
+        try:
+            returncode, stdout, _ = await _run_cmd(
+                [docker_bin, "ps", "-a", "--filter", "status=exited", "--filter", "status=dead",
+                 "--format", "{{.Names}}\t{{.Status}}"],
+                timeout=10.0,
+            )
+            if returncode == 0:
+                for line in stdout.decode(errors="replace").splitlines():
+                    parts = line.split("\t")
+                    if parts and parts[0].strip():
+                        exited_containers.append({"name": parts[0].strip(), "status": parts[1].strip() if len(parts) > 1 else "exited"})
+        except Exception:
+            pass
+
+        if exited_containers:
+            health_score -= 8
+            container_fixes = []
+            for c in exited_containers[:5]:
+                container_fixes.append({
+                    "action": "restart_docker_container",
+                    "label": f"↻ Restart {c['name']}",
+                    "level": "warning",
+                    "sudo": False,
+                    "target": c["name"],
+                })
+            checks.append({
+                "id": "docker_containers",
+                "category": "Containers",
+                "name": "Exited Docker Containers",
+                "status": "warning",
+                "value": f"{len(exited_containers)} exited/dead container(s): " + ", ".join(c["name"] for c in exited_containers[:3]),
+                "message": f"Containers are not running: {', '.join(c['name'] + ' (' + c['status'] + ')' for c in exited_containers[:5])}",
+                "remediation": "Restart the affected containers.",
+                "fix": container_fixes[0] if container_fixes else None,
+                "fixes": container_fixes,
+            })
+        else:
+            checks.append({
+                "id": "docker_containers",
+                "category": "Containers",
+                "name": "Exited Docker Containers",
+                "status": "ok",
+                "value": "0 exited/dead containers",
+                "message": "All detected containers are in a running state.",
+                "remediation": None,
+                "fix": None,
+            })
+
+    # 11. File descriptor pressure (informational; no automated fix)
+    try:
+        with open("/proc/sys/fs/file-nr") as fh:
+            parts = fh.read().split()
+        if len(parts) >= 3:
+            allocated, max_fds = int(parts[0]), int(parts[2])
+            fd_pct = (allocated / max_fds * 100) if max_fds else 0.0
+            if fd_pct > 80.0:
+                health_score -= 5
+                checks.append({
+                    "id": "file_descriptors",
+                    "category": "Processes",
+                    "name": "File Descriptor Pressure",
+                    "status": "warning",
+                    "value": f"{allocated:,} / {max_fds:,} fds ({fd_pct:.0f}%)",
+                    "message": "The host is using a large share of its file-descriptor table; runaway processes should be inspected.",
+                    "remediation": "Inspect processes in Process Manager for leaked file handles.",
+                    "action": "view_processes",
+                    "fix": None,
+                })
+            else:
+                checks.append({
+                    "id": "file_descriptors",
+                    "category": "Processes",
+                    "name": "File Descriptor Pressure",
+                    "status": "ok",
+                    "value": f"{allocated:,} / {max_fds:,} fds ({fd_pct:.0f}%)",
+                    "message": "File descriptor usage is within normal bounds.",
+                    "remediation": None,
+                    "fix": None,
+                })
+    except Exception:
+        pass
 
     health_score = max(0, min(100, health_score))
     
@@ -3543,117 +3745,527 @@ async def troubleshoot_bottlenecks():
     }
 
 
+# ==============================================================================
+# AUTO-FIX ENGINE (REMEDIATION REGISTRY)
+#
+# Every action the Troubleshoot Hub can perform lives in FIX_ACTION_META and
+# FIX_EXECUTORS.  The health scanner attaches `fix` / `fixes` metadata to each
+# failing check, the UI renders one button per fix, and POST /fix-all executes
+# a whole repair plan sequentially.  All executions are audited through
+# audit_operation() so the hub can show a full remediation history.
+# ==============================================================================
+
+FIX_ACTION_META = {
+    "clear_pagecache": {
+        "label": "Clear RAM page cache",
+        "category": "Memory",
+        "level": "warning",
+        "sudo": True,
+        "description": "Writes 3 to vm.drop_caches so clean page-cache pages are released back to the OS. Cached file data is simply re-read from disk when needed again — this is a safe, reversible operation.",
+    },
+    "vacuum_journal": {
+        "label": "Vacuum systemd journal",
+        "category": "Storage",
+        "level": "warning",
+        "sudo": True,
+        "description": "Runs `journalctl --vacuum-time=2d` to remove journal entries older than 2 days and free disk space on the journal partition.",
+    },
+    "restart_failed_services": {
+        "label": "Restart all failed services",
+        "category": "Services",
+        "level": "critical",
+        "sudo": True,
+        "description": "Restarts every systemd unit currently in the `failed` state. Only valid .service units are touched.",
+    },
+    "restart_service": {
+        "label": "Restart service",
+        "category": "Services",
+        "level": "warning",
+        "sudo": True,
+        "description": "Restarts the target systemd service unit.",
+    },
+    "start_service": {
+        "label": "Start service",
+        "category": "Services",
+        "level": "warning",
+        "sudo": True,
+        "description": "Starts the target systemd service unit.",
+    },
+    "enable_service": {
+        "label": "Enable service on boot",
+        "category": "Services",
+        "level": "info",
+        "sudo": True,
+        "description": "Enables the target systemd service unit so it starts automatically at boot.",
+    },
+    "clear_kernel_logs": {
+        "label": "Clear kernel error buffer",
+        "category": "Kernel & Logs",
+        "level": "warning",
+        "sudo": True,
+        "description": "Runs `dmesg -C` to empty the kernel ring buffer that the scanner flags for recent OOM / panic / error entries.",
+    },
+    "kill_process": {
+        "label": "Terminate process",
+        "category": "Processes",
+        "level": "critical",
+        "sudo": False,
+        "description": "Force-terminates the target PID. Only processes owned by the dashboard user can be killed (unless running as root).",
+    },
+    "reap_zombies": {
+        "label": "Reap zombie processes",
+        "category": "Processes",
+        "level": "warning",
+        "sudo": False,
+        "description": "Sends SIGCHLD to the parent of every zombie process so the parent reaps its dead children. Zero risk to the parent itself.",
+    },
+    "flush_dns": {
+        "label": "Flush DNS resolver cache",
+        "category": "Network",
+        "level": "info",
+        "sudo": True,
+        "description": "Clears the local DNS cache via resolvectl / systemd-resolve / nscd. Fixes stale-resolution issues; fully reversible.",
+    },
+    "clean_tmp": {
+        "label": "Clean stale temp files",
+        "category": "Storage",
+        "level": "warning",
+        "sudo": True,
+        "description": "Deletes regular files under /tmp and /var/tmp not modified for 7+ days (max depth 2). Frees disk space without touching active sessions.",
+    },
+    "restart_docker_container": {
+        "label": "Restart container",
+        "category": "Containers",
+        "level": "warning",
+        "sudo": False,
+        "description": "Runs `docker restart` on the target container so a crashed / exited workload comes back up.",
+    },
+}
+
+# Aliases accepted by the remediate endpoint for backwards compatibility.
+FIX_ACTION_ALIASES = {
+    "clear_dmesg": "clear_kernel_logs",
+    "clear_logs": "clear_kernel_logs",
+    "clear_kernel_buffer": "clear_kernel_logs",
+}
+
+
+async def _fix_clear_pagecache(target: Optional[str] = None) -> Dict[str, Any]:
+    cmd = [SYSCTL_BIN, "-w", "vm.drop_caches=3"]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n", *cmd]
+    try:
+        returncode, stdout, stderr = await _run_cmd(cmd, timeout=15.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Page cache clear timed out"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if returncode == 0:
+        return {"success": True, "message": "RAM page cache cleared successfully!"}
+    return {"success": False, "message": f"Sudo permissions required: {stderr.decode().strip() or 'Access denied'}"}
+
+
+async def _fix_vacuum_journal(target: Optional[str] = None) -> Dict[str, Any]:
+    days = target if target and target.isdigit() and 1 <= int(target) <= 30 else 2
+    cmd = [JOURNALCTL_BIN, f"--vacuum-time={days}d"]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n", *cmd]
+    try:
+        returncode, stdout, stderr = await _run_cmd(cmd, timeout=60.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Journal vacuum timed out after 60s"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    return {"success": returncode == 0, "message": stdout.decode().strip() or stderr.decode().strip()}
+
+
+async def _fix_restart_failed_services(target: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        returncode, stdout, _ = await _run_cmd(
+            [SYSTEMCTL_BIN, "list-units", "--state=failed", "--no-pager", "--no-legend"],
+            timeout=10.0,
+        )
+    except (asyncio.TimeoutError, Exception):
+        return {"success": False, "message": "Failed-service scan could not run (systemd unavailable?)."}
+    failed_units = [line.split()[0] for line in stdout.decode().strip().split('\n') if line.strip()]
+
+    if not failed_units:
+        return {"success": True, "message": "No failed services to restart."}
+
+    restarted, failed_restarts, errors = [], [], []
+    for unit in failed_units:
+        if not SERVICE_NAME_PATTERN.fullmatch(unit):
+            failed_restarts.append(unit)
+            errors.append(f"{unit}: not a controllable .service unit")
+            continue
+        _, error = await run_service_action("restart", unit)
+        if error:
+            failed_restarts.append(unit)
+            errors.append(f"{unit}: {error}")
+        else:
+            restarted.append(unit)
+
+    return {
+        "success": not failed_restarts,
+        "message": f"Attempted restart of {len(failed_units)} unit(s). Success: {len(restarted)}",
+        "restarted": restarted,
+        "failed": failed_restarts,
+        "errors": errors,
+    }
+
+
+async def _fix_service_action(action: str, target: Optional[str] = None) -> Dict[str, Any]:
+    if not target or not SERVICE_NAME_PATTERN.fullmatch(target):
+        return {"success": False, "message": f"Invalid service target: {target or '(none)'}"}
+    result, error = await run_service_action(action, target)
+    if error:
+        return {"success": False, "message": error}
+    return {"success": True, "message": f"Service {target} {service_action_label(action)}."}
+
+
+async def _fix_clear_kernel_logs(target: Optional[str] = None) -> Dict[str, Any]:
+    cmd = ["sudo", "-n", DMESG_BIN, "-C"] if os.geteuid() != 0 else [DMESG_BIN, "-C"]
+    try:
+        returncode, stdout, stderr = await _run_cmd(cmd, timeout=10.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Kernel log clear timed out"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if returncode == 0:
+        return {"success": True, "message": "Kernel error buffer and logs cleared successfully!"}
+    try:
+        fb_rc, _, _ = await _run_cmd([DMESG_BIN, "-C"], timeout=10.0)
+    except asyncio.TimeoutError:
+        fb_rc = 1
+    if fb_rc == 0:
+        return {"success": True, "message": "Kernel error buffer and logs cleared successfully!"}
+    return {"success": False, "message": f"Sudo permissions required: {stderr.decode().strip() or 'Access denied'}"}
+
+
+async def _fix_kill_process(target: Optional[str] = None) -> Dict[str, Any]:
+    if not target or not target.isdigit():
+        return {"success": False, "message": "Target PID required"}
+    pid = int(target)
+    try:
+        proc = psutil.Process(pid)
+        # Multi-user safety: never kill a process owned by another user
+        # unless the dashboard itself runs as root.
+        if os.geteuid() != 0:
+            try:
+                if proc.uids().effective != os.geteuid():
+                    return {"success": False, "message": f"PID {pid} belongs to another user; termination denied."}
+            except psutil.AccessDenied:
+                return {"success": False, "message": f"Cannot verify ownership of PID {pid}; termination denied."}
+        pname = proc.name()
+        proc.kill()
+        return {"success": True, "message": f"Terminated process {pid} ({pname})"}
+    except psutil.NoSuchProcess:
+        return {"success": False, "message": f"Process {pid} no longer active"}
+    except psutil.AccessDenied:
+        return {"success": False, "message": f"Permission denied to terminate PID {pid}"}
+
+
+async def _fix_reap_zombies(target: Optional[str] = None) -> Dict[str, Any]:
+    """Prompt zombie parents to reap their dead children with SIGCHLD.
+
+    Zombies cannot be killed directly — only their parent can reap them.  The
+    safe, standard nudge is SIGCHLD to the parent, which asks it to re-run its
+    wait() loop.  Only parents owned by the dashboard user (or any parent when
+    running as root) are nudged.
+    """
+    zombies = []
+    for proc in psutil.process_iter(['pid', 'name', 'ppid', 'status']):
+        try:
+            status = (proc.info['status'] or '').lower()
+            if status in ('zombie', 'defunct'):
+                zombies.append((proc.info['pid'], proc.info['name'] or '?', proc.info['ppid']))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    if not zombies:
+        return {"success": True, "message": "No zombie processes found to reap."}
+
+    nudged, denied = 0, 0
+    for pid, name, ppid in zombies:
+        try:
+            parent = psutil.Process(ppid)
+            if os.geteuid() != 0 and parent.uids().effective != os.geteuid():
+                denied += 1
+                continue
+            os.kill(ppid, signal.SIGCHLD)
+            nudged += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ProcessLookupError, PermissionError):
+            denied += 1
+
+    await asyncio.sleep(0.6)
+
+    remaining = 0
+    for proc in psutil.process_iter(['status']):
+        try:
+            if (proc.info['status'] or '').lower() in ('zombie', 'defunct'):
+                remaining += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    msg = f"SIGCHLD sent to {nudged} parent(s); {len(zombies)} zombie(s) found, {remaining} still present."
+    if denied:
+        msg += f" {denied} parent(s) not owned by the dashboard user were skipped."
+    return {"success": remaining == 0, "message": msg}
+
+
+async def _fix_flush_dns(target: Optional[str] = None) -> Dict[str, Any]:
+    candidates = []
+    for bin_name, args in (("resolvectl", ["flush-caches"]),
+                           ("systemd-resolve", ["--flush-caches"]),
+                           ("nscd", ["-i", "hosts"])):
+        path = shutil.which(bin_name)
+        if path:
+            candidates.append((bin_name, [path, *args]))
+    if not candidates:
+        return {"success": False, "message": "No supported DNS cache manager found (resolvectl / systemd-resolve / nscd)."}
+
+    last_error = ""
+    for name, cmd in candidates:
+        full = cmd
+        if os.geteuid() != 0:
+            sudo = shutil.which("sudo")
+            if not sudo:
+                last_error = "sudo is required but not installed."
+                continue
+            full = [sudo, "-n", *cmd]
+        try:
+            returncode, stdout, stderr = await _run_cmd(full, timeout=15.0)
+        except (asyncio.TimeoutError, OSError) as e:
+            last_error = f"{name}: {e}"
+            continue
+        if returncode == 0:
+            return {"success": True, "message": f"DNS resolver cache flushed via {name}."}
+        last_error = f"{name}: {stderr.decode().strip() or 'failed'}"
+    return {"success": False, "message": f"DNS cache flush failed — {last_error}"}
+
+
+async def _fix_clean_tmp(target: Optional[str] = None) -> Dict[str, Any]:
+    find = shutil.which("find")
+    if not find:
+        return {"success": False, "message": "find(1) is not available on this host."}
+    cmd = [find, "/tmp", "/var/tmp", "-maxdepth", "2", "-type", "f", "-mtime", "+7", "-print", "-delete"]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n", *cmd]
+    try:
+        returncode, stdout, stderr = await _run_cmd(cmd, timeout=90.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Temp-file cleanup timed out after 90s"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    deleted = len([l for l in stdout.decode(errors="replace").splitlines() if l.strip()])
+    if returncode == 0:
+        return {"success": True, "message": f"Deleted {deleted} stale temp file(s) from /tmp and /var/tmp."}
+    return {"success": False, "message": stderr.decode(errors="replace").strip() or f"Cleanup exited with code {returncode}"}
+
+
+async def _fix_restart_docker_container(target: Optional[str] = None) -> Dict[str, Any]:
+    docker = shutil.which("docker")
+    if not docker:
+        return {"success": False, "message": "Docker CLI is not available on this host."}
+    if not target:
+        return {"success": False, "message": "Container name required"}
+    try:
+        returncode, stdout, stderr = await _run_cmd([docker, "restart", target], timeout=90.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": f"docker restart {target} timed out after 90s"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if returncode == 0:
+        return {"success": True, "message": stdout.decode().strip() or f"Container {target} restarted."}
+    return {"success": False, "message": stderr.decode(errors="replace").strip() or f"docker restart {target} failed"}
+
+
+FIX_EXECUTORS = {
+    "clear_pagecache": _fix_clear_pagecache,
+    "vacuum_journal": _fix_vacuum_journal,
+    "restart_failed_services": _fix_restart_failed_services,
+    "restart_service": lambda t: _fix_service_action("restart", t),
+    "start_service": lambda t: _fix_service_action("start", t),
+    "enable_service": lambda t: _fix_service_action("enable", t),
+    "clear_kernel_logs": _fix_clear_kernel_logs,
+    "kill_process": _fix_kill_process,
+    "reap_zombies": _fix_reap_zombies,
+    "flush_dns": _fix_flush_dns,
+    "clean_tmp": _fix_clean_tmp,
+    "restart_docker_container": _fix_restart_docker_container,
+}
+
+
+async def run_remediation(action: str, target: Optional[str] = None) -> Dict[str, Any]:
+    """Execute one remediation action with audit logging.
+
+    Every execution — success or failure — is recorded through the operations
+    audit store so the hub can render a remediation history.
+    """
+    canonical = FIX_ACTION_ALIASES.get(action, action)
+    executor = FIX_EXECUTORS.get(canonical)
+    if not executor:
+        raise HTTPException(status_code=400, detail=f"Unsupported remediation action: {action}")
+
+    started = time.monotonic()
+    try:
+        result = await executor(target)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Remediation %s failed", canonical)
+        result = {"success": False, "message": str(e)}
+    result["action"] = action
+    result["target"] = target
+    result["duration_ms"] = int((time.monotonic() - started) * 1000)
+    result["timestamp"] = datetime.now().isoformat()
+    try:
+        audit_operation(
+            f"remediate:{canonical}",
+            target or "",
+            "success" if result.get("success") else "failed",
+            str(result.get("message") or "")[:400],
+        )
+    except Exception as exc:
+        logger.warning("Remediation audit failed: %s", exc)
+    return result
+
+
 @app.post("/api/troubleshoot/remediate")
 async def perform_remediation(req: RemediateRequest):
     """
     Executes automated safe fix and remediation actions.
     """
-    action = req.action
-    target = req.target
+    return await run_remediation(req.action, req.target)
 
-    if action == "clear_pagecache":
-        try:
-            cmd = [SYSCTL_BIN, "-w", "vm.drop_caches=3"]
-            if os.geteuid() != 0:
-                cmd = ["sudo", "-n", *cmd]
-            returncode, stdout, stderr = await _run_cmd(cmd, timeout=15.0)
-            if returncode == 0:
-                return {"success": True, "message": "RAM page cache cleared successfully!"}
-            else:
-                return {"success": False, "message": f"Sudo permissions required: {stderr.decode().strip() or 'Access denied'}"}
-        except asyncio.TimeoutError:
-            return {"success": False, "message": "Page cache clear timed out"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
 
-    elif action == "restart_failed_services":
-        try:
-            returncode, stdout, _ = await _run_cmd(
-                ["systemctl", "list-units", "--state=failed", "--no-pager", "--no-legend"],
-                timeout=10.0,
-            )
-            failed_units = [line.split()[0] for line in stdout.decode().strip().split('\n') if line.strip()]
+class FixAllRequest(BaseModel):
+    """Batch auto-fix plan: list of {action, target} entries to execute."""
+    actions: List[Dict[str, Any]] = Field(default_factory=list, max_length=40)
+    confirm: bool = Field(default=False)
 
-            if not failed_units:
-                return {"success": True, "message": "No failed services to restart."}
 
-            restarted = []
-            failed_restarts = []
-            errors = []
-            for unit in failed_units:
-                # Failed units can include non-service units; service controls are deliberately limited.
-                if not SERVICE_NAME_PATTERN.fullmatch(unit):
-                    failed_restarts.append(unit)
-                    errors.append(f"{unit}: not a controllable .service unit")
+@app.post("/api/troubleshoot/fix-all")
+async def troubleshoot_fix_all(req: FixAllRequest):
+    """
+    Execute a whole repair plan sequentially — the hub's one-click "Fix All".
+
+    When `actions` is empty the plan is rebuilt automatically from a fresh
+    health scan (every fixable failing check).  `confirm` must be true.
+    Returns one result entry per action with per-fix duration and an overall
+    summary.
+    """
+    if not req.confirm:
+        raise HTTPException(status_code=400, detail="Confirmation required for batch remediation.")
+
+    plan = list(req.actions)
+    if not plan:
+        scan = await troubleshoot_health_check()
+        for check in scan.get("checks", []):
+            fixes = check.get("fixes") or ([check["fix"]] if check.get("fix") else [])
+            for fix in fixes:
+                if fix.get("action") not in FIX_EXECUTORS and fix.get("action") not in FIX_ACTION_ALIASES:
                     continue
-                _, error = await run_service_action("restart", unit)
-                if error:
-                    failed_restarts.append(unit)
-                    errors.append(f"{unit}: {error}")
-                else:
-                    restarted.append(unit)
+                plan.append({"action": fix["action"], "target": fix.get("target")})
+        if not plan:
+            return {"results": [], "summary": {"total": 0, "success": 0, "failed": 0},
+                    "message": "Scan found no fixable issues."}
 
-            return {
-                "success": not failed_restarts,
-                "message": f"Attempted restart of {len(failed_units)} unit(s). Success: {len(restarted)}",
-                "restarted": restarted,
-                "failed": failed_restarts,
-                "errors": errors
-            }
-        except asyncio.TimeoutError:
-            return {"success": False, "message": "Failed-service scan timed out"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-
-    elif action == "vacuum_journal":
+    results = []
+    for item in plan[:40]:
+        action = str(item.get("action", ""))
+        target = item.get("target")
+        meta = FIX_ACTION_META.get(FIX_ACTION_ALIASES.get(action, action), {})
         try:
-            cmd = [JOURNALCTL_BIN, "--vacuum-time=2d"]
-            if os.geteuid() != 0:
-                cmd = ["sudo", "-n", *cmd]
-            returncode, stdout, stderr = await _run_cmd(cmd, timeout=60.0)
-            return {"success": returncode == 0, "message": stdout.decode().strip() or stderr.decode().strip()}
-        except asyncio.TimeoutError:
-            return {"success": False, "message": "Journal vacuum timed out after 60s"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
+            result = await run_remediation(action, target)
+        except HTTPException as e:
+            result = {"success": False, "message": e.detail, "action": action, "target": target,
+                      "duration_ms": 0, "timestamp": datetime.now().isoformat()}
+        result.setdefault("label", meta.get("label", action))
+        results.append(result)
 
-    elif action in ("clear_kernel_logs", "clear_dmesg", "clear_logs", "clear_kernel_buffer"):
+    summary = {
+        "total": len(results),
+        "success": sum(1 for r in results if r.get("success")),
+        "failed": sum(1 for r in results if not r.get("success")),
+    }
+    message = (f"Applied {summary['success']} of {summary['total']} fixes successfully."
+               if summary["failed"] == 0 else
+               f"{summary['success']}/{summary['total']} fixes applied; {summary['failed']} need attention.")
+    return {"results": results, "summary": summary, "message": message}
+
+
+@app.get("/api/troubleshoot/fix-capabilities")
+async def troubleshoot_fix_capabilities():
+    """
+    Report which auto-fix actions this dashboard is actually able to execute,
+    so the hub can disable buttons that would fail (e.g. no sudo policy).
+    """
+    euid = os.geteuid()
+    is_root = euid == 0
+    sudo = shutil.which("sudo")
+    has_sudo = False
+    if not is_root and sudo:
         try:
-            cmd = ["sudo", "-n", DMESG_BIN, "-C"] if os.geteuid() != 0 else [DMESG_BIN, "-C"]
-            try:
-                returncode, stdout, stderr = await _run_cmd(cmd, timeout=10.0)
-            except asyncio.TimeoutError:
-                return {"success": False, "message": "Kernel log clear timed out"}
-            if returncode == 0:
-                return {"success": True, "message": "Kernel error buffer and logs cleared successfully!"}
-            else:
-                try:
-                    fb_rc, _, _ = await _run_cmd([DMESG_BIN, "-C"], timeout=10.0)
-                except asyncio.TimeoutError:
-                    fb_rc = 1
-                if fb_rc == 0:
-                    return {"success": True, "message": "Kernel error buffer and logs cleared successfully!"}
-                err_msg = stderr.decode().strip() or "Access denied"
-                return {"success": False, "message": f"Sudo permissions required: {err_msg}"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
+            returncode, _, _ = await _run_cmd([sudo, "-n", "-l"], timeout=5.0)
+            has_sudo = returncode == 0
+        except (asyncio.TimeoutError, OSError):
+            has_sudo = False
 
-    elif action == "kill_process":
-        if not target or not target.isdigit():
-            raise HTTPException(status_code=400, detail="Target PID required")
-        pid = int(target)
-        try:
-            proc = psutil.Process(pid)
-            pname = proc.name()
-            proc.kill()
-            return {"success": True, "message": f"Terminated process {pid} ({pname})"}
-        except psutil.NoSuchProcess:
-            return {"success": False, "message": f"Process {pid} no longer active"}
-        except psutil.AccessDenied:
-            return {"success": False, "message": f"Permission denied to terminate PID {pid}"}
+    def have(bin_name: str) -> bool:
+        return shutil.which(bin_name) is not None
 
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported remediation action: {action}")
+    bins = {
+        "sysctl": have("sysctl") or os.path.exists(SYSCTL_BIN),
+        "journalctl": have("journalctl") or os.path.exists(JOURNALCTL_BIN),
+        "dmesg": have("dmesg") or os.path.exists(DMESG_BIN),
+        "systemctl": have("systemctl") or os.path.exists(SYSTEMCTL_BIN),
+        "resolvectl": have("resolvectl"),
+        "systemd_resolve": have("systemd-resolve"),
+        "nscd": have("nscd"),
+        "docker": have("docker"),
+        "find": have("find"),
+        "sudo": bool(sudo),
+    }
+    elevated = is_root or has_sudo
+
+    available = {
+        "clear_pagecache": elevated and bins["sysctl"],
+        "vacuum_journal": elevated and bins["journalctl"],
+        "restart_failed_services": bins["systemctl"],
+        "restart_service": bins["systemctl"],
+        "start_service": bins["systemctl"],
+        "enable_service": bins["systemctl"],
+        "clear_kernel_logs": elevated and bins["dmesg"],
+        "kill_process": True,
+        "reap_zombies": True,
+        "flush_dns": (bins["resolvectl"] or bins["systemd_resolve"] or bins["nscd"]),
+        "clean_tmp": elevated and bins["find"],
+        "restart_docker_container": bins["docker"],
+    }
+    return {
+        "is_root": is_root,
+        "euid": euid,
+        "sudo": has_sudo,
+        "bins": bins,
+        "available_actions": available,
+        "fix_actions": {k: {"label": v["label"], "level": v["level"]} for k, v in FIX_ACTION_META.items()},
+    }
+
+
+@app.get("/api/troubleshoot/fix-history")
+async def troubleshoot_fix_history(limit: int = Query(30, ge=1, le=200)):
+    """
+    Recent remediation executions, newest first, from the operations audit store.
+    """
+    try:
+        with _ops_conn() as conn:
+            rows = conn.execute(
+                "SELECT timestamp, action, target, outcome, detail FROM operations_audit "
+                "WHERE action LIKE 'remediate:%' ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return {"entries": [dict(r) for r in rows]}
+    except Exception:
+        return {"entries": []}
 
 
 SAFE_DIAGNOSTIC_COMMANDS = {

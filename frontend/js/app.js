@@ -8,6 +8,10 @@ let statsData = null;
 let autoTailInterval = null;
 let healthData = null;
 let serviceCapabilities = null;
+// Auto-Fix Engine state
+let fixCapabilities = null;
+let fixRunning = false;
+let currentFixPlan = [];
 
 // History buffer for sparkline charts (last 30 samples)
 const historyBuffer = {
@@ -81,6 +85,29 @@ function escapeHtml(value) {
     const div = document.createElement('div');
     div.textContent = String(value ?? '');
     return div.innerHTML;
+}
+
+function escapeAttr(value) {
+    return escapeHtml(value).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* Escape a value for use inside a quoted CSS attribute selector. */
+function attrSel(value) {
+    return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function fixMeta(action) {
+    const meta = { label: action, level: 'info', sudo: false, description: '' };
+    if (fixCapabilities?.fix_actions && fixCapabilities.fix_actions[action]) {
+        meta.label = fixCapabilities.fix_actions[action].label || meta.label;
+        meta.level = fixCapabilities.fix_actions[action].level || meta.level;
+    }
+    return meta;
+}
+
+function fixActionAvailable(action) {
+    return !fixCapabilities || !fixCapabilities.available_actions ||
+           fixCapabilities.available_actions[action] !== false;
 }
 
 /* WebSocket Connection */
@@ -723,12 +750,294 @@ async function runFullHealthScan() {
             'Critical issues detected requiring immediate remediation!';
 
         document.getElementById('last-scan-time').textContent = `Last Scan: ${new Date().toLocaleTimeString()}`;
+        refreshFixEngine();
+        loadFixHistory();
+        if (!fixCapabilities) loadFixCapabilities();
         showToast('Diagnostic scan complete', 'info');
     } catch (e) {
         showToast('Error running health scan: ' + e.message, 'error');
     } finally {
         btn.disabled = false;
         btn.textContent = '⚡ Run Diagnostic Scan';
+    }
+}
+
+/* ==========================================================================
+   AUTO-FIX ENGINE (Troubleshoot Hub)
+   ========================================================================== */
+
+/* Collect every fixable issue from the latest scan into a deduplicated plan. */
+function buildFixPlan() {
+    const plan = [];
+    const seen = new Set();
+    if (!healthData || !healthData.checks) return plan;
+    healthData.checks.forEach(c => {
+        const fixes = (c.fixes && c.fixes.length) ? c.fixes : (c.fix ? [c.fix] : []);
+        fixes.forEach(f => {
+            if (!f || !f.action) return;
+            const key = `${f.action}|${f.target || ''}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            plan.push({ ...f, checkName: c.name });
+        });
+    });
+    return plan;
+}
+
+/* Update the Fix Engine header (count badge, buttons, subtitle). */
+function refreshFixEngine() {
+    currentFixPlan = buildFixPlan();
+    const count = currentFixPlan.length;
+    const allBtn = document.getElementById('fix-all-btn');
+    const reviewBtn = document.getElementById('fix-review-btn');
+    const badge = document.getElementById('fix-summary-badge');
+    const sub = document.getElementById('fix-engine-sub');
+    if (!allBtn || !badge) return;
+
+    allBtn.disabled = count === 0 || fixRunning;
+    reviewBtn.disabled = count === 0 || fixRunning;
+    allBtn.textContent = count > 0 ? `⚡ Fix All Issues (${count})` : '⚡ Fix All Issues';
+    badge.textContent = fixRunning ? 'Fixing…' : (count === 0 ? '✅ No fixes needed' : `${count} fix${count > 1 ? 'es' : ''} available`);
+    badge.className = 'fix-summary-badge ' + (fixRunning ? 'running' : (count === 0 ? 'ok' : 'warn'));
+    sub.textContent = count === 0
+        ? 'The last scan found no fixable issues. Run a scan anytime to rebuild the repair plan.'
+        : 'Every issue detected below can be repaired directly from this hub — one click or one button per issue.';
+}
+
+/* Render a single fix execution, returning {success, message, label}. */
+async function executeFix(action, target = null) {
+    const res = await fetch(`${API_BASE}/api/troubleshoot/remediate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, target })
+    });
+    return await res.json();
+}
+
+/* One-button fix for a single check card (called from inline onclick). */
+async function remediateAction(action, target = null, opts = {}) {
+    if (fixRunning) return null;
+    const btn = document.querySelector(`.check-card button[data-action="${attrSel(action)}"][data-target="${attrSel(target || '')}"]`);
+    const card = btn?.closest('.check-card');
+    const resultBoxId = card ? `${card.id || 'check'}-result` : null;
+
+    if (btn) {
+        btn.disabled = true;
+        btn.classList.add('running');
+        btn.dataset.originalLabel = btn.dataset.originalLabel || btn.textContent;
+        btn.textContent = 'Running…';
+    }
+    const removeResult = () => {
+        if (resultBoxId) document.getElementById(resultBoxId)?.remove();
+    };
+    removeResult();
+    if (!opts.silent) {
+        showToast(`Executing fix: ${action}${target ? ' → ' + target : ''}`, 'info');
+    }
+
+    try {
+        const result = await executeFix(action, target);
+        if (result.success) {
+            showToast(`✓ ${result.message}`, 'success');
+        } else {
+            showToast(`✗ ${result.message || 'Fix failed'}`, 'error');
+        }
+        if (card && resultBoxId) {
+            const box = document.createElement('div');
+            box.id = resultBoxId;
+            box.className = `fix-card-result ${result.success ? 'success' : 'failed'}`;
+            box.textContent = `${result.success ? '✓' : '✗'} ${result.message || 'No output'}`;
+            card.appendChild(box);
+            setTimeout(() => { box.style.opacity = '0.35'; }, 15000);
+        }
+        // Re-scan + refresh history + rebuild the plan after every fix.
+        await refreshAfterFix();
+        return result;
+    } catch (e) {
+        showToast('Remediation error: ' + e.message, 'error');
+        if (card && resultBoxId) {
+            const box = document.createElement('div');
+            box.id = resultBoxId;
+            box.className = 'fix-card-result failed';
+            box.textContent = `✗ ${e.message}`;
+            card.appendChild(box);
+        }
+        return { success: false, message: e.message };
+    } finally {
+        if (btn) {
+            btn.classList.remove('running');
+            // refreshAfterFix re-renders the checks; restore only if still detached.
+            if (!document.body.contains(btn)) return;
+            btn.disabled = false;
+            btn.textContent = btn.dataset.originalLabel || 'Fix';
+        }
+    }
+}
+
+async function refreshAfterFix() {
+    if (state.currentTab === 'troubleshoot') {
+        loadFixHistory();
+        await runFullHealthScan();
+    } else {
+        fetchStats();
+    }
+}
+
+/* Batch fix-all runner with live per-item progress. */
+async function runFixAll(plan = null) {
+    const items = plan || buildFixPlan();
+    if (!items.length || fixRunning) return;
+    fixRunning = true;
+    refreshFixEngine();
+    document.getElementById('fix-review-btn').disabled = true;
+    renderFixRunArea(items);
+
+    const results = [];
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        setFixRunRow(i, 'running', 'Executing…');
+        let result;
+        try {
+            result = await executeFix(item.action, item.target || null);
+        } catch (e) {
+            result = { success: false, message: e.message };
+        }
+        results.push({ ...item, ...result });
+        setFixRunRow(i, result.success ? 'success' : 'failed',
+            `${result.success ? '✓' : '✗'} ${result.message || 'no output'}`);
+    }
+
+    const ok = results.filter(r => r.success).length;
+    const summary = document.createElement('div');
+    summary.className = `fix-run-summary ${ok === results.length ? '' : 'partial'}`;
+    summary.textContent = ok === results.length
+        ? `✅ ALL FIXES APPLIED — ${ok}/${results.length} succeeded. Re-running scan…`
+        : `⚠️ ${ok}/${results.length} fixes applied; ${results.length - ok} failed. Re-running scan…`;
+    document.getElementById('fix-run-area').appendChild(summary);
+
+    fixRunning = false;
+    refreshFixEngine();
+    await refreshAfterFix();
+}
+
+function renderFixRunArea(items) {
+    const area = document.getElementById('fix-run-area');
+    area.hidden = false;
+    area.innerHTML = '';
+    items.forEach((item, i) => {
+        const meta = fixMeta(item.action);
+        const row = document.createElement('div');
+        row.id = `fix-run-${i}`;
+        row.className = 'fix-run-row pending';
+        row.innerHTML = `
+            <span class="fix-run-icon">⏳</span>
+            <span class="fix-run-label">${escapeHtml(item.label || meta.label)}</span>
+            <span class="fix-run-msg">Queued…</span>
+        `;
+        area.appendChild(row);
+    });
+}
+
+function setFixRunRow(i, status, message) {
+    const row = document.getElementById(`fix-run-${i}`);
+    if (!row) return;
+    row.className = `fix-run-row ${status}`;
+    const icon = row.querySelector('.fix-run-icon');
+    icon.textContent = status === 'success' ? '✅' : status === 'failed' ? '❌' : '⏳';
+    icon.style.animation = 'none';
+    const msg = row.querySelector('.fix-run-msg');
+    if (msg) msg.textContent = message || '';
+}
+
+/* Review plan modal */
+function openFixPlanModal() {
+    const plan = buildFixPlan();
+    if (!plan.length) return;
+    const list = document.getElementById('fix-plan-list');
+    list.innerHTML = '';
+    plan.forEach((item, i) => {
+        const meta = fixMeta(item.action);
+        const available = fixActionAvailable(item.action);
+        const div = document.createElement('div');
+        div.className = 'fix-plan-item' + (available ? '' : ' unavailable');
+        div.innerHTML = `
+            <input type="checkbox" class="fix-plan-check" data-plan-idx="${i}" ${available ? 'checked' : 'disabled'} ${available ? '' : 'title="Not available in this environment"'}>
+            <div class="fix-plan-body">
+                <div class="fix-plan-title-row">
+                    <span class="fix-plan-label">${escapeHtml(item.label || meta.label)}</span>
+                    ${item.target ? `<span class="fix-plan-target">${escapeHtml(item.target)}</span>` : ''}
+                    <span class="fix-plan-level ${escapeHtml(meta.level)}">${escapeHtml(meta.level.toUpperCase())}</span>
+                </div>
+                <div class="fix-plan-desc">${escapeHtml(item.description || meta.description || item.checkName || '')}</div>
+                ${available ? '' : '<div class="fix-unavailable-note">⚠️ Not executable in this environment (missing tooling or permissions).</div>'}
+            </div>
+        `;
+        list.appendChild(div);
+    });
+    document.getElementById('fix-plan-modal').classList.add('show');
+}
+
+function closeFixPlanModal() {
+    document.getElementById('fix-plan-modal').classList.remove('show');
+}
+
+async function applySelectedFixes() {
+    const checked = Array.from(document.querySelectorAll('.fix-plan-check:checked'));
+    if (!checked.length) {
+        showToast('No fixes selected', 'info');
+        return;
+    }
+    const plan = buildFixPlan();
+    const selected = checked.map(cb => plan[Number(cb.dataset.planIdx)]).filter(Boolean);
+    closeFixPlanModal();
+    await runFixAll(selected);
+}
+
+/* Fix history */
+async function loadFixHistory() {
+    const list = document.getElementById('fix-history-list');
+    if (!list) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/fix-history?limit=15`);
+        if (!res.ok) throw new Error('history fetch failed');
+        const data = await res.json();
+        const entries = data.entries || [];
+        if (!entries.length) {
+            list.innerHTML = '<p class="no-data">No automated fixes executed yet. Fixes run here are recorded automatically.</p>';
+            return;
+        }
+        list.innerHTML = '';
+        const wrap = document.createElement('div');
+        wrap.className = 'fix-history-list';
+        entries.forEach(e => {
+            const action = String(e.action || '').replace(/^remediate:/, '');
+            const item = document.createElement('div');
+            item.className = 'fix-history-item';
+            item.innerHTML = `
+                <span class="fix-history-time">${escapeHtml((e.timestamp || '').slice(0, 19).replace('T', ' '))}</span>
+                <span class="fix-history-action">${escapeHtml(fixMeta(action).label || action)}</span>
+                ${e.target ? `<span class="fix-history-target">${escapeHtml(e.target)}</span>` : ''}
+                <span class="fix-history-outcome ${e.outcome === 'success' ? 'success' : 'failed'}">${escapeHtml(e.outcome || '?')}</span>
+                <span class="fix-history-detail" title="${escapeAttr(e.detail || '')}">${escapeHtml(e.detail || '')}</span>
+            `;
+            wrap.appendChild(item);
+        });
+        list.appendChild(wrap);
+    } catch (e) {
+        list.innerHTML = `<p class="no-data">History unavailable: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+/* Fix capabilities (which fixes this environment can actually run) */
+async function loadFixCapabilities() {
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/fix-capabilities`);
+        if (!res.ok) return;
+        fixCapabilities = await res.json();
+        // Re-render check cards so unavailable fixes grey out.
+        if (healthData && healthData.checks) renderHealthChecks(healthData.checks);
+    } catch (e) {
+        console.error('fix capabilities fetch failed:', e);
     }
 }
 
@@ -748,9 +1057,10 @@ function renderHealthChecks(checks) {
     const container = document.getElementById('checks-grid-container');
     container.innerHTML = '';
 
-    checks.forEach(c => {
+    checks.forEach((c, idx) => {
         const card = document.createElement('div');
         card.className = 'check-card';
+        card.id = `check-card-${c.id || idx}`;
 
         const statusBadgeClass =
             c.status === 'critical' ? 'badge-danger' :
@@ -760,23 +1070,36 @@ function renderHealthChecks(checks) {
             c.status === 'critical' ? '🔴 CRITICAL' :
             c.status === 'warning' ? '⚠️ WARNING' : '✅ PASS';
 
+        // Auto-Fix Engine: one button per fixable action on this check.
+        const fixList = (c.fixes && c.fixes.length) ? c.fixes : (c.fix ? [c.fix] : []);
         let fixButtonHtml = '';
-        if (c.action === 'clear_pagecache') {
-            fixButtonHtml = `<button class="btn btn-sm btn-warning" onclick="remediateAction('clear_pagecache')">⚡ Clear RAM Cache</button>`;
-        } else if (c.action === 'vacuum_journal') {
-            fixButtonHtml = `<button class="btn btn-sm btn-warning" onclick="remediateAction('vacuum_journal')">⚡ Vacuum Journal Logs</button>`;
-        } else if (c.action === 'restart_failed_services') {
-            fixButtonHtml = `<button class="btn btn-sm btn-danger" onclick="remediateAction('restart_failed_services')">⚡ Restart Failed Services</button>`;
-        } else if (c.action === 'clear_kernel_logs' || c.action === 'clear_dmesg' || c.action === 'clear_logs' || c.action === 'clear_kernel_buffer') {
-            fixButtonHtml = `<button class="btn btn-sm btn-warning" onclick="remediateAction('${c.action}')">⚡ Clear Kernel Logs</button>`;
-        } else if (c.action === 'view_bottlenecks') {
-            fixButtonHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('bottlenecks')">🔥 Open Bottleneck Finder</button>`;
-        } else if (c.action === 'view_logs') {
-            fixButtonHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('log-inspector')">📋 Inspect Logs</button>`;
-        } else if (c.action === 'run_net_diag') {
-            fixButtonHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('net-suite')">🌐 Open Network Suite</button>`;
-        } else if (c.action === 'view_processes') {
-            fixButtonHtml = `<button class="btn btn-sm btn-primary" onclick="switchTab('processes')">📋 Open Process Manager</button>`;
+        fixList.forEach(f => {
+            const meta = fixMeta(f.action);
+            const available = fixActionAvailable(f.action);
+            const levelClass = f.level || meta.level || 'info';
+            const btnClass = levelClass === 'critical' ? 'critical' : levelClass === 'warning' ? 'warning' : 'info';
+            const label = f.label || meta.label;
+            const title = available
+                ? (f.description || meta.description || '')
+                : 'Not available: missing tooling or permissions in this environment';
+            fixButtonHtml += `
+                <button type="button" class="btn-fix ${btnClass}" data-action="${escapeAttr(f.action)}"
+                        data-target="${escapeAttr(f.target || '')}" onclick="remediateAction('${escapeAttr(f.action)}','${escapeAttr(f.target || '')}')"
+                        ${available ? '' : 'disabled'} title="${escapeAttr(title)}">${escapeHtml(label)}</button>
+            `;
+        });
+
+        // Fallback navigation buttons (non-fixable checks still lead somewhere useful).
+        const legacyAction = c.action;
+        let navHtml = '';
+        if (!fixList.length && legacyAction === 'view_bottlenecks') {
+            navHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('bottlenecks')">🔥 Open Bottleneck Finder</button>`;
+        } else if (!fixList.length && legacyAction === 'view_logs') {
+            navHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('log-inspector')">📋 Inspect Logs</button>`;
+        } else if (!fixList.length && legacyAction === 'run_net_diag') {
+            navHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('net-suite')">🌐 Open Network Suite</button>`;
+        } else if (!fixList.length && legacyAction === 'view_processes') {
+            navHtml = `<button class="btn btn-sm btn-primary" onclick="switchTab('processes')">📋 Open Process Manager</button>`;
         }
 
         card.innerHTML = `
@@ -787,37 +1110,15 @@ function renderHealthChecks(checks) {
                 </div>
                 <div class="check-card-val">${escapeHtml(c.value)}</div>
                 <div class="check-card-msg">${escapeHtml(c.message)}</div>
+                ${c.remediation && !fixList.length ? `<div class="check-card-msg" style="color:var(--text-dim);font-size:0.78rem;">💡 ${escapeHtml(c.remediation)}</div>` : ''}
             </div>
             <div class="check-card-footer">
                 ${fixButtonHtml}
+                ${navHtml}
             </div>
         `;
         container.appendChild(card);
     });
-}
-
-async function remediateAction(action, target = null) {
-    if (!confirm(`Execute automated fix action: ${action}?`)) return;
-    try {
-        const res = await fetch(`${API_BASE}/api/troubleshoot/remediate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action, target })
-        });
-        const result = await res.json();
-        if (result.success) {
-            showToast(`Action success: ${result.message}`, 'success');
-            if (state.currentTab === 'troubleshoot') {
-                runFullHealthScan();
-            } else {
-                fetchStats();
-            }
-        } else {
-            showToast(`Action failed: ${result.message}`, 'error');
-        }
-    } catch (e) {
-        showToast('Remediation error: ' + e.message, 'error');
-    }
 }
 
 /* Log Inspector */
@@ -1076,7 +1377,12 @@ function switchSubTab(subtabId) {
 
     state.currentSubTab = subtabId;
 
-    if (subtabId === 'health-hub' && !healthData) runFullHealthScan();
+    if (subtabId === 'health-hub') {
+        if (!healthData) runFullHealthScan();
+        else refreshFixEngine();
+        loadFixHistory();
+        if (!fixCapabilities) loadFixCapabilities();
+    }
     if (subtabId === 'log-inspector') fetchLogs();
     if (subtabId === 'net-suite') fetchListeningPorts();
     if (subtabId === 'bottlenecks') fetchBottlenecks();
@@ -2237,6 +2543,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Troubleshoot Scan
     document.getElementById('run-full-scan-btn').addEventListener('click', runFullHealthScan);
+
+    // Auto-Fix Engine controls
+    document.getElementById('fix-all-btn')?.addEventListener('click', () => runFixAll());
+    document.getElementById('fix-review-btn')?.addEventListener('click', openFixPlanModal);
+    document.getElementById('fix-plan-close')?.addEventListener('click', closeFixPlanModal);
+    document.getElementById('fix-plan-cancel')?.addEventListener('click', closeFixPlanModal);
+    document.getElementById('fix-plan-modal')?.addEventListener('click', (e) => {
+        if (e.target === document.getElementById('fix-plan-modal')) closeFixPlanModal();
+    });
+    document.getElementById('fix-plan-apply')?.addEventListener('click', applySelectedFixes);
+    document.getElementById('fix-history-refresh')?.addEventListener('click', loadFixHistory);
 
     // Refresh button
     document.getElementById('refresh-btn').addEventListener('click', () => {
