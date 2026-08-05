@@ -226,3 +226,59 @@ detects can be repaired **inside the hub**, individually or all at once.
 - Injection attempts rejected (`evil; rm -rf /` service target, unknown actions → 400);
   real zombie process detected and SIGCHLD reaping verified; missing-tool actions
   (flush_dns without a resolver) fail gracefully with a clear message.
+
+---
+
+## 8. Applied Patch Log (2026-08-05 — Controls hardening: service-policy probe + bulk kill)
+
+Follow-up verification of the three control surfaces (VM lifecycle, services, process manager).
+
+### 1. VM Controls (Start/Shutdown/Reboot/Suspend/Resume) — verified ✅
+- `GET /api/vms/capabilities` enables controls when **either** path works: native read-write
+  libvirt (`_ensure_libvirt_rw_conn`) or the exact-argv `sudo virsh` probe
+  (`_virsh_fallback_allowed`, `sudo -n -l -- <full argv>`). Buttons disable when both fail
+  (frontend gates every render on `state.vmCapabilities.can_control`).
+- `_virsh_command()` argv `virsh --quiet --no-pkttyagent --connect <URI> <verb> -- <domain>`
+  is byte-for-byte in sync with the `MONITORX_VIRSH` alias written by
+  `systemd/install-service.sh` (`--no-pkttyagent` included on both sides).
+- Verified: `poweroff` maps to the real `destroy` verb; `--connect` pinned; `--` terminates
+  option parsing; graceful/destructive confirmation matrix intact.
+
+### 2. Services (Start/Stop/Restart/Reload) — fixed ⚠️→✅
+- **Bug found:** `service_capabilities()` only ran `sudo -n -l` and treated any exit 0 as
+  "authorized". That only proves the account holds *some* sudo privilege (full `ALL`,
+  unrelated apt policy, …), so the tab enabled Start/Stop/Restart/Reload even when
+  `/etc/sudoers.d/monitorx-systemctl` was missing — every action then 403'd.
+- **Fix:** new `_service_sudo_allowed()` probes the exact argv the backend executes
+  (`sudo -n -l -- systemctl --no-ask-password start monitorx-capability-probe.service`),
+  mirroring the virsh fallback check. `service_capabilities()` now reports `can_control`
+  only when that probe succeeds (or when running as root).
+- `GET /api/auth/status` rewritten to use the real async probes
+  (`_ensure_libvirt_rw_conn` / `_virsh_fallback_allowed` / `_service_sudo_allowed`) instead
+  of a loose `sudo -l` text scrape; added `systemctl_policy_available`.
+- Probe logic unit-verified for: policy present → True, policy absent → False, root → True,
+  sudo missing → False. `import subprocess` (now unused) removed.
+
+### 3. Process Mgr multi-select kill — verified + hardened ✅
+- **Verification answer:** bulk kill already respected the ownership guard **per process** —
+  the frontend issued one `/api/processes/{pid}/kill` per PID and each request independently
+  403s foreign-owned PIDs. It never failed entirely on the first unauthorized target.
+  However the UX was poor: N+1 confirm dialogs, generic "Failed to terminate process"
+  toast that hid the 403 reason, and no aggregate result.
+- **Fix:** new `POST /api/processes/kill` batch endpoint (`BatchKillRequest {pids, signal}`).
+  Ownership guard is enforced per PID; each PID gets its own `{pid, success, message}`
+  result ("belongs to UID … (skipped)", "process not found", "permission denied", …).
+  SIGTERM targets share one 5-second grace window polled in parallel (N processes ≈ 5s,
+  not 5s each) with SIGKILL escalation for survivors — same semantics as the single-PID
+  endpoint. Input validated (dedupe, ≤500 PIDs, signal ∈ {9,15}).
+- Frontend: `💀 Terminate Selected` → one confirm → one batch request → summary toast
+  ("Killed 3, skipped 2 (PID 1: belongs to UID 0 …)"). Single `killProcess` now surfaces
+  the server's error detail (`readApiError`) instead of a generic message.
+
+### Live verification (sandbox, uid 1001, full sudo)
+- Batch kill of [user-sleep, user-sleep, PID 1, 999999] → 2 killed, PID 1 refused
+  ("belongs to UID 0; you are UID 1001 (skipped)"), 999999 "process not found"; dedupe worked.
+- SIGTERM-ignoring child → "did not exit within 5s; escalated to SIGKILL" (5.5s total).
+- Graceful child → "terminated (SIGTERM)" (0.5s).
+- Invalid signal → 400; empty pids → 422; single-PID endpoint unchanged and still guarded.
+- `node --check` passes on `frontend/js/app.js`; backend compiles clean.

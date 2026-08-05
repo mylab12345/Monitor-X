@@ -11,7 +11,6 @@ import platform
 import re
 import signal
 import socket
-import subprocess
 import sqlite3
 import shutil
 import time
@@ -2288,22 +2287,18 @@ async def auth_status():
         "libvirt_available": LIBVIRT_AVAILABLE,
         "libvirt_rw": False,
         "virsh_policy_available": False,
+        "systemctl_policy_available": False,
         "user_uid": os.getuid(),
     }
+    # Path 1 for VM control: read-write libvirt connection (root, or the
+    # dashboard user in the 'libvirt'/'kvm' group).
     if LIBVIRT_AVAILABLE:
-        try:
-            conn = libvirt.open("qemu:///system")
-            status["libvirt_rw"] = conn.isAlive() and conn.getURI() == "qemu:///system"
-            conn.close()
-        except Exception:
-            pass
-    # Check sudo policy without running privileged commands
-    try:
-        import subprocess
-        result = subprocess.run(["sudo", "-l", "-U", str(os.getpwuid(os.getuid()).pw_name)], capture_output=True, text=True, timeout=3)
-        status["virsh_policy_available"] = "monitorx-virsh" in result.stdout or "monitorx" in result.stdout
-    except Exception:
-        pass
+        rw_conn, _ = await _ensure_libvirt_rw_conn()
+        status["libvirt_rw"] = rw_conn is not None
+    # Path 2 for VM control: the exact-argv sudo virsh policy.
+    status["virsh_policy_available"] = await _virsh_fallback_allowed()
+    # Service control: the exact-argv systemctl sudo policy (root counts).
+    status["systemctl_policy_available"] = await _service_sudo_allowed()
     return status
 
 
@@ -2840,6 +2835,117 @@ async def kill_process(pid: int, signal: int = Query(15)):
         raise HTTPException(status_code=403, detail="Access denied")
 
 
+class BatchKillRequest(BaseModel):
+    """Payload for the multi-select (bulk) process termination endpoint."""
+    pids: List[int] = Field(..., min_length=1, max_length=500,
+                            description="PIDs to terminate (deduplicated server-side).")
+    signal: int = Field(15, description="Signal: 15 (SIGTERM, graceful) or 9 (SIGKILL).")
+
+
+def _set_batch_result_message(results: List[Dict[str, Any]], pid: int, message: str) -> None:
+    """Update the message of an already-recorded batch result (grace phase)."""
+    for r in results:
+        if r["pid"] == pid:
+            r["message"] = message
+            return
+
+
+@app.post("/api/processes/kill")
+async def kill_processes_batch(payload: BatchKillRequest):
+    """Terminate several processes in a single request.
+
+    The ownership guard is enforced **per process**: a PID owned by another
+    user (or that vanished/permission-denied) is individually refused and
+    reported in its own result entry, while every authorized PID is still
+    killed. The bulk kill therefore never aborts wholesale on the first
+    unauthorized target.
+
+    SIGTERM targets share one 5-second grace window that polls all of them in
+    parallel, so killing N processes takes ~5s total rather than 5s each;
+    survivors are escalated to SIGKILL exactly like the single-PID endpoint.
+    """
+    if payload.signal not in (9, 15):
+        raise HTTPException(status_code=400, detail="Only SIGTERM (15) and SIGKILL (9) are allowed.")
+    pids = list(dict.fromkeys(payload.pids))  # dedupe, preserve order
+    current_uid = os.getuid()
+    results: List[Dict[str, Any]] = []
+    pending: List[psutil.Process] = []  # SIGTERM targets awaiting exit
+
+    def record(pid: int, success: bool, message: str) -> None:
+        results.append({"pid": pid, "success": success, "message": message})
+
+    for pid in pids:
+        try:
+            proc = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            record(pid, False, "process not found")
+            continue
+        # Security (P0): per-process ownership guard — never touch a process
+        # owned by another user unless the dashboard itself runs as root.
+        try:
+            proc_uids = proc.uids()
+        except psutil.AccessDenied:
+            record(pid, False, f"permission denied (cannot read owner of PID {pid})")
+            continue
+        if proc_uids and proc_uids.real != current_uid and current_uid != 0:
+            record(pid, False,
+                   f"belongs to UID {proc_uids.real}; you are UID {current_uid} (skipped)")
+            continue
+        # Audit log (P2), mirroring the single-PID endpoint.
+        try:
+            with open("/tmp/monitorx-audit.log", "a") as f:
+                f.write(f"{datetime.now().isoformat()} | {current_uid} | kill | pid={pid} signal={payload.signal}\n")
+        except Exception:
+            pass
+        try:
+            proc.send_signal(payload.signal)
+        except psutil.NoSuchProcess:
+            record(pid, False, "process not found")
+            continue
+        except psutil.AccessDenied:
+            record(pid, False, "permission denied")
+            continue
+        if payload.signal == 9:
+            record(pid, True, "killed (SIGKILL)")
+        else:
+            pending.append(proc)
+            record(pid, True, "SIGTERM sent; awaiting exit")
+
+    # One shared grace window for every SIGTERM target.
+    if pending:
+        for _ in range(10):
+            await asyncio.sleep(0.5)
+            still_alive = []
+            for proc in pending:
+                try:
+                    if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                        _set_batch_result_message(results, proc.pid, "terminated (SIGTERM)")
+                    else:
+                        still_alive.append(proc)
+                except psutil.NoSuchProcess:
+                    _set_batch_result_message(results, proc.pid, "terminated (SIGTERM)")
+            pending = still_alive
+            if not pending:
+                break
+        else:
+            for proc in pending:
+                try:
+                    proc.kill()
+                    _set_batch_result_message(
+                        results, proc.pid, "did not exit within 5s; escalated to SIGKILL")
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    _set_batch_result_message(
+                        results, proc.pid, "did not exit within 5s; SIGKILL escalation failed")
+
+    killed = sum(1 for r in results if r["success"])
+    return {
+        "results": results,
+        "total": len(results),
+        "killed": killed,
+        "failed": len(results) - killed,
+    }
+
+
 # Power actions are intentionally not exposed to unauthenticated dashboard clients.
 # Service-level actions are available through the constrained service-control API below.
 @app.post("/api/system/reboot", status_code=403)
@@ -2892,25 +2998,54 @@ async def run_service_action(action: str, service_name: str):
     return {"output": stdout.decode().strip()}, None
 
 
+async def _service_sudo_allowed() -> bool:
+    """Report whether the sudoers policy actually grants the exact service
+    control argv MonitorX runs.
+
+    Mirrors ``_virsh_fallback_allowed()``: ask sudo to validate the real
+    command line instead of scraping ``sudo -l`` text. The previous check
+    (``sudo -n -l`` returncode) only proved the user holds *some* sudo
+    privilege — e.g. a full ``ALL`` grant or an unrelated apt policy — so the
+    Services tab reported "available" with every action then failing 403 when
+    ``/etc/sudoers.d/monitorx-systemctl`` was missing or stale.
+    """
+    if os.geteuid() == 0:
+        return True
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return False
+    # Must mirror run_service_action(): systemctl --no-ask-password <action> <unit>
+    probe = [SYSTEMCTL_BIN, "--no-ask-password", "start", "monitorx-capability-probe.service"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sudo, "-n", "-l", "--", *probe,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=10)
+        return proc.returncode == 0
+    except (asyncio.TimeoutError, OSError):
+        return False
+
+
 @app.get("/api/services/capabilities")
 async def service_capabilities():
-    """Expose whether the running dashboard can execute service controls."""
-    if os.geteuid() == 0:
-        return {"can_control": True, "mode": "root", "message": "Service controls are available."}
+    """Expose whether the running dashboard can execute service controls.
+
+    Control requires the MonitorX sudoers policy (``/etc/sudoers.d/monitorx-systemctl``)
+    or a root service account. The UI disables the Start/Stop/Restart/Reload
+    buttons and shows this status when the policy is missing.
+    """
+    if await _service_sudo_allowed():
+        if os.geteuid() == 0:
+            return {"can_control": True, "mode": "root", "message": "Service controls are available (running as root)."}
+        return {"can_control": True, "mode": "sudo", "message": "Service controls are available (sudo policy)."}
     sudo = shutil.which("sudo")
     if not sudo:
         return {"can_control": False, "mode": "unconfigured", "message": "sudo is unavailable; run the MonitorX installer."}
-    try:
-        returncode, _, _ = await _run_cmd([sudo, "-n", "-l"], timeout=10.0)
-    except (asyncio.TimeoutError, OSError):
-        returncode = 1
-    available = returncode == 0
-    return {
-        "can_control": available,
-        "mode": "sudo" if available else "unconfigured",
-        "message": "Service controls are available." if available else
-                   "Controls need the MonitorX sudo policy. Run systemd/install-service.sh and restart MonitorX."
-    }
+    return {"can_control": False, "mode": "unconfigured",
+            "message": "Controls need the MonitorX sudo policy. Run systemd/install-service.sh and restart MonitorX."}
 
 
 @app.get("/api/services")
