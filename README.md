@@ -45,7 +45,7 @@ To run MonitorX as a background systemd service that starts automatically on boo
 
 ### Dashboard service controls
 
-A dashboard process runs as your regular user, so plain `systemctl restart …` is normally rejected by systemd/polkit. The installer now creates a **limited passwordless sudo policy** only for MonitorX’s `start`, `stop`, `restart`, `reload`, `enable`, and `disable` actions on `.service` units, plus the two explicit remediation commands used by the Troubleshoot Hub (drop page cache and vacuum journals). It does **not** grant shell access.
+A dashboard process runs as your regular user, so plain `systemctl restart …` is normally rejected by systemd/polkit. The installer now creates a **limited passwordless sudo policy** only for MonitorX’s `start`, `stop`, `restart`, `reload`, `enable`, and `disable` actions on `.service` units, plus the explicit remediation commands used by the Troubleshoot Hub (drop page cache, vacuum journals, and clear kernel buffer/logs). It does **not** grant shell access.
 
 ### VM (libvirt/KVM) control authorization
 
