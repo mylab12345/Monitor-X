@@ -43,7 +43,7 @@
             <div class="header-left">
                 <div class="logo-box">
                     <span class="logo-icon">⚡</span>
-                    <h1 class="logo">MonitorX</h1>
+                    <h1 class="logo" aria-label="MonitorX — Infrastructure observability dashboard">MonitorX</h1>
                     <span class="version-tag">OBSERVABILITY</span>
                 </div>
                 <div class="host-badge">
@@ -63,6 +63,8 @@
                 <div class="uptime-badge" id="uptime">Uptime: --</div>
                 <button class="btn-icon" id="refresh-btn" title="Refresh Dashboard">🔄</button>
                 <button class="btn-icon" id="theme-toggle" title="Toggle Light/Dark Theme">🌙</button>
+                <button class="btn-icon" onclick="document.body.classList.toggle('large-text')" title="Large text">Aa</button>
+                <button class="btn-icon" onclick="document.getElementById('charts-row').classList.toggle('collapsed')" title="Toggle charts">📊</button>
             </div>
         </header>
 
@@ -753,5 +755,6 @@
     <script src="/static/js/app.js?v=20260729"></script>
     <script src="/static/js/nexus-hud.js?v=20260729"></script>
     <script src="/static/js/operations-center.js?v=20260729"></script>
+    <div id="sparkline-announce" aria-live="polite" aria-atomic="true" style="position:absolute;left:-9999px;top:-9999px;"></div>
 </body>
 </html>

@@ -10,6 +10,7 @@ import os
 import platform
 import re
 import socket
+import subprocess
 import sqlite3
 import shutil
 import time
@@ -1811,6 +1812,15 @@ async def collect_all_stats() -> SystemStats:
             _optional(get_docker_containers()),
             _optional(get_kubernetes_pods()),
         )
+        # SQLite persistence (P2 deferred)
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.execute("INSERT OR IGNORE INTO metrics (ts, cpu, mem, disk, net) VALUES (?, ?, ?, ?, ?)",
+                         (time.time(), cpu.get("percent", 0) if isinstance(cpu, dict) else 0, memory.get("percent", 0) if isinstance(memory, dict) else 0, disk.get("percent", 0) if isinstance(disk, dict) else 0, network.get("bytes_recv", 0) if isinstance(network, dict) else 0))
+            conn.execute("DELETE FROM metrics WHERE ts < ?", (time.time() - 86400*7,))
+            conn.commit(); conn.close()
+        except Exception:
+            pass
         return SystemStats(
             timestamp=datetime.now().isoformat(), cpu=cpu, memory=memory, disk=disk,
             network=network, gpu=gpu, processes=processes, system=system, vms=vms,
@@ -1958,6 +1968,34 @@ async def acknowledge_incident(incident_id: int):
 async def operations_audit(limit: int = Query(30, ge=1, le=200)):
     with _ops_conn() as conn: return [dict(x) for x in conn.execute('SELECT * FROM operations_audit ORDER BY id DESC LIMIT ?', (limit,))]
 
+# Lightweight SQLite persistence (24h) — P2 deferred
+DB_PATH = Path("/tmp/monitorx_metrics.db")
+
+def init_db():
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.execute("CREATE TABLE IF NOT EXISTS metrics (ts REAL PRIMARY KEY, cpu REAL, mem REAL, disk REAL, net REAL)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics(ts)")
+        conn.commit(); conn.close()
+    except Exception:
+        pass
+
+init_db()
+
+@app.get("/api/historical")
+async def historical(hours: int = Query(24, ge=1, le=168)):
+    rows = []
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        cutoff = time.time() - (hours * 3600)
+        cur = conn.execute("SELECT ts, cpu, mem, disk, net FROM metrics WHERE ts > ? ORDER BY ts ASC", (cutoff,))
+        for r in cur.fetchall():
+            rows.append({"ts": r[0], "cpu": r[1], "mem": r[2], "disk": r[3], "net": r[4]})
+        conn.close()
+    except Exception:
+        pass
+    return {"count": len(rows), "data": rows}
+
 # REST API Endpoints
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -1969,6 +2007,61 @@ async def root():
         media_type="text/html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
     )
+
+
+@app.get("/api/auth/status")
+async def auth_status():
+    """Report VM/service authorization state for UI visibility (P1)."""
+    status = {
+        "libvirt_available": LIBVIRT_AVAILABLE,
+        "libvirt_rw": False,
+        "virsh_policy_available": False,
+        "user_uid": os.getuid(),
+    }
+    if LIBVIRT_AVAILABLE:
+        try:
+            conn = libvirt.open("qemu:///system")
+            status["libvirt_rw"] = conn.isAlive() and conn.getURI() == "qemu:///system"
+            conn.close()
+        except Exception:
+            pass
+    # Check sudo policy without running privileged commands
+    try:
+        import subprocess
+        result = subprocess.run(["sudo", "-l", "-U", str(os.getpwuid(os.getuid()).pw_name)], capture_output=True, text=True, timeout=3)
+        status["virsh_policy_available"] = "monitorx-virsh" in result.stdout or "monitorx" in result.stdout
+    except Exception:
+        pass
+    return status
+
+
+# P2 deferred: Diagnostic / Process audit endpoint
+AUDIT_LOG = Path("/tmp/monitorx-audit.log")
+
+@app.get("/api/audit")
+async def get_audit(log_lines: int = Query(50, ge=1, le=500)):
+    """Return recent audit entries (process kills + diagnostics)."""
+    entries = []
+    if AUDIT_LOG.exists():
+        try:
+            with open(AUDIT_LOG, "r") as f:
+                lines = f.read().splitlines()[-log_lines:]
+            for line in lines:
+                entries.append({"time": line[:19] if len(line) > 19 else line, "entry": line})
+        except Exception:
+            pass
+    return {"entries": entries, "count": len(entries)}
+
+
+@app.post("/api/audit")
+async def post_audit(action: str = Query(...), detail: str = Query("")):
+    """Log a diagnostic or process kill action."""
+    try:
+        with open(AUDIT_LOG, "a") as f:
+            f.write(f"{datetime.now().isoformat()} | {os.getuid()} | {action} | {detail}\n")
+    except Exception:
+        pass
+    return {"logged": True}
 
 
 @app.get("/api/stats", response_model=SystemStats)
@@ -2332,6 +2425,20 @@ async def kill_process(pid: int, signal: int = Query(15)):
         raise HTTPException(status_code=400, detail="Only SIGTERM (15) and SIGKILL (9) are allowed.")
     try:
         proc = psutil.Process(pid)
+        # Security: prevent killing processes owned by other users (P0)
+        try:
+            proc_uids = proc.uids()
+            current_uid = os.getuid()
+            if proc_uids and proc_uids.real != current_uid and current_uid != 0:
+                raise HTTPException(status_code=403, detail=f"Process {pid} belongs to UID {proc_uids.real}; you are UID {current_uid}.")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        # Audit log (P2)
+        try:
+            with open("/tmp/monitorx-audit.log", "a") as f:
+                f.write(f"{datetime.now().isoformat()} | {os.getuid()} | kill | pid={pid} signal={signal}\n")
+        except Exception:
+            pass
         proc.send_signal(signal)
         if signal == 9:
             return {"success": True, "message": f"Process {pid} killed (SIGKILL)"}
@@ -3279,4 +3386,4 @@ async def get_pods():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host=os.environ.get("MONITORX_HOST", "127.0.0.1"), port=8080)
