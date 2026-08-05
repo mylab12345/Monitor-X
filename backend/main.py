@@ -2982,7 +2982,7 @@ async def troubleshoot_health_check():
             "status": "critical",
             "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
             "message": f"CPU usage is critical ({cpu_pct:.1f}%) or 1m load ({load1}) exceeds core count by >2x.",
-            "remediation": "Terminate the top runaway process, or inspect bottlenecks for unexpected threads.",
+            "remediation": "Identify the high CPU processes under the Processes tab or Bottleneck Finder. Terminate runaway processes manually using 'kill -9 <PID>' or optimize application thread/worker pools. If possible, upgrade CPU or allocate more vCPUs to this host.",
             "action": "view_bottlenecks",
             "fix": {"action": "kill_top_cpu", "label": "💀 Kill Top CPU Process", "level": "critical", "sudo": False, "target": None},
             "fixes": [{"action": "kill_top_cpu", "label": "💀 Kill Top CPU Process", "level": "critical", "sudo": False, "target": None}],
@@ -2996,7 +2996,7 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
             "message": f"CPU load elevated ({cpu_pct:.1f}%). System may experience latency.",
-            "remediation": "Monitor active processes for unexpected threads.",
+            "remediation": "Monitor active processes for unexpected threads or background operations. Terminate non-critical high-usage processes, or clear RAM cache if system load is secondary to memory thrashing.",
             "action": "view_bottlenecks",
             "fix": {"action": "kill_top_cpu", "label": "💀 Kill Top CPU Process", "level": "warning", "sudo": False, "target": None},
             "fixes": [{"action": "kill_top_cpu", "label": "💀 Kill Top CPU Process", "level": "warning", "sudo": False, "target": None}],
@@ -3028,7 +3028,7 @@ async def troubleshoot_health_check():
             "status": "critical",
             "value": f"{mem_pct}% RAM used ({avail_mb:.0f} MB free), {swap_pct}% Swap",
             "message": f"Memory critically low! Risk of OOM (Out Of Memory) process kills.",
-            "remediation": "Clear page cache or restart high memory consumers.",
+            "remediation": "Clear clean page caches using the 'Clear RAM Cache' button. If usage remains high, identify top memory-consuming processes in the Processes tab and restart/terminate them, or allocate more swap space/physical RAM.",
             "fix": {"action": "clear_pagecache", "label": "⚡ Clear RAM Cache", "level": "warning", "sudo": True, "target": None},
         })
     elif mem_pct > 80.0 or swap_pct > 50.0:
@@ -3040,7 +3040,7 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": f"{mem_pct}% RAM used, {swap_pct}% Swap used",
             "message": "Memory or swap usage is elevated.",
-            "remediation": "Consider dropping page caches or expanding swap space.",
+            "remediation": "Drop system page caches using the 'Clear RAM Cache' button below, or adjust the swap space and swapiness ('sysctl vm.swappiness=10') to prioritize RAM usage.",
             "fix": {"action": "clear_pagecache", "label": "⚡ Clear RAM Cache", "level": "warning", "sudo": True, "target": None},
         })
     else:
@@ -3078,7 +3078,7 @@ async def troubleshoot_health_check():
             "status": "critical",
             "value": ", ".join(disk_details) or "High usage",
             "message": "Disk space or inodes nearly full on partition(s)!",
-            "remediation": "Vacuum systemd journal or clean temp files.",
+            "remediation": "Vacuum systemd journal logs to free space immediately, or clean stale temp files. Run 'sudo apt-get clean' or 'sudo yum clean all' to clear package manager cache. Run 'du -sh /* | sort -h' to find large space-consuming folders.",
             "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
             "fixes": [
                 {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
@@ -3094,7 +3094,7 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": ", ".join(disk_details),
             "message": "Disk usage high (>80%) on partition(s).",
-            "remediation": "Vacuum journal files or archive old log files.",
+            "remediation": "Vacuum journal logs using the button below or archive old application log files. Consider setting up automatic log rotation under '/etc/logrotate.d/' to prevent partition bloat.",
             "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
             "fixes": [
                 {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
@@ -3152,7 +3152,7 @@ async def troubleshoot_health_check():
             "status": "critical" if len(failed_services) > 1 else "warning",
             "value": f"{len(failed_services)} failed unit(s): {', '.join(failed_services[:3])}",
             "message": f"Found failed systemd service(s): {', '.join(failed_services)}",
-            "remediation": "Try restarting failed services.",
+            "remediation": "Restart failed services using the auto-fix buttons below. If a service repeatedly fails, inspect its logs in the Log Inspector sub-tab or run 'journalctl -u <service-name> -e' to find and troubleshoot the root cause.",
             "fix": service_fixes[0],
             "fixes": service_fixes,
         })
@@ -3187,7 +3187,7 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": ", ".join(msg_parts),
             "message": f"Detected stuck process states: {', '.join(msg_parts)}.",
-            "remediation": "Inspect processes in Process Manager.",
+            "remediation": "Use the 'Reap Zombies' button below to nudge parents to reap their zombie children via SIGCHLD. For uninterruptible D-state processes, investigate disk I/O bottlenecks, network mount connectivity, or hardware errors, as they cannot be killed even with SIGKILL.",
             "fix": {"action": "reap_zombies", "label": "🧟 Reap Zombies (SIGCHLD)", "level": "warning", "sudo": False, "target": None},
         })
     else:
@@ -3224,7 +3224,7 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": f"{len(kernel_errors)} recent error entries in kernel buffer",
             "message": f"Recent critical error in dmesg: {kernel_errors[0]}",
-            "remediation": "Clear kernel error buffer and system logs.",
+            "remediation": "Review system dmesg logs via 'dmesg -T' to understand the source of the crash/error (e.g. hardware faults or OOM-killer). You can empty the dmesg buffer using 'Clear Kernel Logs' to reset this alert.",
             "fix": {"action": "clear_kernel_logs", "label": "🧹 Clear Kernel Logs", "level": "warning", "sudo": True, "target": None},
         })
     else:
@@ -3264,6 +3264,12 @@ async def troubleshoot_health_check():
         dns_fix = None
         if ping_ok and not dns_ok:
             dns_fix = {"action": "flush_dns", "label": "🌀 Flush DNS Cache", "level": "warning", "sudo": True, "target": None}
+        
+        if not ping_ok:
+            remediation = "Ping failed. Verify your network interface state using 'ip link' and physical/virtual network cables. Check local router settings, or restart the system's network service with 'sudo systemctl restart NetworkManager' or 'sudo systemctl restart systemd-networkd'."
+        else:
+            remediation = "DNS failed but ping succeeded. Try flushing your local DNS resolver cache using the 'Flush DNS Cache' button below, or verify server settings in '/etc/resolv.conf'."
+
         checks.append({
             "id": "net_connectivity",
             "category": "Network",
@@ -3271,7 +3277,7 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": f"Ping: {'OK' if ping_ok else 'FAIL'}, DNS: {'OK' if dns_ok else 'FAIL'}",
             "message": "Network ping test or DNS resolution failed.",
-            "remediation": "Run network diagnostic tests.",
+            "remediation": remediation,
             "action": "run_net_diag" if not dns_fix else None,
             "fix": dns_fix,
         })
@@ -3314,7 +3320,7 @@ async def troubleshoot_health_check():
             "status": "critical",
             "value": f"Journal uses {journal_usage_human} on disk",
             "message": "The systemd journal is consuming significant disk space and may pressure the root partition.",
-            "remediation": "Vacuum journal files or archive old log files.",
+            "remediation": "Vacuum systemd journal immediately using the 'Vacuum Journal Logs' button. To permanently restrict journal growth, set 'SystemMaxUse=500M' in '/etc/systemd/journald.conf' and restart the service via 'sudo systemctl restart systemd-journald'.",
             "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
         })
     elif journal_readable and journal_usage_gb >= 0.5:
@@ -3326,7 +3332,7 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": f"Journal uses {journal_usage_human} on disk",
             "message": "The systemd journal is growing; consider vacuuming entries older than a few days.",
-            "remediation": "Vacuum journal files or archive old log files.",
+            "remediation": "Consider vacuuming journal entries older than 2 days. Setting a hard limit on systemd-journal storage in '/etc/systemd/journald.conf' is highly recommended to protect server disk space.",
             "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
         })
     else:
@@ -3353,7 +3359,7 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": "reboot-required marker present",
             "message": "A kernel or core package update is pending. The host should be rebooted during the next maintenance window.",
-            "remediation": "Reboot the host when convenient (reboot is intentionally not exposed to the unauthenticated dashboard).",
+            "remediation": "Schedule a system reboot to apply core packages and kernel updates. Restart the host by running 'sudo reboot' or scheduling it via 'sudo shutdown -r +5' (warning users in 5 minutes).",
             "fix": None,
         })
     else:
@@ -3404,7 +3410,7 @@ async def troubleshoot_health_check():
                 "status": "warning",
                 "value": f"{len(exited_containers)} exited/dead container(s): " + ", ".join(c["name"] for c in exited_containers[:3]),
                 "message": f"Containers are not running: {', '.join(c['name'] + ' (' + c['status'] + ')' for c in exited_containers[:5])}",
-                "remediation": "Restart the affected containers.",
+                "remediation": "Restart stopped container(s) using the buttons below, or run 'docker start <container_name>'. Check crash logs by executing 'docker logs <container_name>' to diagnose the failure.",
                 "fix": container_fixes[0] if container_fixes else None,
                 "fixes": container_fixes,
             })
@@ -3436,7 +3442,7 @@ async def troubleshoot_health_check():
                     "status": "warning",
                     "value": f"{allocated:,} / {max_fds:,} fds ({fd_pct:.0f}%)",
                     "message": "The host is using a large share of its file-descriptor table; runaway processes should be inspected.",
-                    "remediation": "Inspect processes in Process Manager for leaked file handles.",
+                    "remediation": "Run 'lsof -n | awk \'{print $1}\' | sort | uniq -c | sort -rn | head' in terminal to identify processes with excessive open file handles. Restart the leaking process or service, or increase open file limits in '/etc/security/limits.conf'.",
                     "action": "view_processes",
                     "fix": None,
                 })
