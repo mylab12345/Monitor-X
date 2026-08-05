@@ -1132,7 +1132,7 @@ function renderHealthChecks(checks) {
                 </div>
                 <div class="check-card-val">${escapeHtml(c.value)}</div>
                 <div class="check-card-msg">${escapeHtml(c.message)}</div>
-                ${c.remediation && !fixList.length ? `<div class="check-card-msg" style="color:var(--text-dim);font-size:0.78rem;">💡 ${escapeHtml(c.remediation)}</div>` : ''}
+                ${c.remediation ? `<div class="check-card-msg recommended-fix" style="color:var(--text-dim);font-size:0.8rem;margin-top:10px;padding-top:10px;border-top:1px dashed rgba(255,255,255,0.15);">💡 <strong>Recommended Fix:</strong> ${escapeHtml(c.remediation)}</div>` : ''}
             </div>
             <div class="check-card-footer">
                 ${fixButtonHtml}
