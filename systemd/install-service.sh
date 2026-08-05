@@ -11,9 +11,27 @@ echo "=== MonitorX Systemd Service Installation ==="
 echo "User: $CURRENT_USER"
 echo "Repository Path: $REPO_DIR"
 
-if [ ! -d "$REPO_DIR/.venv" ]; then
-    echo "Virtual environment not found at $REPO_DIR/.venv! Running setup.sh first..."
+VENV_PYTHON="$REPO_DIR/.venv/bin/python3"
+venv_usable() {
+    # A dangling symlink fails -x/-e, so verify the interpreter by running it.
+    "$VENV_PYTHON" -c 'import sys' >/dev/null 2>&1
+}
+
+# The venv must be present AND its interpreter must actually run. A missing or
+# dangling interpreter makes systemd fail with "status=203/EXEC" on every
+# restart attempt, so rebuild the venv here instead of generating a unit that
+# can never start.
+if [ ! -d "$REPO_DIR/.venv" ] || ! venv_usable; then
+    echo "Virtual environment missing or broken at $REPO_DIR/.venv! Running setup.sh first..."
     bash "$REPO_DIR/setup.sh"
+fi
+
+if ! venv_usable; then
+    echo "ERROR: $VENV_PYTHON is still not usable after running setup.sh." >&2
+    echo "       Inspect it with:" >&2
+    echo "         ls -la $REPO_DIR/.venv/bin/" >&2
+    echo "         readlink -f $VENV_PYTHON" >&2
+    exit 1
 fi
 
 # Detect the group that grants read-write access to qemu:///system, so the
@@ -39,7 +57,7 @@ Wants=network.target
 Type=simple
 User=$CURRENT_USER
 WorkingDirectory=$REPO_DIR/backend
-ExecStart=$REPO_DIR/.venv/bin/python main.py
+ExecStart=$REPO_DIR/.venv/bin/python3 $REPO_DIR/backend/main.py
 Restart=always
 RestartSec=3
 StandardOutput=journal

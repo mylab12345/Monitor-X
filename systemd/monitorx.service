@@ -1,3 +1,17 @@
+# MonitorX systemd unit — TEMPLATE.
+#
+# The recommended way to install is to run ./systemd/install-service.sh: it
+# generates /etc/systemd/system/monitorx.service with the actual repository
+# path, user, and libvirt group substituted, then enables and starts it.
+#
+# If you install this template manually, replace <USER> and <HOME> with your
+# account name and home directory, copy it to /etc/systemd/system/, then run:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now monitorx
+#
+# A broken or missing <HOME>/MonitorX/.venv makes the service fail with
+# "status=203/EXEC" — re-run ./setup.sh to rebuild the virtual environment.
+
 [Unit]
 Description=MonitorX System Monitoring & Troubleshooting Dashboard
 After=network.target libvirtd.service
@@ -5,15 +19,15 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=%U
-WorkingDirectory=%h/MonitorX/backend
-ExecStart=%h/MonitorX/.venv/bin/python3 main.py
+User=<USER>
+WorkingDirectory=<HOME>/MonitorX/backend
+ExecStart=<HOME>/MonitorX/.venv/bin/python3 <HOME>/MonitorX/backend/main.py
 Restart=always
 RestartSec=3
 StandardOutput=journal
 StandardError=journal
-Environment="HOME=%h"
-Environment="PATH=%h/MonitorX/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="HOME=<HOME>"
+Environment="PATH=<HOME>/MonitorX/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Hypervisor URI used for both VM metrics and VM lifecycle controls.
 Environment="MONITORX_LIBVIRT_URI=qemu:///system"
 # Grants the dashboard read-write access to libvirt so the VM tab's
