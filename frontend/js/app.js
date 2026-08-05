@@ -41,6 +41,7 @@ const state = {
     consoleWs: null,
     consoleAddonFit: null,
     consoleVmId: null,
+    consoleResizeObserver: null,
     // Resize state
     resizeVmId: null,
     resizeVcpus: 2,
@@ -1710,12 +1711,13 @@ function openConsole(vmId, vmName) {
     });
 
     // Handle resize
-    const resizeObserver = new ResizeObserver(() => {
+    if (state.consoleResizeObserver) state.consoleResizeObserver.disconnect();
+    state.consoleResizeObserver = new ResizeObserver(() => {
         if (state.consoleAddonFit) {
             state.consoleAddonFit.fit();
         }
     });
-    resizeObserver.observe(container);
+    state.consoleResizeObserver.observe(container);
 }
 
 function closeConsole() {
@@ -1727,6 +1729,10 @@ function closeConsole() {
         state.consoleTerminal.dispose();
         state.consoleTerminal = null;
         state.consoleAddonFit = null;
+    }
+    if (state.consoleResizeObserver) {
+        state.consoleResizeObserver.disconnect();
+        state.consoleResizeObserver = null;
     }
     document.getElementById('console-modal').classList.remove('show');
     state.consoleVmId = null;
@@ -2132,6 +2138,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const target = event.target;
         const isTyping = target.matches('input, textarea, select, [contenteditable="true"]');
         if (isTyping) return;
+        // Never swallow browser/OS shortcuts: Ctrl/Cmd/Alt + key must pass
+        // through (e.g. Ctrl+R page reload, Cmd+R).
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
         if (event.key === '/') {
             event.preventDefault();
             focusActiveTabSearch();

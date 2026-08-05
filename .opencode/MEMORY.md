@@ -323,7 +323,24 @@ POST /api/services/{name}/{action}  // start/stop/restart/reload/enable/disable
 
 ## File Change Log
 
-### v2.2 (Latest — 2026-07-29) — NASA MISSION-CONTROL THEME
+### v2.3 (Maintenance — 2026-08-05) — RELIABILITY & BUG-FIX PASS
+**Fixed** (backend/main.py):
+- `_virsh_command()` / `_build_virsh_modify_command()` now emit `--no-pkttyagent`, matching the sudoers policy installed by `systemd/install-service.sh`. Previously sudo rejected EVERY VM control command on unprivileged installs ("not allowed to execute") — same bug class as the old `--no-ask-password` mismatch.
+- Alert engine: `cooldown_minutes` is now enforced and acknowledged/resolved incidents no longer re-open every 2s snapshot (incident flood). History cleanup DELETE throttled to every 10 min; SQLite ops DB now uses WAL + busy_timeout.
+- Zombie/hung-process detection in the health check scans ALL processes instead of the CPU-sorted top-200 (zombies have ~0% CPU and were truncated away).
+- `kill_process`: SIGTERM now gets a 5s grace period before escalating to SIGKILL (was 0.5s, making SIGTERM pointless).
+- `get_process_detail`: per-field degradation on AccessDenied instead of failing the whole request (unprivileged installs can now inspect root-owned processes).
+- VM console: VNC autoport (-1) handled, dead VNC listeners fall back to serial console, and the serial path runs `virsh console` on a real pty with policy-matching argv (was broken under pipes + not whitelisted).
+- `resize` endpoint: audit log records real success/failure instead of always `true`.
+- DNS lookup uses `get_running_loop()`; `/api/stats/processes` limit bounded.
+
+**Fixed** (frontend):
+- app.js keyboard 'r' handler now ignores Ctrl/Cmd/Alt combos (browser reload still works); duplicate 'r' handler removed from nexus-hud.js.
+- VM console ResizeObserver is disconnected on close (leak).
+
+**Files changed**: `backend/main.py`, `systemd/install-service.sh` (policy now also whitelists `console -- *`, `setvcpus *`, `setmem *`, `setmaxmem *`), `frontend/js/app.js`, `frontend/js/nexus-hud.js`, `README.md`, `.opencode/MEMORY.md`.
+
+### v2.2 (Previous — 2026-07-29) — NASA MISSION-CONTROL THEME
 **Added**: Full flight-control / mission-control HUD re-skin of the existing dashboard. No backend or app.js changes — pure progressive enhancement.
 
 **Files changed**:

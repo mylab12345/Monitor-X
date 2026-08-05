@@ -9,3 +9,5 @@ build/
 *.log
 # Local MonitorX operations history and configuration
 monitorx-operations.db
+monitorx-operations.db-shm
+monitorx-operations.db-wal

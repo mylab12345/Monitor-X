@@ -332,13 +332,10 @@
             gTimer = setTimeout(() => { gPrefix = false; }, 900);
             return;
         }
-        if (e.key.toLowerCase() === 'r' && !e.ctrlKey && !e.metaKey) {
-            e.preventDefault();
-            click('#refresh-btn');
-            showToast('Refreshing dashboard…', 'info', { icon: '🔄', duration: 1400 });
-        }
-        if (e.key.toLowerCase() === 't') { click('#theme-toggle'); }
-        if (e.key === 'D' && !e.ctrlKey && !e.metaKey) { switchTab('troubleshoot'); click('#run-full-scan-btn'); }
+        // NOTE: plain 'r' is intentionally NOT handled here — app.js already
+        // binds it to the refresh button. A second handler would refresh twice.
+        if (e.key.toLowerCase() === 't' && !e.ctrlKey && !e.metaKey && !e.altKey) { click('#theme-toggle'); }
+        if (e.key === 'D' && !e.ctrlKey && !e.metaKey && !e.altKey) { switchTab('troubleshoot'); click('#run-full-scan-btn'); }
     });
 
     /* ── Help / Keyboard shortcuts modal ────────────────────────────────── */
