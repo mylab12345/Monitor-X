@@ -8,7 +8,8 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 
 - **Ultra-Modern Glassmorphism UI** — High-tech dark slate interface with neon accent glows, live sparklines, and dark/light mode toggle.
 - **Real-Time Canvas Sparklines** — Live 30s trend graphs for CPU, Memory, and Network Bandwidth.
-- **Troubleshoot Mode Hub** — Automated 7-point diagnostic scan calculating a **System Health Index (0-100)** score with **1-Click Remediation Fixes**.
+- **Troubleshoot Mode Hub** — Automated diagnostic scan (11 check categories) calculating a **System Health Index (0-100)** score with **1-Click Remediation Fixes**.
+- **Auto-Fix Engine** — Every issue the scan detects gets a fix button *inside* the hub, plus a **⚡ Fix All Issues** batch runner and a **Review Fix Plan** modal to pick exactly which repairs to apply. Fixes include: clear RAM page cache, vacuum systemd journal, restart failed or individual services, clear the kernel error buffer, kill runaway processes (owner-guarded), reap zombie processes via SIGCHLD, flush the DNS resolver cache, clean stale temp files, and restart exited Docker containers. Every execution is timed, audited, and shown in the **Remediation History** panel — the hub re-scans automatically after each fix and reports which issues it resolved.
 - **Live Log Inspector** — Auto-tail streaming for system logs and `dmesg` with level filtering (`ALL`, `🔴 ERROR`, `⚠️ WARN`, `ℹ️ INFO`) and regex search.
 - **Network Diagnostic Suite** — Interactive ICMP Ping latency tester, TCP Port connectivity checker, DNS resolver benchmark, and active listening ports table.
 - **Resource Bottleneck Finder** — Identifies top CPU, RAM, and thread consumers alongside stuck/zombie process killers.
@@ -140,9 +141,9 @@ MonitorX/
 1. **Persistent Time-Series Storage**:
    - Connect an embedded SQLite, TimescaleDB, or Prometheus exporter to store historical metrics over days/weeks for long-term trend analysis.
 2. **Automated Notification Webhooks**:
-   - Send instant alerts (Slack, Discord, Telegram, or Email) when the System Health Index drops below a threshold (e.g. `< 70`).
+   - Send instant alerts (Slack, Discord, Telegram, or Email) when the System Health Index drops below a threshold (e.g. `< 70`). *Partially done: the Operations Center already ships alert rules + webhooks.*
 3. **Docker & Container Monitoring**:
-   - Add a dedicated Container tab integrating with the Docker daemon API to monitor container CPU/RAM usage, status, and logs.
+   - Add a dedicated Container tab integrating with the Docker daemon API to monitor container CPU/RAM usage, status, and logs. *Partially done: exited/crashed containers are detected by the health scan and can be restarted from the Auto-Fix Engine.*
 4. **Custom Dashboard Widgets**:
    - Allow users to pin, drag, and resize metric cards or custom command outputs to create personalized monitoring views.
 5. **Service safety workflow**:

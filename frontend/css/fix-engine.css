@@ -1,0 +1,435 @@
+/* ==========================================================================
+   MonitorX Auto-Fix Engine — Troubleshoot Hub
+   Fix console, batch run progress, plan review modal, remediation history.
+   ========================================================================== */
+
+.fix-engine {
+    background: var(--bg-card);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-lg);
+    padding: 20px 24px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow-card);
+    position: relative;
+    overflow: hidden;
+}
+
+.fix-engine::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple), var(--success));
+    opacity: 0.85;
+}
+
+.fix-engine-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.fix-engine-title h3 {
+    font-size: 1.1rem;
+    font-weight: 800;
+    margin-bottom: 4px;
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.fix-engine-title p {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    max-width: 520px;
+}
+
+.fix-engine-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.fix-summary-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 5px 12px;
+    border-radius: 20px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+
+.fix-summary-badge.warn {
+    background: var(--warning-bg);
+    color: var(--warning);
+    border-color: var(--warning-glow);
+}
+
+.fix-summary-badge.ok {
+    background: var(--success-bg);
+    color: var(--success);
+    border-color: var(--success-glow);
+}
+
+.fix-summary-badge.running {
+    background: var(--accent-glow);
+    color: var(--accent-blue);
+    border-color: var(--border-hover);
+    animation: fixPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes fixPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+}
+
+/* Batch run progress rows */
+.fix-run-area {
+    margin-top: 16px;
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-md);
+    background: rgba(0, 0, 0, 0.25);
+    padding: 10px 14px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.fix-run-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 4px;
+    border-bottom: 1px dashed var(--border-card);
+    font-size: 0.85rem;
+}
+
+.fix-run-row:last-child { border-bottom: none; }
+
+.fix-run-icon {
+    width: 22px;
+    text-align: center;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+
+.fix-run-label {
+    font-weight: 600;
+    flex-shrink: 0;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fix-run-msg {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fix-run-row.running .fix-run-icon { animation: fixSpin 1s linear infinite; }
+.fix-run-row.success { color: var(--success); }
+.fix-run-row.failed { color: var(--danger); }
+.fix-run-row.failed .fix-run-msg { color: var(--danger); white-space: normal; }
+.fix-run-row.success .fix-run-msg { color: var(--success); }
+
+@keyframes fixSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.fix-run-summary {
+    margin-top: 10px;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 0.82rem;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--success-bg);
+    color: var(--success);
+    border: 1px solid var(--success-glow);
+}
+
+.fix-run-summary.partial {
+    background: var(--warning-bg);
+    color: var(--warning);
+    border-color: var(--warning-glow);
+}
+
+/* Remediation history */
+.fix-history-card {
+    margin-top: 16px;
+    border-top: 1px dashed var(--border-card);
+    padding-top: 14px;
+}
+
+.fix-history-card .card-header {
+    margin-bottom: 10px;
+}
+
+.fix-history-card h4 {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-muted);
+}
+
+.fix-history-list { max-height: 220px; overflow-y: auto; }
+
+.fix-history-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 0.8rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.fix-history-item:hover { background: rgba(255, 255, 255, 0.04); }
+
+.fix-history-time {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    flex-shrink: 0;
+}
+
+.fix-history-action {
+    font-weight: 600;
+    flex-shrink: 0;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fix-history-target {
+    color: var(--accent-blue);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    flex-shrink: 0;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fix-history-outcome {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 12px;
+    flex-shrink: 0;
+}
+
+.fix-history-outcome.success { background: var(--success-bg); color: var(--success); }
+.fix-history-outcome.failed { background: var(--danger-bg); color: var(--danger); }
+
+.fix-history-detail {
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+/* Check-card fix buttons */
+.check-card-footer { gap: 8px; flex-wrap: wrap; }
+
+.btn-fix {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.btn-fix:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.btn-fix.warning {
+    background: var(--warning-bg);
+    color: var(--warning);
+    border-color: var(--warning-glow);
+}
+
+.btn-fix.warning:hover:not(:disabled) {
+    background: var(--warning);
+    color: #1a1205;
+    box-shadow: var(--warning-glow);
+}
+
+.btn-fix.critical {
+    background: var(--danger-bg);
+    color: var(--danger);
+    border-color: var(--danger-glow);
+}
+
+.btn-fix.critical:hover:not(:disabled) {
+    background: var(--danger);
+    color: #fff;
+    box-shadow: var(--danger-glow);
+}
+
+.btn-fix.info {
+    background: var(--accent-glow);
+    color: var(--accent-blue);
+    border-color: var(--border-hover);
+}
+
+.btn-fix.info:hover:not(:disabled) {
+    background: var(--accent-blue);
+    color: #04222f;
+}
+
+.btn-fix.running {
+    pointer-events: none;
+    opacity: 0.7;
+}
+
+.btn-fix.running::before {
+    content: '⏳';
+    animation: fixSpin 1s linear infinite;
+    display: inline-block;
+}
+
+.fix-card-result {
+    margin-top: 10px;
+    padding: 7px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 0.78rem;
+    font-family: 'JetBrains Mono', monospace;
+    word-break: break-word;
+}
+
+.fix-card-result.success { background: var(--success-bg); color: var(--success); border: 1px solid var(--success-glow); }
+.fix-card-result.failed { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger-glow); }
+
+/* Fix plan modal */
+.fix-plan-note {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+}
+
+.fix-plan-list {
+    max-height: 46vh;
+    overflow-y: auto;
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-md);
+    background: rgba(0, 0, 0, 0.2);
+    padding: 6px;
+}
+
+.fix-plan-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    border-bottom: 1px dashed var(--border-card);
+    transition: var(--transition);
+}
+
+.fix-plan-item:hover { background: rgba(255, 255, 255, 0.04); }
+.fix-plan-item:last-child { border-bottom: none; }
+
+.fix-plan-check {
+    width: 18px;
+    height: 18px;
+    margin-top: 3px;
+    accent-color: var(--accent-blue);
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.fix-plan-body { flex: 1; min-width: 0; }
+
+.fix-plan-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.fix-plan-label {
+    font-size: 0.88rem;
+    font-weight: 700;
+}
+
+.fix-plan-target {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.74rem;
+    color: var(--accent-blue);
+    background: rgba(56, 189, 248, 0.1);
+    border: 1px solid var(--border-hover);
+    padding: 1px 8px;
+    border-radius: 12px;
+}
+
+.fix-plan-desc {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 3px;
+    line-height: 1.45;
+}
+
+.fix-plan-level {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 12px;
+    flex-shrink: 0;
+}
+
+.fix-plan-level.warning { background: var(--warning-bg); color: var(--warning); }
+.fix-plan-level.critical { background: var(--danger-bg); color: var(--danger); }
+.fix-plan-level.info { background: var(--accent-glow); color: var(--accent-blue); }
+
+.fix-plan-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 16px;
+}
+
+.fix-plan-item.unavailable {
+    opacity: 0.55;
+}
+
+.fix-plan-item.unavailable .fix-plan-check:disabled {
+    cursor: not-allowed;
+}
+
+.fix-unavailable-note {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-top: 2px;
+}
+
+@media (max-width: 768px) {
+    .fix-engine { padding: 16px; }
+    .fix-engine-head { flex-direction: column; align-items: flex-start; }
+    .fix-engine-actions { width: 100%; }
+    .fix-run-label { max-width: 160px; }
+    .fix-history-item { flex-wrap: wrap; }
+    .fix-history-detail { flex-basis: 100%; white-space: normal; }
+}
