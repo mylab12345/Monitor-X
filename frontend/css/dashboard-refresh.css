@@ -1,0 +1,118 @@
+/* MonitorX — calm, modern dashboard layer
+   Loaded last to prioritize operational clarity over decorative HUD effects. */
+:root {
+    --mx-surface: rgba(13, 22, 40, .92);
+    --mx-surface-raised: rgba(20, 32, 54, .94);
+    --mx-line: rgba(148, 163, 184, .15);
+    --mx-line-strong: rgba(125, 211, 252, .30);
+    --mx-text-soft: #a7b7cc;
+    --mx-cyan: #62d7ff;
+    --mx-shadow: 0 16px 38px rgba(0, 0, 0, .20);
+}
+
+/* Keep the screen focused on data, not simulation effects. */
+.nasa-overlay, .nx-stars, .nasa-boot, .nasa-ticker,
+.nx-fab, .nx-progress, .nx-cmd-overlay, .nx-shortcuts-overlay { display: none !important; }
+body::before { animation: none; opacity: .6; }
+
+body {
+    background: radial-gradient(900px 500px at 8% -10%, rgba(41, 115, 164, .18), transparent 66%),
+                radial-gradient(700px 420px at 95% 0%, rgba(79, 70, 229, .10), transparent 70%),
+                var(--bg-base);
+}
+.app-header {
+    min-height: 72px;
+    padding: 14px clamp(20px, 3vw, 48px);
+    background: rgba(5, 11, 23, .88);
+    border-bottom-color: var(--mx-line);
+    box-shadow: none;
+}
+.app-header::after { animation: none; opacity: .35; }
+.logo { font-family: Inter, system-ui, sans-serif; letter-spacing: -.04em; text-shadow: none; }
+.logo-icon { border-radius: 9px; filter: none; }
+.version-tag { font-family: Inter, system-ui, sans-serif; letter-spacing: .06em; }
+.mission-readout { font-family: 'JetBrains Mono', monospace; }
+
+.tab-nav {
+    top: 72px;
+    padding: 0 clamp(14px, 3vw, 42px);
+    gap: 6px;
+    background: rgba(6, 13, 26, .84);
+    border-bottom: 1px solid var(--mx-line);
+    box-shadow: none;
+    backdrop-filter: blur(18px);
+}
+.tab-btn { border-radius: 8px 8px 0 0; font-size: .83rem; font-weight: 650; }
+.tab-btn::after { bottom: 0; height: 2px; }
+.tab-btn.active { background: rgba(98, 215, 255, .08); }
+.tab-btn.active::after { left: 14px; right: 14px; background: var(--mx-cyan); }
+.highlight-tab { box-shadow: none !important; }
+
+.main-content { max-width: 1600px; width: 100%; margin: 0 auto; padding: 28px clamp(18px, 3vw, 44px) 48px; }
+.dashboard-context { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin: 4px 0 24px; }
+.dashboard-context h2 { font-size: clamp(1.35rem, 2vw, 1.7rem); letter-spacing: -.04em; color: var(--text-main); }
+.dashboard-context p { margin-top: 5px; color: var(--mx-text-soft); font-size: .88rem; }
+.dashboard-context .context-status { display: inline-flex; align-items: center; gap: 8px; color: var(--mx-text-soft); font: 600 .72rem 'JetBrains Mono', monospace; white-space: nowrap; }
+.dashboard-context .context-status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px rgba(37,230,160,.12); }
+
+.operations-center, .chart-card, .metric-card, .issues-panel, .top-processes,
+.containers-panel, .pods-panel, .troubleshoot-header-card, .troubleshoot-card,
+.vm-card, .vm-audit-panel, .table-container {
+    background: var(--mx-surface);
+    border: 1px solid var(--mx-line);
+    box-shadow: var(--mx-shadow);
+    backdrop-filter: blur(14px);
+}
+.operations-center { border-radius: 14px; padding: 20px; }
+.operations-center h2, .card-header h2, .card-header h3 { letter-spacing: -.025em; }
+.chart-card, .metric-card { border-radius: 13px; }
+.chart-card::before, .metric-card::before { background: linear-gradient(90deg, transparent, rgba(98,215,255,.45), transparent); }
+.metric-card:hover, .chart-card:hover, .troubleshoot-card:hover, .vm-card:hover,
+.container-card:hover, .check-card:hover {
+    transform: translateY(-2px) !important;
+    border-color: var(--mx-line-strong);
+    box-shadow: 0 18px 40px rgba(0,0,0,.25) !important;
+    background: var(--mx-surface-raised) !important;
+}
+.metric-value { color: var(--text-main); font-variant-numeric: tabular-nums; }
+.chart-value, .badge, .pill, .uptime-badge { font-variant-numeric: tabular-nums; }
+
+/* A more scannable hierarchy for tables, filters, and controls. */
+.search-input, .filter-select {
+    min-height: 38px;
+    border-color: var(--mx-line);
+    background: rgba(4, 11, 23, .62);
+}
+.search-input:focus, .filter-select:focus { border-color: var(--mx-cyan); }
+.btn { border-radius: 8px; font-weight: 650; }
+.btn-primary { box-shadow: none; }
+.data-table thead th {
+    color: var(--text-muted);
+    font-size: .68rem;
+    text-transform: uppercase;
+    letter-spacing: .075em;
+    background: rgba(3, 9, 20, .35);
+}
+.data-table tbody tr { border-bottom-color: rgba(148,163,184,.08); }
+.data-table tbody tr:hover { background: rgba(98,215,255,.06) !important; }
+
+.app-footer { padding: 18px clamp(20px, 3vw, 48px); color: var(--text-dim); border-top-color: var(--mx-line); }
+body.light-theme {
+    --mx-surface: rgba(255,255,255,.88);
+    --mx-surface-raised: #fff;
+    --mx-line: rgba(30, 41, 59, .12);
+    --mx-line-strong: rgba(2, 132, 199, .30);
+    --mx-text-soft: #52657c;
+    --mx-shadow: 0 14px 34px rgba(15, 23, 42, .08);
+}
+body.light-theme .app-header, body.light-theme .tab-nav { background: rgba(255,255,255,.88); }
+body.light-theme .search-input, body.light-theme .filter-select { background: rgba(248,250,252,.94); }
+
+@media (max-width: 900px) { .tab-nav { top: 72px; } .dashboard-context { margin-top: 0; } }
+@media (max-width: 700px) {
+    .app-header { min-height: 0; }
+    .tab-nav { top: 118px; }
+    .main-content { padding: 20px 14px 36px; }
+    .dashboard-context { align-items: flex-start; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+    .dashboard-context .context-status { font-size: .68rem; }
+}
