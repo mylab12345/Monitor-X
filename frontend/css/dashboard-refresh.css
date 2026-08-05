@@ -48,7 +48,9 @@ body {
 .tab-btn.active::after { left: 14px; right: 14px; background: var(--mx-cyan); }
 .highlight-tab { box-shadow: none !important; }
 
-.main-content { max-width: 1600px; width: 100%; margin: 0 auto; padding: 28px clamp(18px, 3vw, 44px) 48px; }
+/* Full-bleed layout: dashboard spans the entire terminal/system viewport width
+   (no 1600px cap) so every panel is visible edge-to-edge at any screen size. */
+.main-content { max-width: none; width: 100%; margin: 0 auto; padding: 28px clamp(14px, 2vw, 32px) 48px; }
 .dashboard-context { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin: 4px 0 24px; }
 .dashboard-context h2 { font-size: clamp(1.35rem, 2vw, 1.7rem); letter-spacing: -.04em; color: var(--text-main); }
 .dashboard-context p { margin-top: 5px; color: var(--mx-text-soft); font-size: .88rem; }
