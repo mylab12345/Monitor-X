@@ -97,6 +97,12 @@ function connectWebSocket() {
     ws.onmessage = (event) => {
         try {
             statsData = JSON.parse(event.data);
+            // P1: aria-live announcement + throttle (update max 1/sec)
+            if (window.__announceTimeout) clearTimeout(window.__announceTimeout);
+            window.__announceTimeout = setTimeout(() => {
+                const ann = document.getElementById('sparkline-announce');
+                if (ann && statsData) ann.textContent = `CPU ${(statsData.cpu?.percent ?? '--')}%, Memory ${(statsData.memory?.percent ?? '--')}%`;
+            }, 1000);
             updateDashboard(statsData);
             updateLastUpdate();
         } catch (e) { console.error('Error parsing WebSocket frame:', e); }
