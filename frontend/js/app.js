@@ -292,6 +292,11 @@ function updateTopProcesses(processes) {
     });
 }
 
+// Tracks alert messages the operator has manually dismissed via the "Clear Issues"
+// button, so they stop re-appearing while the underlying condition persists but do
+// come back once it clears and re-triggers.
+const dismissedIssues = new Set();
+
 function checkOSIssues(data) {
     const issues = [];
 
@@ -356,28 +361,50 @@ function checkOSIssues(data) {
         }
     }
 
-    const criticalCount = issues.filter(i => i.severity === 'critical').length;
-    const warningCount = issues.filter(i => i.severity === 'warning').length;
+    // Forget dismissals for conditions that no longer exist so they can re-trigger.
+    const activeKeys = new Set(issues.map(i => i.message));
+    for (const key of Array.from(dismissedIssues)) {
+        if (!activeKeys.has(key)) dismissedIssues.delete(key);
+    }
+
+    // Drop any alerts the operator dismissed; keep the rest visible.
+    const visibleIssues = issues.filter(i => !dismissedIssues.has(i.message));
+
+    const criticalCount = visibleIssues.filter(i => i.severity === 'critical').length;
+    const warningCount = visibleIssues.filter(i => i.severity === 'warning').length;
     document.getElementById('issues-count-critical').textContent = `${criticalCount} Critical`;
     document.getElementById('issues-count-warning').textContent = `${warningCount} Warnings`;
 
     const list = document.getElementById('issues-list');
     list.innerHTML = '';
 
-    if (issues.length === 0) {
+    if (visibleIssues.length === 0) {
         list.innerHTML = '<div class="issue-item success">✓ All core system monitors report healthy status.</div>';
         return;
     }
 
-    issues.forEach(issue => {
+    visibleIssues.forEach(issue => {
         list.appendChild(createDashboardIssueItem(issue));
     });
+}
+
+// Dismiss every currently-visible alert. Dismissed alerts stay hidden until their
+// underlying condition clears and later re-triggers.
+function clearIssues() {
+    document.querySelectorAll('#issues-list .issue-item').forEach(item => {
+        const message = item.dataset.message;
+        if (message) dismissedIssues.add(message);
+    });
+    // Re-render immediately from the last known dashboard snapshot.
+    if (statsData) checkOSIssues(statsData);
+    showToast('Current alerts dismissed', 'info');
 }
 
 function createDashboardIssueItem(issue) {
     const item = document.createElement('div');
     const isCritical = issue.severity === 'critical';
     item.className = `issue-item ${isCritical ? 'danger' : 'warning'}`;
+    item.dataset.message = issue.message;
 
     const msg = document.createElement('span');
     msg.innerHTML = `${isCritical ? '🚨 <b>CRITICAL:</b>' : '⚠️ <b>WARNING:</b>'} ${escapeHtml(issue.message)}`;
@@ -2081,6 +2108,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // View All Procs button
     document.getElementById('view-all-procs-btn')?.addEventListener('click', () => switchTab('processes'));
+
+    // Clear Issues button (dismisses current OS alerts)
+    document.getElementById('clear-issues-btn')?.addEventListener('click', clearIssues);
 
     // Process Search & Filter
     document.getElementById('proc-search')?.addEventListener('input', (e) => {
