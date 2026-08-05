@@ -117,26 +117,46 @@ function connectWebSocket() {
 }
 
 /* Dashboard Updates */
+// Each panel is updated inside its own guarded slot: a rendering error in one
+// panel (missing field, bad data shape, a transient null) degrades only that
+// panel — the other live panels keep rendering on the next WebSocket frame.
 function updateDashboard(data) {
     if (!data) return;
 
-    updateCpu(data.cpu);
-    updateMemory(data.memory);
-    updateDisk(data.disk);
-    updateNetwork(data.network);
-    updateGpu(data.gpu);
-    updateSystem(data.system);
-    updateTopProcesses(data.processes);
-    checkOSIssues(data);
-    updateCharts(data);
+    const guard = (name, fn) => {
+        try { fn(); }
+        catch (e) { console.error(`[panel:${name}] render failed:`, e); }
+    };
 
-    if (state.currentTab === 'processes') filterProcesses();
-    if (state.currentTab === 'vms' && data.vms) renderVms(data.vms);
+    guard('cpu',      () => updateCpu(data.cpu));
+    guard('memory',   () => updateMemory(data.memory));
+    guard('disk',     () => updateDisk(data.disk));
+    guard('network',  () => updateNetwork(data.network));
+    guard('gpu',      () => updateGpu(data.gpu));
+    guard('system',   () => updateSystem(data.system));
+    guard('processes',() => updateTopProcesses(data.processes));
+    guard('issues',   () => checkOSIssues(data));
+    guard('charts',   () => updateCharts(data));
+
+    if (state.currentTab === 'processes') guard('process-table', filterProcesses);
+
+    // VM panel: render inventory only when we have a real payload.
+    if (state.currentTab === 'vms') {
+        if (Array.isArray(data.vms)) guard('vms', () => renderVms(data.vms));
+        else if (data.vms === null) guard('vms', renderVmsUnavailable);
+    }
+
     if (state.currentTab === 'dashboard') {
-        if (data.containers) renderContainers(data.containers);
-        if (data.pods) {
+        // Containers: [] = daemon up with zero containers; null = unavailable.
+        if (Array.isArray(data.containers)) guard('containers', () => renderContainers(data.containers));
+        else if (data.containers === null) guard('containers', renderContainersUnavailable);
+        if (Array.isArray(data.pods)) {
             document.getElementById('pods-panel').style.display = data.pods.length > 0 ? 'block' : 'none';
-            renderPods(data.pods);
+            guard('pods', () => renderPods(data.pods));
+        } else if (data.pods === null) {
+            document.getElementById('pods-panel').style.display = 'none';
+            const pc = document.getElementById('pod-count');
+            if (pc) pc.textContent = 'K8s N/A';
         }
     }
 }
@@ -1304,12 +1324,7 @@ async function fetchVms() {
     try {
         const res = await fetch(`${API_BASE}/api/stats/vms`);
         if (res.status === 404) {
-            container.innerHTML = `
-                <div class="vm-empty-state">
-                    <div class="icon">⚠️</div>
-                    <h3>VM monitoring unavailable</h3>
-                    <p>The libvirt daemon is not running on this host, or the <code>python3-libvirt</code> package is not installed. Start the service and reload MonitorX to enable.</p>
-                </div>`;
+            renderVmsUnavailable();
             return;
         }
         if (!res.ok) throw new Error(await readApiError(res));
@@ -1317,6 +1332,20 @@ async function fetchVms() {
     } catch (e) {
         container.innerHTML = `<div class="issue-item danger">Error: ${escapeHtml(e.message)}</div>`;
     }
+}
+
+// Rendered when the WebSocket snapshot carries vms:null (libvirt unavailable).
+// Keeps the VMs tab useful instead of hanging on the "Loading VMs..." splash.
+function renderVmsUnavailable() {
+    const container = document.getElementById('vm-list');
+    if (!container) return;
+    document.getElementById('vm-count').textContent = '0 VMs';
+    container.innerHTML = `
+        <div class="vm-empty-state">
+            <div class="icon">⚠️</div>
+            <h3>VM monitoring unavailable</h3>
+            <p>The libvirt daemon is not running on this host, or the <code>python3-libvirt</code> package is not installed. Start the service and reload MonitorX to enable.</p>
+        </div>`;
 }
 
 async function fetchVmCapabilities() {
@@ -1786,8 +1815,7 @@ async function fetchContainers() {
     try {
         const res = await fetch(`${API_BASE}/api/stats/containers`);
         if (res.status === 404) {
-            content.innerHTML = '<p class="no-data">Docker is not installed on this host. Install Docker to monitor containers.</p>';
-            document.getElementById('container-count').textContent = 'Docker N/A';
+            renderContainersUnavailable();
             return;
         }
         if (!res.ok) throw new Error(await readApiError(res));
@@ -1796,6 +1824,16 @@ async function fetchContainers() {
     } catch (e) {
         content.innerHTML = `<p class="no-data">Error: ${escapeHtml(e.message)}</p>`;
     }
+}
+
+// Rendered when the WebSocket snapshot carries containers:null (docker CLI
+// missing, daemon down, or the 10s/20s collection timeout elapsed).
+function renderContainersUnavailable() {
+    const content = document.getElementById('containers-content');
+    if (!content) return;
+    content.innerHTML = '<p class="no-data">Docker is not installed or the daemon is unreachable on this host. Install Docker to monitor containers.</p>';
+    const badge = document.getElementById('container-count');
+    if (badge) badge.textContent = 'Docker N/A';
 }
 
 function renderContainers(containers) {

@@ -334,6 +334,31 @@ VIRSH_BIN = shutil.which("virsh") or "/usr/bin/virsh"
 VM_ACTION_TIMEOUT = 60.0
 
 
+async def _run_cmd(cmd: list, timeout: float = 15.0, **kwargs):
+    """Run a subprocess with a hard timeout; never hang the request forever.
+
+    Returns ``(returncode, stdout_bytes, stderr_bytes)``. On timeout the
+    process is killed and ``asyncio.TimeoutError`` is raised so callers can
+    degrade gracefully instead of blocking the event loop indefinitely.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        **kwargs,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.communicate()
+        except Exception:
+            pass
+        raise
+    return proc.returncode, stdout, stderr
+
+
 class ConnectionManager:
     """Manages WebSocket connections"""
     
@@ -1521,8 +1546,8 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
     Libvirt exposes CPU time and I/O counters cumulatively, therefore rates are
     derived from two successive samples. Values are zero on the first poll.
 
-    Libvirt operations are blocking, so they run in a thread executor with a
-    timeout to prevent the async event loop from hanging.
+    Every libvirt call — including the per-domain reads — runs in a thread
+    executor with a timeout to prevent the async event loop from hanging.
     """
     if not LIBVIRT_AVAILABLE:
         return None
@@ -1563,82 +1588,49 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
         active_domain_ids = set()
         for domain in domains:
             try:
-                info = domain.info()  # state, maxMem KiB, memory KiB, vCPUs, cpuTime ns
-                state = state_map.get(info[0], "unknown")
-                domain_id = domain.ID() if domain.isActive() else -1
-                vm: Dict[str, Any] = {
-                    "id": domain_id, "uuid": domain.UUIDString(), "name": domain.name(),
-                    "state": state, "active": bool(domain.isActive()), "vcpus": info[3],
-                    "max_memory": info[1], "memory": info[2], "cpu_time": info[4],
-                    "cpu_percent": 0.0, "memory_used": 0, "memory_total": info[1],
-                    "memory_percent": 0.0, "disk_read_bytes_sec": 0.0,
-                    "disk_write_bytes_sec": 0.0, "network_rx_bytes_sec": 0.0,
-                    "network_tx_bytes_sec": 0.0, "rates_available": False,
-                    "disks": [], "interfaces": [],
-                }
-                if not vm["active"]:
-                    vms.append(vm)
+                # All blocking libvirt reads for one domain run together in the
+                # executor so a slow guest cannot stall the event loop.
+                vm = await _run_libvirt(
+                    lambda d=domain: _collect_domain_snapshot(d, state_map),
+                    timeout=10.0,
+                )
+                if vm is None:
                     continue
 
-                active_domain_ids.add(vm["uuid"])
-                memory = domain.memoryStats()
-                memory_total = memory.get("actual", info[1]) or info[1]
-                # rss is the best guest-used figure when the balloon driver reports it.
-                memory_used = memory.get("rss", memory.get("actual", info[2]))
-                if "unused" in memory and "actual" in memory:
-                    memory_used = max(memory_used, memory["actual"] - memory["unused"])
-                vm.update({
-                    "memory_used": memory_used, "memory_total": memory_total,
-                    "memory_percent": round((memory_used / memory_total * 100) if memory_total else 0, 1),
-                })
-
-                disk_read = disk_write = net_rx = net_tx = 0
-                try:
-                    root = ET.fromstring(domain.XMLDesc(0))
-                    disk_targets = [node.get("dev") for node in root.findall("./devices/disk/target") if node.get("dev")]
-                    interface_targets = [node.get("dev") for node in root.findall("./devices/interface/target") if node.get("dev")]
-                except ET.ParseError:
-                    disk_targets, interface_targets = [], []
-
-                for target in disk_targets:
-                    try:
-                        stats = domain.blockStats(target)
-                        # rd_req, rd_bytes, wr_req, wr_bytes, errs
-                        read_bytes, write_bytes = stats[1], stats[3]
-                        disk_read += read_bytes
-                        disk_write += write_bytes
-                        try:
-                            capacity, allocation, _ = domain.blockInfo(target, 0)
-                        except Exception:
-                            capacity, allocation = 0, 0
-                        vm["disks"].append({"target": target, "read_bytes": read_bytes, "write_bytes": write_bytes,
-                                            "capacity": capacity, "allocation": allocation})
-                    except Exception:
-                        continue
-                for target in interface_targets:
-                    try:
-                        stats = domain.interfaceStats(target)
-                        # rx_bytes, rx_packets, rx_errs, rx_drop, tx_bytes, ...
-                        rx_bytes, tx_bytes = stats[0], stats[4]
-                        net_rx += rx_bytes
-                        net_tx += tx_bytes
-                        vm["interfaces"].append({"target": target, "rx_bytes": rx_bytes, "tx_bytes": tx_bytes})
-                    except Exception:
-                        continue
-
-                previous = vm_metric_samples.get(vm["uuid"])
-                if previous:
-                    elapsed = now - previous["time"]
-                    if elapsed > 0:
-                        vm["cpu_percent"] = round(min(100, max(0, (info[4] - previous["cpu_time"]) / elapsed / 1e7 / max(info[3], 1))), 1)
-                        vm["disk_read_bytes_sec"] = round(max(0, (disk_read - previous["disk_read"]) / elapsed), 1)
-                        vm["disk_write_bytes_sec"] = round(max(0, (disk_write - previous["disk_write"]) / elapsed), 1)
-                        vm["network_rx_bytes_sec"] = round(max(0, (net_rx - previous["net_rx"]) / elapsed), 1)
-                        vm["network_tx_bytes_sec"] = round(max(0, (net_tx - previous["net_tx"]) / elapsed), 1)
-                        vm["rates_available"] = True
-                vm_metric_samples[vm["uuid"]] = {"time": now, "cpu_time": info[4], "disk_read": disk_read,
-                                                    "disk_write": disk_write, "net_rx": net_rx, "net_tx": net_tx}
+                domain_id = vm.pop("_domain_id", -1)
+                if vm["active"]:
+                    active_domain_ids.add(vm["uuid"])
+                    previous = vm_metric_samples.get(vm["uuid"])
+                    if previous:
+                        elapsed = now - previous["time"]
+                        if elapsed > 0:
+                            vm["cpu_percent"] = round(
+                                min(100, max(0, (vm["cpu_time"] - previous["cpu_time"])
+                                             / elapsed / 1e7 / max(vm["vcpus"], 1))), 1)
+                            vm["disk_read_bytes_sec"] = round(
+                                max(0, (vm["disk_read"] - previous["disk_read"]) / elapsed), 1)
+                            vm["disk_write_bytes_sec"] = round(
+                                max(0, (vm["disk_write"] - previous["disk_write"]) / elapsed), 1)
+                            vm["network_rx_bytes_sec"] = round(
+                                max(0, (vm["net_rx"] - previous["net_rx"]) / elapsed), 1)
+                            vm["network_tx_bytes_sec"] = round(
+                                max(0, (vm["net_tx"] - previous["net_tx"]) / elapsed), 1)
+                            vm["rates_available"] = True
+                    vm_metric_samples[vm["uuid"]] = {
+                        "time": now, "cpu_time": vm["cpu_time"],
+                        "disk_read": vm["disk_read"], "disk_write": vm["disk_write"],
+                        "net_rx": vm["net_rx"], "net_tx": vm["net_tx"],
+                    }
+                else:
+                    domain_id = -1
+                # Strip internal rate-accumulation counters from the payload.
+                for _key in ("cpu_time", "disk_read", "disk_write", "net_rx", "net_tx"):
+                    vm.pop(_key, None)
+                vm["id"] = domain_id
                 vms.append(vm)
+            except asyncio.TimeoutError:
+                logger.warning("Timed out collecting metrics for a libvirt domain")
+                continue
             except Exception as exc:
                 logger.warning("Could not collect metrics for a libvirt domain: %s", exc)
 
@@ -1649,23 +1641,129 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
         return vms
 
 
+def _collect_domain_snapshot(domain, state_map: Dict[int, str]) -> Optional[Dict[str, Any]]:
+    """Synchronously read one domain's inventory + raw counters.
+
+    Runs inside the libvirt executor thread. Returns a dict with the raw
+    counters still attached so the caller can compute rates, or ``None`` when
+    the domain vanished mid-collection. The single domain object is only ever
+    touched from this one executor thread, so it stays thread-safe.
+    """
+    try:
+        info = domain.info()  # state, maxMem KiB, memory KiB, vCPUs, cpuTime ns
+        state = state_map.get(info[0], "unknown")
+        vm: Dict[str, Any] = {
+            "_domain_id": domain.ID() if domain.isActive() else -1,
+            "uuid": domain.UUIDString(), "name": domain.name(),
+            "state": state, "active": bool(domain.isActive()), "vcpus": info[3],
+            "max_memory": info[1], "memory": info[2], "cpu_time": info[4],
+            "cpu_percent": 0.0, "memory_used": 0, "memory_total": info[1],
+            "memory_percent": 0.0, "disk_read_bytes_sec": 0.0,
+            "disk_write_bytes_sec": 0.0, "network_rx_bytes_sec": 0.0,
+            "network_tx_bytes_sec": 0.0, "rates_available": False,
+            "disks": [], "interfaces": [],
+            "disk_read": 0, "disk_write": 0, "net_rx": 0, "net_tx": 0,
+        }
+        if not vm["active"]:
+            return vm
+
+        memory = domain.memoryStats()
+        memory_total = memory.get("actual", info[1]) or info[1]
+        # rss is the best guest-used figure when the balloon driver reports it.
+        memory_used = memory.get("rss", memory.get("actual", info[2]))
+        if "unused" in memory and "actual" in memory:
+            memory_used = max(memory_used, memory["actual"] - memory["unused"])
+        vm.update({
+            "memory_used": memory_used, "memory_total": memory_total,
+            "memory_percent": round((memory_used / memory_total * 100) if memory_total else 0, 1),
+        })
+
+        disk_read = disk_write = net_rx = net_tx = 0
+        try:
+            root = ET.fromstring(domain.XMLDesc(0))
+            disk_targets = [node.get("dev") for node in root.findall("./devices/disk/target") if node.get("dev")]
+            interface_targets = [node.get("dev") for node in root.findall("./devices/interface/target") if node.get("dev")]
+        except ET.ParseError:
+            disk_targets, interface_targets = [], []
+
+        for target in disk_targets:
+            try:
+                stats = domain.blockStats(target)
+                # rd_req, rd_bytes, wr_req, wr_bytes, errs
+                read_bytes, write_bytes = stats[1], stats[3]
+                disk_read += read_bytes
+                disk_write += write_bytes
+                try:
+                    capacity, allocation, _ = domain.blockInfo(target, 0)
+                except Exception:
+                    capacity, allocation = 0, 0
+                vm["disks"].append({"target": target, "read_bytes": read_bytes, "write_bytes": write_bytes,
+                                    "capacity": capacity, "allocation": allocation})
+            except Exception:
+                continue
+        for target in interface_targets:
+            try:
+                stats = domain.interfaceStats(target)
+                # rx_bytes, rx_packets, rx_errs, rx_drop, tx_bytes, ...
+                rx_bytes, tx_bytes = stats[0], stats[4]
+                net_rx += rx_bytes
+                net_tx += tx_bytes
+                vm["interfaces"].append({"target": target, "rx_bytes": rx_bytes, "tx_bytes": tx_bytes})
+            except Exception:
+                continue
+
+        vm.update({
+            "disk_read": disk_read, "disk_write": disk_write,
+            "net_rx": net_rx, "net_tx": net_tx,
+        })
+        return vm
+    except libvirt.libvirtError as exc:
+        logger.warning("libvirt error collecting domain snapshot: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Error collecting domain snapshot: %s", exc)
+        return None
+
+
 async def collect_all_stats() -> SystemStats:
     """Collect a consistent stats snapshot.
 
     Disk and network rates use previous samples, so serializing collection avoids
     concurrent REST/WebSocket requests corrupting those calculations.
+
+    Core telemetry (CPU/memory/disk/network/processes/system) is always gathered
+    first because it is fast and never optional. The peripheral subsystems
+    (GPU, libvirt VMs, Docker containers, Kubernetes pods) are then collected
+    concurrently, each with its own hard timeout and failure isolation. A hung
+    docker daemon, unreachable kubectl, or wedged libvirtd therefore degrades
+    only its own panel on the dashboard instead of stalling the broadcast for
+    every client.
     """
     async with stats_lock:
         cpu = await get_cpu_stats()
         memory = await get_memory_stats()
         disk = await get_disk_stats()
         network = await get_network_stats()
-        gpu = await get_gpu_stats()
         processes = await get_process_stats()
         system = await get_system_info()
-        vms = await get_vm_stats()
-        containers = await get_docker_containers()
-        pods = await get_kubernetes_pods()
+
+        async def _optional(coro):
+            """Run one peripheral collector, bounded and failure-isolated."""
+            try:
+                return await asyncio.wait_for(coro, timeout=20)
+            except asyncio.TimeoutError:
+                logger.warning("Peripheral stats collector timed out")
+                return None
+            except Exception as exc:
+                logger.warning("Peripheral stats collector failed: %s", exc)
+                return None
+
+        gpu, vms, containers, pods = await asyncio.gather(
+            _optional(get_gpu_stats()),
+            _optional(get_vm_stats()),
+            _optional(get_docker_containers()),
+            _optional(get_kubernetes_pods()),
+        )
         return SystemStats(
             timestamp=datetime.now().isoformat(), cpu=cpu, memory=memory, disk=disk,
             network=network, gpu=gpu, processes=processes, system=system, vms=vms,
@@ -1848,8 +1946,14 @@ async def health_check_endpoint():
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        stats = await collect_all_stats()
-        await websocket.send_json(stats.model_dump())
+        try:
+            stats = await asyncio.wait_for(collect_all_stats(), timeout=25.0)
+        except Exception:
+            # Never let a slow initial collection stall the connection; the
+            # broadcast task keeps the client fed with fresher data anyway.
+            stats = None
+        if stats is not None:
+            await websocket.send_json(stats.model_dump())
         
         while True:
             data = await websocket.receive_text()
@@ -2099,15 +2203,17 @@ async def run_service_action(action: str, service_name: str):
         if not sudo:
             return None, "sudo is not installed. Re-run systemd/install-service.sh to configure service controls."
         command = [sudo, "-n", *command]
-    proc = await asyncio.create_subprocess_exec(
-        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await proc.communicate()
+    try:
+        returncode, stdout, stderr = await _run_cmd(command, timeout=30.0)
+    except asyncio.TimeoutError:
+        return None, f"systemctl {action} timed out after 30s (systemd busy)."
+    except FileNotFoundError:
+        return None, f"Could not execute {command[0]}: file not found."
     output = (stderr or stdout).decode().strip()
-    if proc.returncode:
+    if returncode:
         if "password is required" in output.lower() or "not allowed" in output.lower():
             output = "MonitorX is not authorized to control system services. Run systemd/install-service.sh, then restart MonitorX."
-        return None, output or f"systemctl {action} failed (exit code {proc.returncode})."
+        return None, output or f"systemctl {action} failed (exit code {returncode})."
     return {"output": stdout.decode().strip()}, None
 
 
@@ -2119,11 +2225,11 @@ async def service_capabilities():
     sudo = shutil.which("sudo")
     if not sudo:
         return {"can_control": False, "mode": "unconfigured", "message": "sudo is unavailable; run the MonitorX installer."}
-    proc = await asyncio.create_subprocess_exec(
-        sudo, "-n", "-l", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    await proc.communicate()
-    available = proc.returncode == 0
+    try:
+        returncode, _, _ = await _run_cmd([sudo, "-n", "-l"], timeout=10.0)
+    except (asyncio.TimeoutError, OSError):
+        returncode = 1
+    available = returncode == 0
     return {
         "can_control": available,
         "mode": "sudo" if available else "unconfigured",
@@ -2136,12 +2242,11 @@ async def service_capabilities():
 async def list_services():
     """List systemd services. Read-only systemctl access needs no elevated policy."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            SYSTEMCTL_BIN, "list-units", "--type=service", "--no-pager", "--no-legend", "--all",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        returncode, stdout, stderr = await _run_cmd(
+            [SYSTEMCTL_BIN, "list-units", "--type=service", "--no-pager", "--no-legend", "--all"],
+            timeout=15.0,
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode:
+        if returncode:
             raise HTTPException(status_code=503, detail=stderr.decode().strip() or "systemd is unavailable")
         services = []
         for line in stdout.decode().strip().split('\n'):
@@ -2150,6 +2255,8 @@ async def list_services():
                 services.append({"name": parts[0], "load": parts[1], "active": parts[2], "sub": parts[3],
                                  "description": " ".join(parts[4:]) if len(parts) > 4 else ""})
         return services
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="systemctl listing timed out (systemd busy?)")
     except HTTPException:
         raise
     except Exception as e:
@@ -2320,12 +2427,10 @@ async def troubleshoot_health_check():
     # 4. Systemd Failed Services
     failed_services = []
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "systemctl", "list-units", "--state=failed", "--no-pager", "--no-legend",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        returncode, stdout, _ = await _run_cmd(
+            ["systemctl", "list-units", "--state=failed", "--no-pager", "--no-legend"],
+            timeout=10.0,
         )
-        stdout, _ = await proc.communicate()
         lines = stdout.decode().strip().split('\n')
         for line in lines:
             if line.strip():
@@ -2392,12 +2497,7 @@ async def troubleshoot_health_check():
     # 6. Kernel & Log Errors (dmesg / journalctl)
     kernel_errors = []
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "dmesg", "-T",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
+        returncode, stdout, _ = await _run_cmd(["dmesg", "-T"], timeout=10.0)
         out = stdout.decode().strip()
         if out:
             lines = [l for l in out.split('\n') if l.strip()]
@@ -2441,13 +2541,11 @@ async def troubleshoot_health_check():
         pass
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ping", "-c", "1", "-W", "2", "8.8.8.8",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        returncode, _, _ = await _run_cmd(
+            ["ping", "-c", "1", "-W", "2", "8.8.8.8"],
+            timeout=10.0,
         )
-        await proc.communicate()
-        ping_ok = (proc.returncode == 0)
+        ping_ok = (returncode == 0)
     except Exception:
         pass
 
@@ -2515,28 +2613,21 @@ async def troubleshoot_logs(
         cmd.extend(["-u", service])
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        out_str = stdout.decode().strip()
-        
-        if "No journal files were opened due to insufficient permissions" in out_str or not out_str:
-            try:
-                dmesg_proc = await asyncio.create_subprocess_exec(
-                    "dmesg", "-T",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                d_out, _ = await dmesg_proc.communicate()
-                d_lines = [l for l in d_out.decode().strip().split('\n') if l.strip()]
-                raw_logs = d_lines[-lines:] if d_lines else []
-            except Exception:
-                raw_logs = [out_str or "Unable to read system logs due to permissions"]
-        else:
-            raw_logs = [l for l in out_str.split('\n') if not l.startswith("Hint:")]
+        try:
+            returncode, stdout, _ = await _run_cmd(cmd, timeout=15.0)
+            out_str = stdout.decode().strip()
+
+            if "No journal files were opened due to insufficient permissions" in out_str or not out_str:
+                try:
+                    returncode_d, d_out, _ = await _run_cmd(["dmesg", "-T"], timeout=10.0)
+                    d_lines = [l for l in d_out.decode().strip().split('\n') if l.strip()]
+                    raw_logs = d_lines[-lines:] if d_lines else []
+                except Exception:
+                    raw_logs = [out_str or "Unable to read system logs due to permissions"]
+            else:
+                raw_logs = [l for l in out_str.split('\n') if not l.startswith("Hint:")]
+        except asyncio.TimeoutError:
+            raw_logs = ["Log read timed out after 15s. The journal may be under heavy write load."]
 
         parsed_logs = []
         search_lower = search.lower()
@@ -2579,26 +2670,26 @@ async def troubleshoot_ping(req: PingRequest):
     
     count = req.count
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ping", "-c", str(count), "-W", "3", host,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        returncode, stdout, stderr = await _run_cmd(
+            ["ping", "-c", str(count), "-W", "3", host],
+            timeout=15.0,
         )
-        stdout, stderr = await proc.communicate()
         out = stdout.decode()
         
         loss_match = re.search(r'(\d+)% packet loss', out)
         rtt_match = re.search(r'(rtt|round-trip) min/avg/max/(mdev|stddev) = ([\d.]+)/([\d.]+)/([\d.]+)', out)
         
         return {
-            "success": proc.returncode == 0,
+            "success": returncode == 0,
             "host": host,
             "raw_output": out or stderr.decode(),
-            "packet_loss_percent": float(loss_match.group(1)) if loss_match else (0.0 if proc.returncode == 0 else 100.0),
+            "packet_loss_percent": float(loss_match.group(1)) if loss_match else (0.0 if returncode == 0 else 100.0),
             "min_rtt": float(rtt_match.group(3)) if rtt_match else None,
             "avg_rtt": float(rtt_match.group(4)) if rtt_match else None,
             "max_rtt": float(rtt_match.group(5)) if rtt_match else None
         }
+    except asyncio.TimeoutError:
+        return {"success": False, "host": host, "error": "Ping timed out after 15s"}
     except Exception as e:
         return {"success": False, "host": host, "error": str(e)}
 
@@ -2666,18 +2757,16 @@ async def troubleshoot_dns_lookup(req: DNSCheckRequest):
 
     # Google DNS
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "dig", "+short", "+time=2", "@8.8.8.8", domain,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        returncode, stdout, _ = await _run_cmd(
+            ["dig", "+short", "+time=2", "@8.8.8.8", domain],
+            timeout=10.0,
         )
-        stdout, _ = await proc.communicate()
         out = stdout.decode().strip()
         if out:
             results["google_dns"] = {"success": True, "ips": [line.strip() for line in out.split('\n') if line.strip()]}
         else:
             results["google_dns"] = {"success": False, "error": "No response"}
-    except Exception:
+    except (asyncio.TimeoutError, FileNotFoundError, OSError):
         results["google_dns"] = {"success": False, "error": "dig tool unavailable"}
 
     return {"domain": domain, "resolutions": results}
@@ -2709,12 +2798,7 @@ async def troubleshoot_network_ports():
                 })
     except Exception:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "ss", "-tulpn",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await proc.communicate()
+            returncode, stdout, _ = await _run_cmd(["ss", "-tulpn"], timeout=10.0)
             lines = stdout.decode().strip().split('\n')
             for line in lines[1:]:
                 parts = line.split()
@@ -2738,7 +2822,7 @@ async def troubleshoot_network_ports():
                             "pid": p_id,
                             "process": p_name or "unknown"
                         })
-        except Exception as e:
+        except (asyncio.TimeoutError, Exception) as e:
             logger.error(f"Error getting listening ports: {e}")
             
     ports.sort(key=lambda x: x["port"])
@@ -2791,27 +2875,25 @@ async def perform_remediation(req: RemediateRequest):
 
     if action == "clear_pagecache":
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "sudo", "-n", SYSCTL_BIN, "-w", "vm.drop_caches=3",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode == 0:
+            cmd = [SYSCTL_BIN, "-w", "vm.drop_caches=3"]
+            if os.geteuid() != 0:
+                cmd = ["sudo", "-n", *cmd]
+            returncode, stdout, stderr = await _run_cmd(cmd, timeout=15.0)
+            if returncode == 0:
                 return {"success": True, "message": "RAM page cache cleared successfully!"}
             else:
                 return {"success": False, "message": f"Sudo permissions required: {stderr.decode().strip() or 'Access denied'}"}
+        except asyncio.TimeoutError:
+            return {"success": False, "message": "Page cache clear timed out"}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
     elif action == "restart_failed_services":
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "systemctl", "list-units", "--state=failed", "--no-pager", "--no-legend",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            returncode, stdout, _ = await _run_cmd(
+                ["systemctl", "list-units", "--state=failed", "--no-pager", "--no-legend"],
+                timeout=10.0,
             )
-            stdout, _ = await proc.communicate()
             failed_units = [line.split()[0] for line in stdout.decode().strip().split('\n') if line.strip()]
 
             if not failed_units:
@@ -2840,42 +2922,40 @@ async def perform_remediation(req: RemediateRequest):
                 "failed": failed_restarts,
                 "errors": errors
             }
+        except asyncio.TimeoutError:
+            return {"success": False, "message": "Failed-service scan timed out"}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
     elif action == "vacuum_journal":
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "sudo", "-n", JOURNALCTL_BIN, "--vacuum-time=2d",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            return {"success": proc.returncode == 0, "message": stdout.decode().strip() or stderr.decode().strip()}
+            cmd = [JOURNALCTL_BIN, "--vacuum-time=2d"]
+            if os.geteuid() != 0:
+                cmd = ["sudo", "-n", *cmd]
+            returncode, stdout, stderr = await _run_cmd(cmd, timeout=60.0)
+            return {"success": returncode == 0, "message": stdout.decode().strip() or stderr.decode().strip()}
+        except asyncio.TimeoutError:
+            return {"success": False, "message": "Journal vacuum timed out after 60s"}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
     elif action in ("clear_kernel_logs", "clear_dmesg", "clear_logs", "clear_kernel_buffer"):
         try:
             cmd = ["sudo", "-n", DMESG_BIN, "-C"] if os.geteuid() != 0 else [DMESG_BIN, "-C"]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode == 0:
+            try:
+                returncode, stdout, stderr = await _run_cmd(cmd, timeout=10.0)
+            except asyncio.TimeoutError:
+                return {"success": False, "message": "Kernel log clear timed out"}
+            if returncode == 0:
                 return {"success": True, "message": "Kernel error buffer and logs cleared successfully!"}
             else:
-                proc_fb = await asyncio.create_subprocess_exec(
-                    DMESG_BIN, "-C",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                _, stderr_fb = await proc_fb.communicate()
-                if proc_fb.returncode == 0:
+                try:
+                    fb_rc, _, _ = await _run_cmd([DMESG_BIN, "-C"], timeout=10.0)
+                except asyncio.TimeoutError:
+                    fb_rc = 1
+                if fb_rc == 0:
                     return {"success": True, "message": "Kernel error buffer and logs cleared successfully!"}
-                err_msg = stderr.decode().strip() or stderr_fb.decode().strip() or "Access denied"
+                err_msg = stderr.decode().strip() or "Access denied"
                 return {"success": False, "message": f"Sudo permissions required: {err_msg}"}
         except Exception as e:
             return {"success": False, "message": str(e)}
