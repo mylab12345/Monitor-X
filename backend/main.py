@@ -246,7 +246,7 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 app = FastAPI(
     title="System Monitoring Dashboard",
     description="Real-time system monitoring dashboard with WebSocket support and Troubleshoot Suite",
-    version="2.0.0",
+    version="2.4.0",
     lifespan=lifespan
 )
 
@@ -4590,4 +4590,6 @@ async def get_pods():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=os.environ.get("MONITORX_HOST", "127.0.0.1"), port=8080)
+    # Default to the documented plug-and-play bind (README/MEMORY: 0.0.0.0:8080).
+    # Set MONITORX_HOST=127.0.0.1 to lock the dashboard to the local machine.
+    uvicorn.run(app, host=os.environ.get("MONITORX_HOST", "0.0.0.0"), port=8080)
