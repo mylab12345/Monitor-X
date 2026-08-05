@@ -2982,10 +2982,10 @@ async def troubleshoot_health_check():
             "status": "critical",
             "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
             "message": f"CPU usage is critical ({cpu_pct:.1f}%) or 1m load ({load1}) exceeds core count by >2x.",
-            "remediation": "Identify and terminate runaway process from Bottlenecks view.",
+            "remediation": "Terminate the top runaway process, or inspect bottlenecks for unexpected threads.",
             "action": "view_bottlenecks",
-            "fix": None,
-            "fixes": [],
+            "fix": {"action": "kill_top_cpu", "label": "💀 Kill Top CPU Process", "level": "critical", "sudo": False, "target": None},
+            "fixes": [{"action": "kill_top_cpu", "label": "💀 Kill Top CPU Process", "level": "critical", "sudo": False, "target": None}],
         })
     elif cpu_pct > 70.0 or load1 > cores:
         health_score -= 8
@@ -2997,8 +2997,9 @@ async def troubleshoot_health_check():
             "value": f"{cpu_pct:.1f}% CPU, {load1:.2f} Load (Cores: {cores})",
             "message": f"CPU load elevated ({cpu_pct:.1f}%). System may experience latency.",
             "remediation": "Monitor active processes for unexpected threads.",
-            "fix": None,
-            "fixes": [],
+            "action": "view_bottlenecks",
+            "fix": {"action": "kill_top_cpu", "label": "💀 Kill Top CPU Process", "level": "warning", "sudo": False, "target": None},
+            "fixes": [{"action": "kill_top_cpu", "label": "💀 Kill Top CPU Process", "level": "warning", "sudo": False, "target": None}],
         })
     else:
         checks.append({
@@ -3812,6 +3813,13 @@ FIX_ACTION_META = {
         "sudo": False,
         "description": "Force-terminates the target PID. Only processes owned by the dashboard user can be killed (unless running as root).",
     },
+    "kill_top_cpu": {
+        "label": "Kill top CPU process",
+        "category": "CPU & Load",
+        "level": "critical",
+        "sudo": False,
+        "description": "Terminates the single highest-CPU non-essential process to relieve a load spike. PID 1, the MonitorX process tree, and essential services (systemd, sshd, containerd, libvirtd, NetworkManager, ...) are never targeted, and the kill is owner-guarded exactly like a manual kill.",
+    },
     "reap_zombies": {
         "label": "Reap zombie processes",
         "category": "Processes",
@@ -3965,6 +3973,74 @@ async def _fix_kill_process(target: Optional[str] = None) -> Dict[str, Any]:
         return {"success": False, "message": f"Permission denied to terminate PID {pid}"}
 
 
+async def _fix_kill_top_cpu(target: Optional[str] = None) -> Dict[str, Any]:
+    """Remediate a CPU/load spike by terminating the single highest-CPU
+    non-essential process owned by the dashboard user (or any process when
+    running as root).
+
+    Safety mirrors a manual kill: PID 1, the MonitorX process tree, and a
+    small essential-services blocklist are never targeted, and the actual
+    kill re-uses the owner-guarded ``_fix_kill_process`` executor. CPU usage
+    is sampled with two passes over a single short sleep so the scan stays
+    bounded regardless of how many processes are running.
+    """
+    ESSENTIAL_NAMES = {
+        "systemd", "init", "kthreadd", "kernel", "containerd", "dockerd",
+        "libvirtd", "sshd", "dbus-daemon", "dbus-broker", "udevd",
+        "systemd-journald", "systemd-udevd", "cron", "rsyslogd", "rsyslog",
+        "chronyd", "systemd-resolved", "NetworkManager", "networkmanager",
+    }
+    my_pid = os.getpid()
+    my_uid = os.geteuid()
+
+    procs = []
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            proc.cpu_percent()  # initialise the per-process sampler
+            procs.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    # One shared measurement window for every process.
+    await asyncio.sleep(0.25)
+
+    candidates = []
+    for proc in procs:
+        try:
+            cpu = proc.cpu_percent()
+            pid = proc.pid
+            if pid == 1 or pid == my_pid:
+                continue
+            # Never target MonitorX's own child/worker processes.
+            try:
+                if proc.ppid() == my_pid:
+                    continue
+            except Exception:
+                pass
+            if (proc.info.get("name") or "").lower() in ESSENTIAL_NAMES:
+                continue
+            # Owner guard: only kill processes we own unless running as root.
+            if my_uid != 0:
+                try:
+                    if proc.uids().effective != my_uid:
+                        continue
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    continue
+            candidates.append((pid, proc.info.get("name") or "?", cpu))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    if not candidates:
+        return {"success": True, "message": "No user-owned, non-essential process to throttle."}
+
+    candidates.sort(key=lambda x: x[2], reverse=True)
+    top_pid, top_name, top_cpu = candidates[0]
+    result = await _fix_kill_process(str(top_pid))
+    if result.get("success"):
+        result["message"] = f"Terminated top CPU process {top_pid} ({top_name}, {top_cpu:.1f}% CPU)."
+    return result
+
+
 async def _fix_reap_zombies(target: Optional[str] = None) -> Dict[str, Any]:
     """Prompt zombie parents to reap their dead children with SIGCHLD.
 
@@ -4088,6 +4164,7 @@ FIX_EXECUTORS = {
     "enable_service": lambda t: _fix_service_action("enable", t),
     "clear_kernel_logs": _fix_clear_kernel_logs,
     "kill_process": _fix_kill_process,
+    "kill_top_cpu": _fix_kill_top_cpu,
     "reap_zombies": _fix_reap_zombies,
     "flush_dns": _fix_flush_dns,
     "clean_tmp": _fix_clean_tmp,
@@ -4237,6 +4314,7 @@ async def troubleshoot_fix_capabilities():
         "enable_service": bins["systemctl"],
         "clear_kernel_logs": elevated and bins["dmesg"],
         "kill_process": True,
+        "kill_top_cpu": True,
         "reap_zombies": True,
         "flush_dns": (bins["resolvectl"] or bins["systemd_resolve"] or bins["nscd"]),
         "clean_tmp": elevated and bins["find"],

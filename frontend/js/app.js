@@ -744,10 +744,11 @@ async function runFullHealthScan() {
         document.getElementById('pill-warning').textContent = `${healthData.summary.warning} Warnings`;
         document.getElementById('pill-ok').textContent = `${healthData.summary.ok} Passing`;
 
-        document.getElementById('health-summary-text').textContent =
-            healthData.health_score > 85 ? 'System is running smoothly without major bottlenecks.' :
-            healthData.health_score > 65 ? 'System has active warnings that require attention.' :
-            'Critical issues detected requiring immediate remediation!';
+        // Headline is driven by the ACTUAL critical/warning counts, never by a
+        // raw score threshold — so we never claim "Critical issues detected"
+        // when there are zero critical checks (e.g. several warnings dragging
+        // the score to <=65, which previously printed the false alarm).
+        document.getElementById('health-summary-text').textContent = healthSummaryText(healthData);
 
         document.getElementById('last-scan-time').textContent = `Last Scan: ${new Date().toLocaleTimeString()}`;
         refreshFixEngine();
@@ -1041,6 +1042,23 @@ async function loadFixCapabilities() {
     }
 }
 
+/* Severity-accurate headline for the System Health Index.
+   Driven by the ACTUAL critical/warning counts, never by a raw score
+   threshold — so the banner can never contradict the pills (e.g. "0 Critical"
+   next to a "Critical issues detected" alarm). */
+function healthSummaryText(healthData) {
+    const summary = (healthData && healthData.summary) || { critical: 0, warning: 0, ok: 0 };
+    if (summary.critical > 0) {
+        const plural = summary.critical === 1 ? 'issue' : 'issues';
+        return `${summary.critical} critical ${plural} detected — immediate remediation required.`;
+    }
+    if (summary.warning > 0) {
+        const plural = summary.warning === 1 ? '' : 's';
+        return `${summary.warning} warning${plural} need attention. System Health Index: ${healthData.health_score}.`;
+    }
+    return 'All system checks passing — no issues detected.';
+}
+
 function updateHealthGauge(score) {
     const valText = document.getElementById('health-score-val');
     valText.textContent = score;
@@ -1048,9 +1066,13 @@ function updateHealthGauge(score) {
     const circle = document.getElementById('health-circle');
     circle.setAttribute('stroke-dasharray', `${score}, 100`);
 
-    if (score > 85) circle.style.stroke = 'var(--success)';
-    else if (score > 65) circle.style.stroke = 'var(--warning)';
-    else circle.style.stroke = 'var(--danger)';
+    // Color the ring by real severity (not the numeric score) so a low score
+    // caused only by warnings is orange, and red is reserved for actual
+    // critical checks. The numeric score is still shown in the center.
+    const summary = (healthData && healthData.summary) || { critical: 0, warning: 0, ok: 0 };
+    if (summary.critical > 0) circle.style.stroke = 'var(--danger)';
+    else if (summary.warning > 0) circle.style.stroke = 'var(--warning)';
+    else circle.style.stroke = 'var(--success)';
 }
 
 function renderHealthChecks(checks) {
