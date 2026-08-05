@@ -62,6 +62,7 @@
                 </div>
                 <div class="uptime-badge" id="uptime">Uptime: --</div>
                 <button class="btn-icon" id="refresh-btn" title="Refresh Dashboard">🔄</button>
+                <button class="btn-icon" id="report-export-btn" title="Export diagnostics report">📄</button>
                 <button class="btn-icon" id="theme-toggle" title="Toggle Light/Dark Theme">🌙</button>
                 <button class="btn-icon" onclick="document.body.classList.toggle('large-text')" title="Large text">Aa</button>
                 <button class="btn-icon" onclick="document.getElementById('charts-row').classList.toggle('collapsed')" title="Toggle charts">📊</button>
@@ -112,7 +113,7 @@
                         <div><h2>◈ OPERATIONS CENTER</h2><div class="operations-summary" id="ops-summary">Loading incident intelligence…</div></div>
                         <div class="ops-controls">
                             <select id="ops-range" class="filter-select" aria-label="Historical time range"><option value="1h">Last hour</option><option value="6h">6 hours</option><option value="24h">24 hours</option><option value="7d">7 days</option></select>
-                            <button class="btn btn-sm btn-outline" id="ops-rule-btn">+ Alert rule</button>
+                            <button class="btn btn-sm btn-outline" id="ops-rule-btn" title="Manage alert rules and webhook notifications">⚙️ Alert rules</button>
                             <button class="btn btn-sm btn-outline" id="focus-mode-btn" aria-pressed="false">Focus mode</button>
                         </div>
                     </div>
@@ -203,6 +204,7 @@
                         <div class="net-list" id="net-list"></div>
                         <div class="card-footer-grid">
                             <div>Active Inet Connections: <b id="net-conn">0</b></div>
+                            <div>Rx/Tx Errors+Drops: <b id="net-errors">0</b></div>
                         </div>
                     </div>
 
@@ -214,6 +216,21 @@
                         </div>
                         <div id="gpu-content">
                             <p class="no-data">No NVIDIA GPU hardware detected</p>
+                        </div>
+                    </div>
+
+                    <!-- Thermal / Sensors Card -->
+                    <div class="metric-card" id="thermal-card">
+                        <div class="card-header">
+                            <h2>CPU &amp; System Sensors</h2>
+                            <span class="metric-value" id="thermal-peak" style="font-size:1.3rem;">N/A</span>
+                        </div>
+                        <div id="thermal-content">
+                            <p class="no-data">No temperature sensors exposed by this host.</p>
+                        </div>
+                        <div class="card-footer-grid">
+                            <div>Thermal Zones: <b id="thermal-count">0</b></div>
+                            <div>Fans: <b id="thermal-fans">0</b></div>
                         </div>
                     </div>
 
@@ -744,6 +761,70 @@
             </div>
             <div class="modal-body">
                 <pre id="container-logs-output" class="cmd-output" style="max-height: 500px;"></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Systemd Unit Log Viewer Modal -->
+    <div class="modal" id="service-logs-modal">
+        <div class="modal-content" style="max-width: 900px;">
+            <div class="modal-header">
+                <h3>📜 Journal Logs — <span id="service-logs-name"></span></h3>
+                <div class="console-header-actions">
+                    <select id="service-logs-lines" class="filter-select" title="Number of lines">
+                        <option value="50">50 lines</option>
+                        <option value="100" selected>100 lines</option>
+                        <option value="300">300 lines</option>
+                        <option value="500">500 lines</option>
+                    </select>
+                    <button class="btn btn-sm btn-outline" id="service-logs-refresh">↻ Refresh</button>
+                    <button class="modal-close" id="service-logs-close">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <pre id="service-logs-output" class="cmd-output" style="max-height: 60vh;">Loading journal…</pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Alert Rules & Notifications Manager Modal -->
+    <div class="modal" id="rules-modal">
+        <div class="modal-content" style="max-width: 640px;">
+            <div class="modal-header">
+                <h3>⚙️ Alert Rules &amp; Notifications</h3>
+                <button class="modal-close" id="rules-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="rules-form">
+                    <h4>New rule</h4>
+                    <div class="rules-form-row">
+                        <input type="text" id="rule-name" placeholder="Rule name" class="search-input">
+                        <select id="rule-metric" class="filter-select">
+                            <option value="cpu">CPU %</option>
+                            <option value="memory">Memory %</option>
+                            <option value="disk">Disk %</option>
+                            <option value="net_rx">Network RX (B/s)</option>
+                            <option value="net_tx">Network TX (B/s)</option>
+                        </select>
+                        <input type="number" id="rule-threshold" placeholder="Threshold" class="search-input" style="width:120px;" step="any" min="0">
+                        <input type="number" id="rule-cooldown" placeholder="Cooldown min" class="search-input" style="width:120px;" min="1" value="15">
+                        <button class="btn btn-primary" id="rule-create-btn">Create</button>
+                    </div>
+                    <div class="rules-list" id="rules-list"><p class="no-data">Loading rules…</p></div>
+                </div>
+                <div class="rules-webhook">
+                    <h4>Webhook notifications</h4>
+                    <div class="rules-form-row">
+                        <input type="url" id="webhook-url" placeholder="https://hooks.slack.com/…" class="search-input">
+                        <label class="toggle-switch" title="Enable webhook delivery">
+                            <input type="checkbox" id="webhook-enabled">
+                            <span class="slider"></span>
+                            <span class="toggle-label">Enabled</span>
+                        </label>
+                        <button class="btn btn-outline" id="webhook-save-btn">Save</button>
+                        <button class="btn btn-sm btn-outline" id="webhook-test-btn">Send test</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
