@@ -650,6 +650,8 @@ function renderHealthChecks(checks) {
             fixButtonHtml = `<button class="btn btn-sm btn-warning" onclick="remediateAction('vacuum_journal')">⚡ Vacuum Journal Logs</button>`;
         } else if (c.action === 'restart_failed_services') {
             fixButtonHtml = `<button class="btn btn-sm btn-danger" onclick="remediateAction('restart_failed_services')">⚡ Restart Failed Services</button>`;
+        } else if (c.action === 'clear_kernel_logs' || c.action === 'clear_dmesg' || c.action === 'clear_logs' || c.action === 'clear_kernel_buffer') {
+            fixButtonHtml = `<button class="btn btn-sm btn-warning" onclick="remediateAction('${c.action}')">⚡ Clear Kernel Logs</button>`;
         } else if (c.action === 'view_bottlenecks') {
             fixButtonHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('bottlenecks')">🔥 Open Bottleneck Finder</button>`;
         } else if (c.action === 'view_logs') {

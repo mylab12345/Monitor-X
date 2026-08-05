@@ -2076,6 +2076,7 @@ async def shutdown_system():
 SYSTEMCTL_BIN = shutil.which("systemctl") or "/usr/bin/systemctl"
 SYSCTL_BIN = shutil.which("sysctl") or "/usr/sbin/sysctl"
 JOURNALCTL_BIN = shutil.which("journalctl") or "/usr/bin/journalctl"
+DMESG_BIN = shutil.which("dmesg") or "/usr/bin/dmesg"
 SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@_.:-]*\.service$")
 SERVICE_ACTIONS = ("start", "stop", "restart", "reload", "enable", "disable")
 
@@ -2415,8 +2416,8 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": f"{len(kernel_errors)} recent error entries in kernel buffer",
             "message": f"Recent critical error in dmesg: {kernel_errors[0]}",
-            "remediation": "Inspect full system logs in Log Inspector.",
-            "action": "view_logs"
+            "remediation": "Clear kernel error buffer and system logs.",
+            "action": "clear_kernel_logs"
         })
     else:
         checks.append({
@@ -2851,6 +2852,31 @@ async def perform_remediation(req: RemediateRequest):
             )
             stdout, stderr = await proc.communicate()
             return {"success": proc.returncode == 0, "message": stdout.decode().strip() or stderr.decode().strip()}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    elif action in ("clear_kernel_logs", "clear_dmesg", "clear_logs", "clear_kernel_buffer"):
+        try:
+            cmd = ["sudo", "-n", DMESG_BIN, "-C"] if os.geteuid() != 0 else [DMESG_BIN, "-C"]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                return {"success": True, "message": "Kernel error buffer and logs cleared successfully!"}
+            else:
+                proc_fb = await asyncio.create_subprocess_exec(
+                    DMESG_BIN, "-C",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                _, stderr_fb = await proc_fb.communicate()
+                if proc_fb.returncode == 0:
+                    return {"success": True, "message": "Kernel error buffer and logs cleared successfully!"}
+                err_msg = stderr.decode().strip() or stderr_fb.decode().strip() or "Access denied"
+                return {"success": False, "message": f"Sudo permissions required: {err_msg}"}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
