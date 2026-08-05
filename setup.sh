@@ -10,15 +10,33 @@ echo '[1/4] Installing optional system packages for libvirt and VM monitoring...
 sudo apt-get update -qq
 sudo apt-get install -y -qq python3-pip python3-venv libvirt-dev libvirt-daemon-system libvirt-clients qemu-system-x86 python3-libvirt || true
 
+# A venv's bin/python* are symlinks to the base interpreter. If that base
+# interpreter was upgraded/removed, or the venv was copied from another
+# machine/path, the symlinks dangle and the systemd service dies with
+# "status=203/EXEC". Detect and rebuild such venvs instead of leaving them
+# half-broken. (Note: a dangling symlink fails -x/-e, so test the
+# interpreter by running it, not by inspecting the file.)
+if [ -d "$VENV_DIR" ] && ! "$VENV_DIR/bin/python3" -c 'import sys' >/dev/null 2>&1; then
+    echo '[2/4] Existing virtual environment is broken (missing/dangling interpreter); rebuilding...'
+    rm -rf "$VENV_DIR"
+fi
+
 echo '[2/4] Creating/updating the virtual environment...'
 python3 -m venv "$VENV_DIR"
-"$VENV_DIR/bin/python" -m pip install --upgrade pip -q
+
+if ! "$VENV_DIR/bin/python3" -c 'import sys' >/dev/null 2>&1; then
+    echo "ERROR: failed to create a usable virtual environment at $VENV_DIR." >&2
+    echo "       Check that a Python 3 interpreter is installed: python3 --version" >&2
+    exit 1
+fi
+
+"$VENV_DIR/bin/python3" -m pip install --upgrade pip -q
 
 echo '[3/4] Installing pinned Python dependencies...'
-"$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt" -q
+"$VENV_DIR/bin/python3" -m pip install -r "$SCRIPT_DIR/requirements.txt" -q
 
 echo '[4/4] Making the optional system libvirt bindings visible to the environment...'
-VENV_SITE="$($VENV_DIR/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+VENV_SITE="$($VENV_DIR/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 for file in /usr/lib/python3/dist-packages/libvirt.py /usr/lib/python3/dist-packages/libvirt_lxc.py /usr/lib/python3/dist-packages/libvirtaio.py /usr/lib/python3/dist-packages/libvirtmod*.so; do
     [[ -f "$file" ]] && ln -sf "$file" "$VENV_SITE/" 2>/dev/null || true
 done

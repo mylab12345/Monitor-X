@@ -83,6 +83,35 @@ sudo systemctl stop monitorx
 journalctl -u monitorx -f
 ```
 
+### Troubleshooting: `status=203/EXEC`
+
+If the service keeps restarting and `systemctl status monitorx` shows `code=exited, status=203/EXEC`, systemd could not **execute** the interpreter named in `ExecStart` — it is not a bug in `main.py`. The usual cause is a missing or broken virtual environment: `setup.sh` may never have been run, or the `.venv` was copied from another machine/path or its base Python was upgraded/removed, leaving `bin/python3` as a dangling symlink.
+
+Diagnose, then repair:
+
+```bash
+# 1. Confirm which command fails and why (look for "No such file or directory"
+#    or "Permission denied" in the journal).
+systemctl cat monitorx
+journalctl -u monitorx -n 20 --no-pager
+
+# 2. Inspect the interpreter the unit references.
+ls -la /home/<user>/Monitor-X/.venv/bin/python3
+readlink -f /home/<user>/Monitor-X/.venv/bin/python3   # points at nothing? => broken venv
+
+# 3. Repair: rebuild the venv, then regenerate and restart the service.
+#    (setup.sh now detects a dangling/broken interpreter and rebuilds it;
+#    install-service.sh now verifies the venv actually works before installing.)
+cd /home/<user>/Monitor-X
+./setup.sh
+./systemd/install-service.sh
+sudo systemctl daemon-reload
+sudo systemctl restart monitorx
+sudo systemctl status monitorx --no-pager
+```
+
+The installer now also generates `ExecStart` with an absolute path to `backend/main.py`, so the unit keeps working even if the service is started from a different working directory.
+
 ---
 
 ## Workspace Structure
