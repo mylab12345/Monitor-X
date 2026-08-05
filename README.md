@@ -58,11 +58,11 @@ VM lifecycle controls use two independent paths, and the dashboard enables the b
    virsh --quiet --no-pkttyagent --connect qemu:///system <verb> -- <domain>
    ```
 
-   for the verbs `start`, `shutdown`, `reboot`, `destroy`, `suspend`, and `resume`. Nothing else is granted — no shell, no `undefine`, no arbitrary arguments.
+   for the lifecycle verbs `start`, `shutdown`, `reboot`, `destroy`, `suspend`, and `resume` — plus the serial-console form `… console -- <domain>` and the CPU/RAM resize forms `… setvcpus <domain> …`, `… setmem <domain> …`, `… setmaxmem <domain> …`. Nothing else is granted — no shell, no `undefine`, no arbitrary arguments. The `--no-pkttyagent` flag is part of the whitelisted command line and must stay in sync with `_virsh_command()` in `backend/main.py`; sudo matches the full argv, so a mismatch makes every control command fail with “not allowed to execute”.
 
 The **VMs (Libvirt)** tab reports which mode is active, disables controls only when both paths fail, and surfaces the exact libvirt/`virsh` error instead of reporting a false success.
 
-> **Upgrading from an earlier version?** Releases before this fix generated a policy for `virsh --no-ask-password …`. That is a **systemctl** flag which `virsh` rejects outright, so every Start/Shutdown/Reboot silently failed — and `poweroff` isn’t a `virsh` verb at all (the correct one is `destroy`). Re-run `./systemd/install-service.sh` to replace the stale policy, then restart MonitorX.
+> **Upgrading from an earlier version?** Releases before this fix generated a policy for `virsh --no-ask-password …`. That is a **systemctl** flag which `virsh` rejects outright, so every Start/Shutdown/Reboot silently failed — and `poweroff` isn’t a `virsh` verb at all (the correct one is `destroy`). A later release also shipped a runtime command line that omitted `--no-pkttyagent`, which made sudo reject the exact same commands. Re-run `./systemd/install-service.sh` to replace the stale policy, then restart MonitorX.
 
 After updating an existing installation, run the installer once more and reload MonitorX:
 

@@ -103,9 +103,15 @@ else
 fi
 
 # Fallback path: a narrowly scoped sudo policy matching the EXACT argv MonitorX
-# executes. The command form must stay in sync with _virsh_command() in
-# backend/main.py:
+# executes. The command forms must stay in sync with backend/main.py:
 #   virsh --quiet --no-pkttyagent --connect <URI> <verb> -- <domain>
+#     (lifecycle verbs: start shutdown reboot destroy suspend resume)
+#   virsh --quiet --no-pkttyagent --connect <URI> console -- <domain>
+#     (serial console)
+#   virsh --quiet --no-pkttyagent --connect <URI> setvcpus <domain> ...
+#   virsh --quiet --no-pkttyagent --connect <URI> setmem <domain> ...
+#   virsh --quiet --no-pkttyagent --connect <URI> setmaxmem <domain> ...
+#     (CPU/RAM resize fallback)
 #
 # Note: '--no-ask-password' (used by earlier releases) is a systemctl flag that
 # virsh rejects outright, and 'poweroff' is not a virsh verb -- the forced-stop
@@ -115,8 +121,8 @@ if [ -n "$VIRSH_BIN" ]; then
     echo "  - Installing limited VM-control sudo policy at $SUDOERS_VM_DEST..."
     VIRSH_PREFIX="$VIRSH_BIN --quiet --no-pkttyagent --connect $(printf '%s' "$LIBVIRT_URI" | sed 's/:/\\:/g')"
     {
-        echo "# Managed by MonitorX. Required for dashboard Start/Shutdown/Reboot/Poweroff controls on libvirt/KVM guests."
-        echo "# Must match _virsh_command() in backend/main.py."
+        echo "# Managed by MonitorX. Required for dashboard lifecycle, console, and resize controls on libvirt/KVM guests."
+        echo "# Must match _virsh_command()/_build_virsh_modify_command() in backend/main.py."
         printf 'Cmnd_Alias MONITORX_VIRSH = '
         first=1
         for verb in start shutdown reboot destroy suspend resume; do
@@ -124,6 +130,11 @@ if [ -n "$VIRSH_BIN" ]; then
             printf '%s %s -- *' "$VIRSH_PREFIX" "$verb"
             first=0
         done
+        # Serial console (virsh console) and CPU/RAM resize fallbacks.
+        printf ', %s console -- *' "$VIRSH_PREFIX"
+        printf ', %s setvcpus *' "$VIRSH_PREFIX"
+        printf ', %s setmem *' "$VIRSH_PREFIX"
+        printf ', %s setmaxmem *' "$VIRSH_PREFIX"
         printf '\n'
         echo "$CURRENT_USER ALL=(root) NOPASSWD: MONITORX_VIRSH"
     } | sudo tee "$SUDOERS_VM_DEST" > /dev/null

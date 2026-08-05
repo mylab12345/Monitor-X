@@ -14,5 +14,7 @@ README.md
 setup.sh
 launch.sh
 monitorx-operations.db
+monitorx-operations.db-shm
+monitorx-operations.db-wal
 Dockerfile
 .dockerignore

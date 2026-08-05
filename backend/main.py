@@ -625,6 +625,24 @@ async def get_process_stats(limit: int = 30) -> List[Dict[str, Any]]:
     return processes[:limit]
 
 
+async def _scan_process_states() -> Dict[str, int]:
+    """Count processes by state across ALL processes (not a top-N subset).
+
+    ``get_process_stats(limit=N)`` sorts by CPU and truncates, so zombies and
+    D-state processes — which consume ~0% CPU — routinely fall off the end of
+    the list on busy hosts. Diagnostic scans must therefore never reuse the
+    top-N view for state counting.
+    """
+    counts: Dict[str, int] = {}
+    for proc in psutil.process_iter(['status']):
+        try:
+            status = (proc.info['status'] or "unknown").lower()
+            counts[status] = counts.get(status, 0) + 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return counts
+
+
 async def get_system_info() -> Dict[str, Any]:
     """Get system information"""
     boot_time = datetime.fromtimestamp(psutil.boot_time())
@@ -972,11 +990,18 @@ def _virsh_command(action: str, vm_id: str) -> List[str]:
         is plainly visible in the UI.
       * ``--`` terminates option parsing so a domain name is never mistaken
         for a flag.
+      * ``--no-pkttyagent`` MUST stay in the argv: the sudoers policy shipped
+        by systemd/install-service.sh whitelists exactly
+        ``virsh --quiet --no-pkttyagent --connect <URI> <verb> -- <domain>``
+        and sudo matches the full command line. Omitting it makes sudo reject
+        every control command with "not allowed to execute" — the same class
+        of mismatch that silently broke VM controls in earlier releases.
     """
     verb = VM_ACTION_TO_VIRSH[action]
     args = [
         VIRSH_BIN,
         "--quiet",
+        "--no-pkttyagent",
         "--connect", LIBVIRT_URI,
         verb, "--", vm_id,
     ]
@@ -1166,6 +1191,7 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
                    else libvirt.VIR_DOMAIN_AFFECT_CONFIG)
 
     messages = []
+    errors: List[str] = []
 
     # ------------------------------------------------------------------
     # vCPUs
@@ -1213,9 +1239,11 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
                 if cmd:
                     err = await _run_virsh_modify(cmd)
                     if err:
-                        messages.append(f"vCPU max: {err}")
+                        errors.append(f"vCPU max: {err}")
+                else:
+                    errors.append("vCPU max: virsh fallback unavailable")
             except Exception:
-                messages.append(f"vCPU max increase failed: {exc}")
+                errors.append(f"vCPU max increase failed: {exc}")
 
         # Step 2: set current vcpus
         # If the VM is running, try to set live first. If that fails (because
@@ -1259,13 +1287,16 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
                 cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus), *extra_args)
                 if cmd:
                     err = await _run_virsh_modify(cmd)
-                    messages.append(f"vCPUs set to {payload.vcpus} (via virsh)" if not err else f"vCPUs: {err}")
+                    if err:
+                        errors.append(f"vCPUs: {err}")
+                    else:
+                        messages.append(f"vCPUs set to {payload.vcpus} (via virsh)")
                 else:
-                    messages.append("vCPUs: permission denied and virsh unavailable")
+                    errors.append("vCPUs: permission denied and virsh unavailable")
             else:
-                messages.append(f"vCPUs: {msg}")
+                errors.append(f"vCPUs: {msg}")
         except Exception as exc:
-            messages.append(f"vCPUs: {exc}")
+            errors.append(f"vCPUs: {exc}")
 
     # ------------------------------------------------------------------
     # Memory
@@ -1310,9 +1341,13 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
                     "setmaxmem", vm_id, str(mem_kib), *max_args,
                 )
                 if cmd:
-                    await _run_virsh_modify(cmd)
-            except Exception:
-                pass
+                    err = await _run_virsh_modify(cmd)
+                    if err:
+                        errors.append(f"Memory max: {err}")
+                else:
+                    errors.append("Memory max: virsh fallback unavailable")
+            except Exception as exc:
+                errors.append(f"Memory max increase failed: {exc}")
 
         # Step 2: set current memory
         mem_live_failed = False
@@ -1352,17 +1387,23 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
                 cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), *extra_args)
                 if cmd:
                     err = await _run_virsh_modify(cmd)
-                    messages.append(f"Memory set to {payload.memory_mb} MiB (via virsh)" if not err else f"Memory: {err}")
+                    if err:
+                        errors.append(f"Memory: {err}")
+                    else:
+                        messages.append(f"Memory set to {payload.memory_mb} MiB (via virsh)")
                 else:
-                    messages.append("Memory: permission denied and virsh unavailable")
+                    errors.append("Memory: permission denied and virsh unavailable")
             else:
-                messages.append(f"Memory: {msg}")
+                errors.append(f"Memory: {msg}")
         except Exception as exc:
-            messages.append(f"Memory: {exc}")
+            errors.append(f"Memory: {exc}")
 
     result_msg = "; ".join(messages) or "Resize requested"
-    await _record_vm_action(vm_id, "resize", True, result_msg)
-    return {"success": True, "message": result_msg, "vm_id": vm_id}
+    success = not errors
+    if errors:
+        result_msg = (result_msg + "; " if result_msg else "") + "Errors: " + "; ".join(errors)
+    await _record_vm_action(vm_id, "resize", success, result_msg)
+    return {"success": success, "message": result_msg, "vm_id": vm_id}
 
 
 @app.post("/api/vms/{vm_id}/{action}")
@@ -1508,8 +1549,14 @@ async def vm_action_log(limit: int = Query(20, ge=1, le=_VM_ACTION_LOG_LIMIT)):
 
 
 def _build_virsh_modify_command(subcmd: str, vm_id: str, *args) -> List[str]:
-    """Build a virsh command for domain modification via the fallback path."""
-    base = [VIRSH_BIN, "--quiet", "--connect", LIBVIRT_URI,
+    """Build a virsh command for domain modification via the fallback path.
+
+    The argv shape must stay in sync with the sudoers policy installed by
+    systemd/install-service.sh (``virsh --quiet --no-pkttyagent --connect
+    <URI> <subcmd> <domain> …``); in particular ``--no-pkttyagent`` is part
+    of the whitelisted command, not an optional extra.
+    """
+    base = [VIRSH_BIN, "--quiet", "--no-pkttyagent", "--connect", LIBVIRT_URI,
             subcmd, vm_id, *args]
     if os.geteuid() == 0:
         return base
@@ -1794,8 +1841,13 @@ DEFAULT_ALERT_RULES = [
 ]
 
 def _ops_conn():
-    conn = sqlite3.connect(str(OPERATIONS_DB))
+    conn = sqlite3.connect(str(OPERATIONS_DB), timeout=10)
     conn.row_factory = sqlite3.Row
+    # The broadcast task and the REST API write concurrently; WAL + a busy
+    # timeout keep those writers from tripping over each other.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 def init_operations_store():
@@ -1813,20 +1865,59 @@ def init_operations_store():
 def _metrics(stats):
     return {"cpu": float(stats.cpu.get("percent_total", 0)), "memory": float(stats.memory.get("percent", 0)), "disk": max([float(x.get("percent", 0)) for x in stats.disk.get("partitions", [])] or [0]), "net_rx": float(stats.network.get("rx_bytes_sec", 0)), "net_tx": float(stats.network.get("tx_bytes_sec", 0))}
 
+_last_history_cleanup = 0.0
+_HISTORY_CLEANUP_INTERVAL = 600.0  # seconds; the DELETE scans the whole table
+
+
 def persist_snapshot_and_evaluate_alerts(stats):
+    global _last_history_cleanup
     values = _metrics(stats); now = datetime.now().isoformat()
     with _ops_conn() as conn:
         conn.execute("INSERT OR REPLACE INTO metric_history VALUES (?,?,?,?,?,?)", (now, values['cpu'], values['memory'], values['disk'], values['net_rx'], values['net_tx']))
-        # Keep 30 days at the native two-second cadence; older detail is discarded safely.
-        conn.execute("DELETE FROM metric_history WHERE timestamp < datetime('now', '-30 days')")
+        # Keep 30 days at the native two-second cadence; older detail is
+        # discarded. The DELETE scans the table, so it only runs every 10
+        # minutes instead of on every two-second snapshot.
+        if time.time() - _last_history_cleanup >= _HISTORY_CLEANUP_INTERVAL:
+            conn.execute("DELETE FROM metric_history WHERE timestamp < datetime('now', '-30 days')")
+            _last_history_cleanup = time.time()
         for rule in conn.execute("SELECT * FROM alert_rules WHERE enabled=1"):
             value = values.get(rule['metric'], 0); triggered = value >= rule['threshold'] if rule['operator'] == '>=' else value <= rule['threshold']
-            last = conn.execute("SELECT timestamp FROM incidents WHERE rule_id=? AND status='open' ORDER BY id DESC LIMIT 1", (rule['id'],)).fetchone()
-            if triggered and not last:
-                conn.execute("INSERT INTO incidents(timestamp,rule_id,title,severity,value) VALUES(?,?,?,?,?)", (now, rule['id'], rule['name'], 'critical' if value >= rule['threshold'] + 5 else 'warning', value))
-                conn.execute("INSERT INTO operations_audit(timestamp,action,target,outcome,detail) VALUES(?,?,?,?,?)", (now, 'alert_opened', rule['id'], 'success', f'{value:.1f}'))
-            elif not triggered and last:
-                conn.execute("UPDATE incidents SET status='resolved' WHERE rule_id=? AND status='open'", (rule['id'],))
+            # The last incident for this rule regardless of status. Only this
+            # row decides whether a NEW incident may be opened, so
+            # acknowledged/resolved incidents suppress duplicates instead of
+            # re-triggering a fresh incident on every two-second snapshot.
+            last = conn.execute(
+                "SELECT * FROM incidents WHERE rule_id=? ORDER BY id DESC LIMIT 1",
+                (rule['id'],),
+            ).fetchone()
+            cooldown = max(float(rule['cooldown_minutes'] or 0), 0.0) * 60.0
+
+            def _age_seconds(ref_ts):
+                """Age of a timestamp column in seconds (0 when unparsable)."""
+                try:
+                    return (datetime.now() - datetime.fromisoformat(ref_ts)).total_seconds()
+                except (TypeError, ValueError):
+                    return 0.0
+
+            if triggered:
+                should_open = False
+                if last is None:
+                    should_open = True
+                elif last['status'] == 'open':
+                    pass  # already reported; do not duplicate
+                elif last['status'] == 'acknowledged':
+                    # The operator saw it. Do not re-open until the cooldown
+                    # window after the ack has elapsed.
+                    ref = last['acknowledged_at'] or last['timestamp']
+                    should_open = _age_seconds(ref) >= cooldown
+                else:  # resolved
+                    # Re-arm the rule only after the cooldown since resolution.
+                    should_open = _age_seconds(last['timestamp']) >= cooldown
+                if should_open:
+                    conn.execute("INSERT INTO incidents(timestamp,rule_id,title,severity,value) VALUES(?,?,?,?,?)", (now, rule['id'], rule['name'], 'critical' if value >= rule['threshold'] + 5 else 'warning', value))
+                    conn.execute("INSERT INTO operations_audit(timestamp,action,target,outcome,detail) VALUES(?,?,?,?,?)", (now, 'alert_opened', rule['id'], 'success', f'{value:.1f}'))
+            elif last is not None and last['status'] == 'open':
+                conn.execute("UPDATE incidents SET status='resolved', acknowledged_at=COALESCE(acknowledged_at,?) WHERE id=?", (now, last['id']))
 
 def audit_operation(action, target, outcome='success', detail=''):
     with _ops_conn() as conn:
@@ -1914,7 +2005,7 @@ async def get_gpu():
 
 
 @app.get("/api/stats/processes")
-async def get_processes(limit: int = 30):
+async def get_processes(limit: int = Query(30, ge=1, le=500)):
     return await get_process_stats(limit)
 
 
@@ -1993,87 +2084,139 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
         return
 
     # Try VNC console first
+    vnc_available = False
     try:
         xml_desc = await _run_libvirt(domain.XMLDesc, timeout=5.0)
         root = ET.fromstring(xml_desc)
         graphics = root.find("./devices/graphics[@type='vnc']")
         if graphics is not None:
-            vnc_port = int(graphics.get("port", 5900))
+            # A port of -1/0 means the display uses autoport and libvirtd has
+            # not assigned a concrete port yet — nothing to proxy to. Fall
+            # through to the serial console instead of erroring on port -1.
+            vnc_port = int(graphics.get("port", -1) or -1)
             vnc_host = graphics.get("listen", "127.0.0.1")
             if vnc_host in ("0.0.0.0", ""):
                 vnc_host = "127.0.0.1"
+            vnc_available = vnc_port > 0 and vnc_port <= 65535
 
-            # Send VNC connection info to the client
-            await websocket.send_json({
-                "type": "vnc",
-                "host": vnc_host,
-                "port": vnc_port,
-            })
-
-            # Proxy raw VNC bytes between WebSocket and TCP
-            try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(vnc_host, vnc_port),
-                    timeout=5.0,
-                )
-            except Exception as e:
-                await websocket.send_json({"type": "error",
-                                           "message": f"Cannot connect to VNC port {vnc_port}: {e}"})
-                await websocket.close(code=1011, reason=str(e))
-                return
-
-            async def ws_to_vnc():
+            if vnc_available:
+                # Probe the TCP connection BEFORE telling the client anything;
+                # a dead listener falls through to the serial console instead
+                # of leaving the terminal stuck on a connection error.
                 try:
-                    while True:
-                        data = await websocket.receive_bytes()
-                        writer.write(data)
-                        await writer.drain()
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(vnc_host, vnc_port),
+                        timeout=5.0,
+                    )
                 except Exception:
+                    logger.warning("VNC port %s not reachable; falling back to serial console", vnc_port)
+                    vnc_available = False
+
+            if vnc_available:
+                # Send VNC connection info to the client, then proxy raw VNC
+                # bytes between WebSocket and TCP.
+                await websocket.send_json({
+                    "type": "vnc",
+                    "host": vnc_host,
+                    "port": vnc_port,
+                })
+
+                async def ws_to_vnc():
+                    try:
+                        while True:
+                            data = await websocket.receive_bytes()
+                            writer.write(data)
+                            await writer.drain()
+                    except Exception:
+                        try:
+                            writer.close()
+                        except Exception:
+                            pass
+
+                async def vnc_to_ws():
+                    try:
+                        while True:
+                            data = await reader.read(65536)
+                            if not data:
+                                break
+                            await websocket.send_bytes(data)
+                    except Exception:
+                        pass
+
+                try:
+                    await asyncio.gather(ws_to_vnc(), vnc_to_ws())
+                except Exception:
+                    pass
+                finally:
                     try:
                         writer.close()
                     except Exception:
                         pass
+                return
+    except Exception as exc:
+        logger.warning("VNC console path failed: %s", exc)
 
-            async def vnc_to_ws():
-                try:
-                    while True:
-                        data = await reader.read(65536)
-                        if not data:
-                            break
-                        await websocket.send_bytes(data)
-                except Exception:
-                    pass
-
-            try:
-                await asyncio.gather(ws_to_vnc(), vnc_to_ws())
-            except Exception:
-                pass
-            finally:
-                try:
-                    writer.close()
-                except Exception:
-                    pass
-            return
-    except Exception:
-        pass
-
-    # Fallback: serial console via virsh subprocess
+    # Fallback: serial console via `virsh console`.
+    #
+    # The argv mirrors the sudoers policy from systemd/install-service.sh
+    # (virsh --quiet --no-pkttyagent --connect <URI> console -- <domain>), so
+    # the command is authorized on unprivileged installs. virsh console
+    # demands a real TTY, so the subprocess runs on a pty allocated here and
+    # the pty master is bridged to the WebSocket; without the pty virsh fails
+    # with "unable to open a pseudo-terminal" under pipes.
     await websocket.send_json({"type": "serial"})
 
-    cmd = [VIRSH_BIN, "--connect", LIBVIRT_URI, "console", vm_id]
+    cmd = [VIRSH_BIN, "--quiet", "--no-pkttyagent", "--connect", LIBVIRT_URI, "console", "--", vm_id]
     if os.geteuid() != 0:
         sudo = shutil.which("sudo")
         if sudo:
             cmd = [sudo, "-n", *cmd]
 
+    proc = None
+    master_fd = None
     try:
+        master_fd, slave_fd = os.openpty()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            start_new_session=True,
         )
+        os.close(slave_fd)
     except Exception as e:
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        await websocket.send_json({"type": "error", "message": str(e)})
+        await websocket.close(code=1011, reason=str(e))
+        return
+
+    # Wrap the pty master in asyncio streams so reads never block the loop.
+    loop = asyncio.get_running_loop()
+    try:
+        console_reader = asyncio.StreamReader()
+        read_transport, _ = await loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(console_reader),
+            os.fdopen(os.dup(master_fd), "rb", buffering=0),
+        )
+        write_transport, write_protocol = await loop.connect_write_pipe(
+            asyncio.streams.FlowControlMixin,
+            os.fdopen(os.dup(master_fd), "wb", buffering=0),
+        )
+        console_writer = asyncio.StreamWriter(write_transport, write_protocol, None, loop)
+    except Exception as e:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
         await websocket.send_json({"type": "error", "message": str(e)})
         await websocket.close(code=1011, reason=str(e))
         return
@@ -2081,7 +2224,7 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
     async def read_console():
         try:
             while True:
-                data = await proc.stdout.read(4096)
+                data = await console_reader.read(4096)
                 if not data:
                     break
                 await websocket.send_bytes(data)
@@ -2092,26 +2235,23 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
         try:
             while True:
                 data = await websocket.receive_bytes()
-                if proc.stdin:
-                    proc.stdin.write(data)
-                    await proc.stdin.drain()
-        except Exception:
-            pass
-
-    async def read_stderr():
-        try:
-            while True:
-                data = await proc.stderr.read(4096)
-                if not data:
-                    break
+                console_writer.write(data)
+                await console_writer.drain()
         except Exception:
             pass
 
     try:
-        await asyncio.gather(read_console(), write_console(), read_stderr())
+        await asyncio.gather(read_console(), write_console())
     except Exception:
         pass
     finally:
+        try:
+            write_transport.close()
+            read_transport.close()
+            console_writer.close()
+            os.close(master_fd)
+        except Exception:
+            pass
         try:
             proc.terminate()
         except Exception:
@@ -2121,25 +2261,57 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
 # Process management endpoints
 @app.get("/api/processes/{pid}")
 async def get_process_detail(pid: int):
-    """Get detailed process information"""
+    """Get detailed process information.
+
+    Fields that require elevated privileges (cmdline, environ, open files,
+    sockets) are read individually and degrade to a sensible placeholder on
+    ``AccessDenied`` instead of failing the whole request — an unprivileged
+    MonitorX can then still inspect the metadata of root-owned processes.
+    """
     try:
         proc = psutil.Process(pid)
+
+        def safe(getter, default):
+            try:
+                value = getter()
+                return default if value is None else value
+            except (psutil.AccessDenied, psutil.ZombieProcess):
+                return default
+            except Exception:
+                return default
+
+        connections = []
+        try:
+            connections = [conn._asdict() for conn in proc.connections()]
+        except Exception:
+            connections = []
+        open_files = []
+        try:
+            open_files = [f._asdict() for f in proc.open_files() or []]
+        except Exception:
+            open_files = []
+        environ = {}
+        try:
+            environ = dict(list(proc.environ().items())[:20])
+        except Exception:
+            environ = {}
+
         return {
             "pid": proc.pid,
-            "name": proc.name(),
-            "exe": proc.exe() if hasattr(proc, 'exe') else "",
-            "cmdline": proc.cmdline() if hasattr(proc, 'cmdline') else [],
-            "status": proc.status(),
-            "username": proc.username() if hasattr(proc, 'username') else "unknown",
-            "create_time": datetime.fromtimestamp(proc.create_time()).isoformat(),
-            "cpu_percent": proc.cpu_percent(interval=0.1),
-            "memory_percent": round(proc.memory_percent(), 2),
-            "memory_info": dict(proc.memory_info()._asdict()) if hasattr(proc, 'memory_info') else {},
-            "num_threads": proc.num_threads() if hasattr(proc, 'num_threads') else 1,
-            "num_fds": proc.num_fds() if hasattr(proc, 'num_fds') else 0,
-            "connections": [conn._asdict() for conn in proc.connections()] if hasattr(proc, 'connections') else [],
-            "open_files": [f._asdict() for f in proc.open_files()] if hasattr(proc, 'open_files') and proc.open_files() else [],
-            "environ": dict(list(proc.environ().items())[:20]) if hasattr(proc, 'environ') and proc.environ() else {}
+            "name": safe(proc.name, "unknown"),
+            "exe": safe(proc.exe, ""),
+            "cmdline": safe(proc.cmdline, []),
+            "status": safe(proc.status, "unknown"),
+            "username": safe(proc.username, "unknown"),
+            "create_time": safe(lambda: datetime.fromtimestamp(proc.create_time()).isoformat(), ""),
+            "cpu_percent": safe(lambda: proc.cpu_percent(interval=0.1), 0.0),
+            "memory_percent": round(safe(proc.memory_percent, 0.0), 2),
+            "memory_info": safe(lambda: dict(proc.memory_info()._asdict()), {}),
+            "num_threads": safe(proc.num_threads, 1),
+            "num_fds": safe(proc.num_fds, 0),
+            "connections": connections,
+            "open_files": open_files,
+            "environ": environ,
         }
     except psutil.NoSuchProcess:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -2149,16 +2321,38 @@ async def get_process_detail(pid: int):
 
 @app.post("/api/processes/{pid}/kill")
 async def kill_process(pid: int, signal: int = Query(15)):
-    """Terminate a process with SIGTERM or SIGKILL."""
+    """Terminate a process with SIGTERM (15) or SIGKILL (9).
+
+    A SIGTERM request gets a 5-second grace period for the process to exit
+    cleanly; only then is it escalated to SIGKILL (and the response says so).
+    Previously the escalation happened after 0.5s, which made SIGTERM requests
+    effectively indistinguishable from SIGKILL.
+    """
     if signal not in (9, 15):
         raise HTTPException(status_code=400, detail="Only SIGTERM (15) and SIGKILL (9) are allowed.")
     try:
         proc = psutil.Process(pid)
         proc.send_signal(signal)
-        await asyncio.sleep(0.5)
-        if proc.is_running():
-            proc.kill()
-        return {"success": True, "message": f"Process {pid} terminated"}
+        if signal == 9:
+            return {"success": True, "message": f"Process {pid} killed (SIGKILL)"}
+        # Graceful window: poll briefly, then escalate only if still alive.
+        escalated = False
+        for _ in range(10):
+            await asyncio.sleep(0.5)
+            try:
+                if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.NoSuchProcess:
+                break
+        else:
+            try:
+                proc.kill()
+                escalated = True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        if escalated:
+            return {"success": True, "message": f"Process {pid} did not exit within 5s and was escalated to SIGKILL"}
+        return {"success": True, "message": f"Process {pid} terminated (SIGTERM)"}
     except psutil.NoSuchProcess:
         raise HTTPException(status_code=404, detail="Process not found")
     except psutil.AccessDenied:
@@ -2465,15 +2659,17 @@ async def troubleshoot_health_check():
         })
 
     # 5. Zombie & Disk-Sleep (D State) Processes
-    all_procs = await get_process_stats(limit=200)
-    zombies = [p for p in all_procs if p["status"] == "zombie"]
-    d_states = [p for p in all_procs if p["status"] == "uninterruptible sleep" or p["status"] == "stopped"]
-    
+    # Full-table scan on purpose: the top-N process view sorts by CPU, which
+    # drops the ~0% CPU zombies off the end of the list on busy hosts.
+    state_counts = await _scan_process_states()
+    zombies = state_counts.get("zombie", 0)
+    d_states = state_counts.get("uninterruptible sleep", 0) + state_counts.get("stopped", 0)
+
     if zombies or d_states:
         health_score -= 10
         msg_parts = []
-        if zombies: msg_parts.append(f"{len(zombies)} zombie process(es)")
-        if d_states: msg_parts.append(f"{len(d_states)} hung/stopped process(es)")
+        if zombies: msg_parts.append(f"{zombies} zombie process(es)")
+        if d_states: msg_parts.append(f"{d_states} hung/stopped process(es)")
         checks.append({
             "id": "zombie_hung",
             "category": "Processes",
@@ -2749,7 +2945,7 @@ async def troubleshoot_dns_lookup(req: DNSCheckRequest):
     # Local resolution
     start_time = time.time()
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         addrs = await loop.getaddrinfo(domain, None)
         ips = list(set([a[4][0] for a in addrs]))
         latency_ms = round((time.time() - start_time) * 1000, 2)
