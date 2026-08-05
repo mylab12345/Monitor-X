@@ -659,5 +659,5 @@ body.light-theme .nx-stars { display: none; }
 .ops-chart { width:100%; height:78px; display:block; margin-top:13px; border-radius:6px; background:rgba(0,0,0,.12); }
 .ops-detail { margin-top:10px; color:var(--text-muted); font-size:.78rem; }
 .focus-mode .nasa-overlay, .focus-mode .nasa-ticker, .focus-mode .mission-readout { display:none; }
-.focus-mode .app-container { max-width:1600px; }
+.focus-mode .app-container { max-width: 100%; }
 @media (max-width: 650px) { .operations-center { padding:12px; } .ops-incident { align-items:flex-start; } }
