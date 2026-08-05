@@ -2257,6 +2257,8 @@ async def list_services():
         return services
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="systemctl listing timed out (systemd busy?)")
+    except (FileNotFoundError, PermissionError):
+        raise HTTPException(status_code=503, detail="systemd is not available in this environment (systemctl not found).")
     except HTTPException:
         raise
     except Exception as e:

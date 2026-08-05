@@ -1,0 +1,125 @@
+# syntax=docker/dockerfile:1
+
+# =============================================================================
+# MonitorX — multi-stage Docker image
+#
+# Stage 1 (builder) compiles the Python dependencies, including the optional
+# python3-libvirt bindings, against a compatible ABI.
+# Stage 2 (runtime) is the minimal image that ships the app, the CLI tools it
+# shells out to (docker / kubectl / virsh), and a non-root user.
+#
+# Build:
+#   docker build -t monitorx .
+#
+# Run (host integration — recommended):
+#   DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+#   docker run -d --name monitorx \
+#     -p 8080:8080 \
+#     --group-add "$DOCKER_GID" \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     -v /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock \
+#     -v monitorx-data:/app/data \
+#     monitorx
+#
+# The dashboard runs unprivileged in the container; VM/service *control*
+# buttons need the host integration documented in README/systemd. Metrics
+# panels (CPU/RAM/disk/network/GPU) work out of the box. Mounting the docker
+# socket enables the containers panel; mounting libvirt's socket enables VM
+# monitoring; kubectl needs a kubeconfig mounted at $HOME/.kube/config.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: builder — compile wheels + libvirt bindings
+# -----------------------------------------------------------------------------
+FROM python:3.12-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Build toolchain required to compile psutil / py3nvml / libvirt-python wheels.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libvirt-dev \
+        libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# backend/requirements.txt is a pointer to the canonical root requirements file.
+COPY requirements.txt ./
+COPY backend/requirements.txt ./backend/requirements.txt
+
+# Create a self-contained virtualenv that the runtime image can copy verbatim.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip \
+    && pip install -r backend/requirements.txt \
+    && pip install libvirt-python==11.3.0
+
+# -----------------------------------------------------------------------------
+# Stage 2: runtime — slim image with app + optional CLI tools
+# -----------------------------------------------------------------------------
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MONITORX_LIBVIRT_URI="qemu:///system" \
+    PATH="/opt/venv/bin:$PATH"
+
+# CA certs (outbound ping/DNS tests), tini (proper PID 1 / signal handling),
+# virsh (libvirt-clients) for the VM control fallback path, curl for the
+# healthcheck, and procps for diagnostics. systemd is intentionally absent:
+# the services panel reports "systemd unavailable" inside a container.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini \
+        libvirt-clients \
+        procps \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker + kubectl CLIs: the app shells out to these binaries for the
+# containers/pods panels. Only the client is needed — the daemon runs on the
+# host and its socket is mounted in at runtime.
+ARG DOCKER_CLI_VERSION="29.1.3"
+ARG KUBECTL_VERSION="v1.33.0"
+# Docker static builds use x86_64/aarch64 paths; Kubernetes uses amd64/arm64.
+RUN DOCKER_ARCH="$(dpkg --print-architecture | sed 's/amd64/x86_64/; s/arm64/aarch64/')" \
+    && KUBE_ARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
+       | tar -xz --strip-components=1 -C /usr/local/bin docker/docker \
+    && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBE_ARCH}/kubectl" \
+       -o /usr/local/bin/kubectl \
+    && chmod +x /usr/local/bin/kubectl
+
+# Copy the prebuilt virtualenv from the builder stage.
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+
+# Application code (backend + static frontend served by FastAPI).
+COPY backend/ ./backend/
+COPY frontend/ ./frontend/
+
+# Create a dedicated unprivileged user.
+RUN useradd --create-home --uid 1000 monitorx \
+    && mkdir -p /app/data \
+    && chown -R monitorx:monitorx /app
+
+USER monitorx
+
+# Persistent SQLite operations history lives here; mount a volume to retain it.
+ENV MONITORX_OPERATIONS_DB="/app/data/monitorx-operations.db"
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8080/api/health || exit 1
+
+# tini reaps zombies and forwards signals so `docker stop` works cleanly.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+WORKDIR /app/backend
+CMD ["python", "main.py"]

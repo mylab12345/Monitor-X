@@ -1,0 +1,37 @@
+# MonitorX — Docker Compose deployment.
+#
+# Bring up:
+#   docker compose up -d --build
+#
+# The containers panel needs access to the host docker daemon. The compose file
+# resolves the docker socket's GID automatically so the unprivileged container
+# user can talk to it. libvirt's socket is mounted when present for VM
+# monitoring (guest *control* still needs the host-side policy — see README).
+services:
+  monitorx:
+    build: .
+    image: monitorx:latest
+    container_name: monitorx
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - monitorx-data:/app/data
+      # Host Docker daemon socket — enables the containers panel.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Host libvirt socket — enables VM monitoring (mount only if libvirtd runs).
+      - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock:ro
+    # Grant the container's unprivileged user the host docker socket's group.
+    group_add:
+      - ${DOCKER_GID:-999}
+    environment:
+      MONITORX_LIBVIRT_URI: "qemu:///system"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  monitorx-data:
