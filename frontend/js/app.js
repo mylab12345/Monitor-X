@@ -691,13 +691,55 @@ async function killProcess(pid, signal = 15) {
         });
         if (res.ok) {
             showToast(`Process ${pid} terminated successfully`, 'success');
-            document.getElementById('process-modal').classList.remove('show');
+            document.getElementById('process-modal')?.classList.remove('show');
             fetchStats();
         } else {
-            showToast('Failed to terminate process', 'error');
+            // Surface the server's reason (ownership guard 403, not found, …)
+            showToast(`Failed to terminate process: ${await readApiError(res)}`, 'error');
         }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
+    }
+}
+
+/* Multi-select (bulk) kill: one confirmation, one batch request, per-PID
+   results. The backend applies its ownership guard per process, so
+   foreign-owned PIDs are individually skipped and reported while authorized
+   PIDs are still terminated. */
+async function killSelectedProcesses(pids) {
+    const btn = document.getElementById('kill-selected');
+    if (!pids.length) return;
+    if (!confirm(`Kill ${pids.length} selected process(es)?`)) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Terminating…'; }
+    try {
+        const res = await fetch(`${API_BASE}/api/processes/kill`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pids, signal: 15 })
+        });
+        if (!res.ok) throw new Error(await readApiError(res));
+        const data = await res.json();
+        const results = data.results || [];
+        const killed = results.filter(r => r.success);
+        const refused = results.filter(r => !r.success);
+        if (!results.length) {
+            showToast('Nothing to kill: no valid process selected.', 'warning');
+        } else if (refused.length === 0) {
+            showToast(`Killed ${killed.length} of ${results.length} process(es).`, 'success');
+        } else {
+            const reasons = refused.slice(0, 3)
+                .map(r => `PID ${r.pid}: ${r.message || 'refused'}`);
+            const more = refused.length > 3 ? ` +${refused.length - 3} more` : '';
+            showToast(
+                `Killed ${killed.length}, skipped ${refused.length} (${reasons.join('; ')}${more})`,
+                refused.length === results.length ? 'error' : 'warning'
+            );
+        }
+        fetchStats();
+    } catch (e) {
+        showToast('Bulk kill failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '💀 Terminate Selected'; }
     }
 }
 
@@ -2638,8 +2680,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('kill-selected')?.addEventListener('click', () => {
         const checked = document.querySelectorAll('.proc-check:checked');
         if (checked.length === 0) { showToast('No processes selected', 'warning'); return; }
-        if (!confirm(`Kill ${checked.length} selected process(es)?`)) return;
-        checked.forEach(c => killProcess(parseInt(c.value)));
+        killSelectedProcesses(Array.from(checked).map(c => parseInt(c.value)));
     });
 
     // Log Inspector Controls

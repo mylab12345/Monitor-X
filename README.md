@@ -14,7 +14,7 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 - **Network Diagnostic Suite** — Interactive ICMP Ping latency tester, TCP Port connectivity checker, DNS resolver benchmark, and active listening ports table.
 - **Resource Bottleneck Finder** — Identifies top CPU, RAM, and thread consumers alongside stuck/zombie process killers.
 - **Safe Diagnostic Console** — Approved read-only diagnostic presets (`df -h`, `free -h`, `ss -tulpn`, `systemctl --failed`, `dmesg -T`, `uname -a`) with command history. Arbitrary shell execution is intentionally disabled.
-- **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections).
+- **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections). Multi-select kill runs as a single batched request and is **owner-guarded per process**: PIDs owned by another user are individually refused with the reason shown in the summary toast, while authorized PIDs are still terminated — the bulk kill never aborts wholesale on the first unauthorized target.
 - **Service & VM Management** — Start, stop, restart, and reload systemd services, with an in-UI authorization status and actionable errors. Running libvirt/KVM guests show live vCPU, RAM, disk I/O, and network throughput metrics.
 - **KVM Guest Lifecycle Controls** — `Start`, `Shutdown`, `Reboot`, `Suspend`, `Resume`, and a destructive `Poweroff` for every libvirt domain discovered on the host, with a state-aware action matrix, bulk operations on multiple guests, KPI counters (Total / Running / Stopped / Paused / Other), search/filter/sort, an auto-refresh interval selector, and a built-in audit log of the last 50 control actions. Controls run through the libvirt API when MonitorX has read-write access and transparently fall back to a narrowly scoped `sudo virsh` policy otherwise; a dropped `libvirtd` connection is re-established automatically without restarting the dashboard.
 - **No Authentication Required** — Plug-and-play local/internal server monitoring.
@@ -73,7 +73,7 @@ After updating an existing installation, run the installer once more and reload 
 sudo systemctl restart monitorx
 ```
 
-The **Systemd Services** tab shows whether this policy is available, disables controls if it is not, and displays the exact API error rather than reporting a false success.
+The **Systemd Services** tab shows whether this policy is available, disables controls if it is not, and displays the exact API error rather than reporting a false success. Availability is verified by asking sudo to validate the exact `systemctl --no-ask-password <action> <unit>` argv MonitorX runs — not merely whether the account holds *some* sudo privilege — so the tab only reports "available" when the granted commands actually match.
 
 ### Useful Service Commands
 
