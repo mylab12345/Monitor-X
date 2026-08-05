@@ -1,0 +1,258 @@
+/* ============================================================================
+   MonitorX — MISSION CONTROL BOARD (v2.4)
+   Flight-control GO/NO-GO poll styling: backlit station lamps, mission
+   status rollup, and MASTER ALARM. Loaded after nasa-theme.css so it can
+   reuse its custom properties.
+   ============================================================================ */
+
+.mission-board {
+    position: relative;
+    background:
+        linear-gradient(180deg, rgba(8, 16, 30, 0.92), rgba(5, 10, 20, 0.82)),
+        var(--bg-card);
+    border: 1px solid rgba(86, 166, 222, 0.22);
+    border-radius: var(--radius-lg);
+    padding: 18px 20px 16px;
+    margin-bottom: 22px;
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+}
+
+/* top accent strip — changes color with the mission rollup */
+.mission-board::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--success), transparent);
+    opacity: 0.9;
+    transition: background 0.4s ease;
+}
+.mission-board.mission-caution::before { background: linear-gradient(90deg, transparent, var(--warning), transparent); }
+.mission-board.mission-nogo::before    { background: linear-gradient(90deg, transparent, var(--danger), transparent); }
+
+/* HUD corner brackets consistent with the rest of the theme */
+.mission-board::after {
+    content: '';
+    position: absolute;
+    inset: 6px;
+    pointer-events: none;
+    z-index: 3;
+    opacity: 0.7;
+    background:
+        linear-gradient(var(--nasa-line), var(--nasa-line)) left   top    / 14px 2px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) left   top    / 2px 14px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) right  top    / 14px 2px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) right  top    / 2px 14px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) left   bottom / 14px 2px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) left   bottom / 2px 14px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) right  bottom / 14px 2px no-repeat,
+        linear-gradient(var(--nasa-line), var(--nasa-line)) right  bottom / 2px 14px no-repeat;
+}
+
+/* ── Header row ─────────────────────────────────────────────────────────── */
+.mission-board-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+.mission-board-title h2 {
+    font-family: var(--font-hud);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    color: var(--text-main);
+    margin: 0;
+}
+.mission-board-title h2::before { content: ''; }
+.mission-board-sub {
+    display: block;
+    margin-top: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+}
+
+/* Mission status lamp + word */
+.mission-status-lamp {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    border: 1px solid rgba(86, 166, 222, 0.25);
+    border-radius: var(--radius-md);
+    background: rgba(3, 8, 17, 0.7);
+    box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.55);
+}
+.ms-lamp {
+    width: 13px;
+    height: 13px;
+    border-radius: 3px;               /* square-ish lamp: Apollo wall-panel look */
+    background: #3a4a5c;
+    box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.6);
+    flex: 0 0 auto;
+}
+.ms-lamp.go      { background: var(--success); box-shadow: 0 0 12px var(--success-glow), 0 0 4px var(--success); }
+.ms-lamp.caution { background: var(--warning); box-shadow: 0 0 12px var(--warning-glow), 0 0 4px var(--warning); }
+.ms-lamp.nogo    { background: var(--danger);  box-shadow: 0 0 14px var(--danger-glow), 0 0 5px var(--danger);
+                   animation: mc-alarm-blink 0.9s steps(2, start) infinite; }
+.ms-text {
+    font-family: var(--font-hud);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    color: var(--text-main);
+    white-space: nowrap;
+}
+.mission-board.mission-nogo .ms-text { color: var(--danger); text-shadow: 0 0 12px var(--danger-glow); }
+.mission-board.mission-caution .ms-text { color: var(--warning); }
+
+/* red wash over the whole console when the master alarm trips */
+.mission-board.mission-nogo {
+    border-color: rgba(255, 77, 94, 0.5);
+    animation: mc-alarm-wash 1.8s ease-in-out infinite;
+}
+@keyframes mc-alarm-blink { 50% { opacity: 0.25; } }
+@keyframes mc-alarm-wash {
+    0%, 100% { box-shadow: var(--shadow-card); }
+    50%      { box-shadow: 0 0 34px -4px var(--danger-glow), inset 0 0 46px -18px var(--danger-glow); }
+}
+
+/* ── Station grid ───────────────────────────────────────────────────────── */
+.mission-stations {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    gap: 10px;
+}
+
+.mc-station {
+    position: relative;
+    padding: 10px 12px 9px;
+    border: 1px solid rgba(86, 166, 222, 0.16);
+    border-radius: var(--radius-md);
+    background: rgba(4, 10, 20, 0.62);
+    box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.45);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease, background-color 0.3s ease;
+}
+
+.mc-st-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.mc-call {
+    font-family: var(--font-hud);
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    color: var(--accent-blue);
+}
+.mc-lamp {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    background: #3a4a5c;
+    flex: 0 0 auto;
+}
+.mc-name {
+    margin-top: 2px;
+    font-size: 0.62rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+.mc-value {
+    margin-top: 7px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.06rem;
+    font-weight: 700;
+    color: var(--text-main);
+    font-variant-numeric: tabular-nums;
+}
+.mc-detail {
+    margin-top: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.mc-status-word {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(86, 166, 222, 0.12);
+    font-family: var(--font-hud);
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    color: var(--text-dim);
+}
+
+/* station state treatments */
+.mc-station.go      { border-color: rgba(37, 230, 160, 0.30); }
+.mc-station.go      .mc-lamp { background: var(--success); box-shadow: 0 0 8px var(--success-glow); }
+.mc-station.go      .mc-status-word { color: var(--success); }
+
+.mc-station.caution { border-color: rgba(255, 176, 32, 0.42); background: rgba(24, 17, 4, 0.6); }
+.mc-station.caution .mc-lamp { background: var(--warning); box-shadow: 0 0 8px var(--warning-glow); }
+.mc-station.caution .mc-status-word { color: var(--warning); }
+.mc-station.caution .mc-call { color: var(--warning); }
+
+.mc-station.nogo    { border-color: rgba(255, 77, 94, 0.55); background: rgba(28, 6, 9, 0.62); }
+.mc-station.nogo    .mc-lamp { background: var(--danger); box-shadow: 0 0 10px var(--danger-glow);
+                               animation: mc-alarm-blink 0.9s steps(2, start) infinite; }
+.mc-station.nogo    .mc-status-word { color: var(--danger); }
+.mc-station.nogo    .mc-call { color: var(--danger); }
+
+.mc-station.standby { opacity: 0.72; }
+.mc-station.standby .mc-lamp { background: #44586e; }
+.mc-station.standby .mc-status-word { color: var(--text-dim); letter-spacing: 0.16em; }
+
+/* ── DOY clock (mission-readout third line) ─────────────────────────────── */
+.doy-clock {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    font-family: var(--font-hud);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+}
+.doy-label {
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: var(--text-dim);
+    letter-spacing: 0.18em;
+}
+#doy-clock { font-variant-numeric: tabular-nums; }
+
+/* ── Light clean-room variant ───────────────────────────────────────────── */
+body.light-theme .mission-board {
+    background: rgba(255, 255, 255, 0.86);
+    border-color: rgba(20, 60, 100, 0.16);
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.08);
+}
+body.light-theme .mc-station { background: rgba(248, 250, 252, 0.9); box-shadow: none; }
+body.light-theme .mission-status-lamp { background: rgba(241, 245, 249, 0.9); box-shadow: none; }
+body.light-theme .ms-lamp { background: #cbd5e1; }
+body.light-theme .mc-station.standby .mc-lamp { background: #cbd5e1; }
+
+/* ── Responsive + vestibular safety ─────────────────────────────────────── */
+@media (max-width: 900px) {
+    .mission-stations { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }
+}
+@media (max-width: 560px) {
+    .mission-board-head { flex-direction: column; align-items: flex-start; }
+    .mission-stations { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ms-lamp.nogo, .mc-station.nogo .mc-lamp, .mission-board.mission-nogo { animation: none !important; }
+}

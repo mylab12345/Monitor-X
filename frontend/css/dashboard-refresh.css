@@ -10,9 +10,14 @@
     --mx-shadow: 0 16px 38px rgba(0, 0, 0, .20);
 }
 
-/* Keep the screen focused on data, not simulation effects. */
-.nasa-overlay, .nx-stars, .nasa-boot, .nasa-ticker,
-.nx-fab, .nx-progress, .nx-cmd-overlay, .nx-shortcuts-overlay { display: none !important; }
+/* v2.4: NASA mission-control effects are RESTORED (scanline/grid overlay,
+   flight-control boot sequence, telemetry ticker) — they define the look.
+   Only the duplicate parallax starfield stays off so the two star layers
+   don't stack, and decorative motion is toned down for data legibility. */
+.nx-stars { display: none !important; }
+.nasa-grid { opacity: .35; }
+.nasa-scanline { opacity: .35; }
+.nasa-scanline::after { opacity: .6; }
 body::before { animation: none; opacity: .6; }
 
 body {

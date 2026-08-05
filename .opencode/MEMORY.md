@@ -9,7 +9,7 @@
 | Fact | Value |
 |------|-------|
 | **What** | Real-time Linux server monitoring dashboard (self-hosted, no auth) |
-| **Version** | v2.2 (NASA Mission-Control theme) |
+| **Version** | v2.4 (NASA Mission-Control + GO/NO-GO Flight Control Loop) |
 | **Port** | 8080 (`0.0.0.0`) |
 | **Backend** | Python 3.12 + FastAPI + Uvicorn + WebSockets |
 | **Frontend** | Vanilla JS (no framework) + CSS Glassmorphism + HTML5 Canvas sparklines |
@@ -322,6 +322,20 @@ POST /api/services/{name}/{action}  // start/stop/restart/reload/enable/disable
 ---
 
 ## File Change Log
+
+### v2.4 (2026-08-05) — NASA-LEVEL PASS: FLIGHT CONTROL LOOP + EFFECT RESTORATION
+**Added**:
+- **GO/NO-GO Flight Control Loop board** (top of Dashboard tab): nine flight-controller stations — BOOSTER (storage), GUIDO (CPU), TELMU (memory), INCO (network), EECOM (thermal), FIDO (zombie/stuck processes), SURGEON (GPU), GC (systemd failed units), CAPCOM (WebSocket datalink) — each voting GO / CAUTION / NO-GO from live telemetry. Worst vote drives the MISSION STATUS lamp; any NO-GO raises a blinking **MASTER ALARM** (board wash + aria-live announcement). Hardware-less stations (no GPU/sensors/systemd bus) degrade to STANDBY instead of failing.
+- **DOY mission clock** (UTC day-of-year `DDD/HH:MM:SS`) added to the header MET/UTC readout.
+
+**Fixed**:
+- `dashboard-refresh.css` had `display: none !important` on `.nasa-overlay`, `.nasa-boot`, `.nasa-ticker`, `.nx-fab`, `.nx-progress`, `.nx-cmd-overlay`, `.nx-shortcuts-overlay` — suppressing the entire NASA theme and **breaking the ⌘K command palette** (it opens via `.open` class but could never show). NASA effects are restored; only the duplicate `.nx-stars` layer stays off (nasa-overlay provides its own starfield) and scanline/grid opacity is toned down for data legibility.
+- Backend default bind aligned with docs: `MONITORX_HOST` now defaults to `0.0.0.0` (README/MEMORY always promised 0.0.0.0:8080; override with `MONITORX_HOST=127.0.0.1`).
+- FastAPI app version bumped 2.0.0 → 2.4.0.
+
+**Files changed**: `frontend/js/mission-control.js` (NEW ~300 lines), `frontend/css/mission-control.css` (NEW ~260 lines), `frontend/index.html` (+board markup, +DOY line, +asset links), `frontend/css/dashboard-refresh.css`, `backend/main.py`, `README.md`, `.opencode/MEMORY.md`.
+
+**Verified**: headless DOM-stub execution against the live server — nominal frame → ALL STATIONS GO; synthetic hot frame → 6 stations NO-GO + MASTER ALARM rollup; datalink loss → CAPCOM NO-GO; 503 `/api/services` → GC STANDBY. All 12 static assets 200; `node --check` + `py_compile` clean.
 
 ### v2.3 (Maintenance — 2026-08-05) — RELIABILITY & BUG-FIX PASS
 **Fixed** (backend/main.py):
