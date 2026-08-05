@@ -14,6 +14,7 @@ import subprocess
 import sqlite3
 import shutil
 import time
+import urllib.request
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -266,6 +267,7 @@ class SystemStats(BaseModel):
     vms: Optional[List[Dict[str, Any]]] = None
     containers: Optional[List[Dict[str, Any]]] = None
     pods: Optional[List[Dict[str, Any]]] = None
+    thermal: Optional[Dict[str, Any]] = None
 
 
 class PingRequest(BaseModel):
@@ -660,6 +662,123 @@ async def get_system_info() -> Dict[str, Any]:
         "uptime_seconds": int(uptime.total_seconds()),
         "uptime_str": str(uptime).split('.')[0],
         "python_version": platform.python_version()
+    }
+
+
+async def get_thermal_stats() -> Dict[str, Any]:
+    """Read CPU/SoC temperatures, fans, and battery state.
+
+    Uses psutil's sysfs-backed sensors where available and falls back to
+    reading /sys/class/thermal directly. Returns a normalized payload so the
+    dashboard renders identically regardless of which source is present.
+    Failures are swallowed and reported as empty structures so the thermal
+    panel degrades gracefully on hardware with no exposed sensors.
+    """
+    temps: List[Dict[str, Any]] = []
+    fans: List[Dict[str, Any]] = []
+    battery: Optional[Dict[str, Any]] = None
+
+    # 1) psutil sensor APIs (preferred; reads hwmon/thermal sysfs on Linux)
+    try:
+        t = psutil.sensors_temperatures() or {}
+        for label, entries in t.items():
+            for e in entries:
+                # psutil returns namedtuples; be defensive about attribute access
+                current = getattr(e, "current", None)
+                high = getattr(e, "high", None)
+                critical = getattr(e, "critical", None)
+                temps.append({
+                    "label": label,
+                    "name": getattr(e, "label", None) or label,
+                    "current_c": current if current is not None else None,
+                    "high_c": high if high is not None else None,
+                    "critical_c": critical if critical is not None else None,
+                })
+    except Exception as exc:
+        logger.debug("psutil.sensors_temperatures failed: %s", exc)
+
+    try:
+        f = psutil.sensors_fans() or {}
+        for label, entries in f.items():
+            for e in entries:
+                fans.append({
+                    "label": label,
+                    "name": getattr(e, "label", None) or label,
+                    "current_rpm": getattr(e, "current", None) if getattr(e, "current", None) else 0,
+                })
+    except Exception as exc:
+        logger.debug("psutil.sensors_fans failed: %s", exc)
+
+    try:
+        b = psutil.sensors_battery()
+        if b is not None:
+            battery = {
+                "percent": b.percent,
+                "plugged": bool(b.power_plugged),
+                "seconds_left": b.secsleft if b.secsleft != psutil.POWER_TIME_UNLIMITED else None,
+            }
+    except Exception as exc:
+        logger.debug("psutil.sensors_battery failed: %s", exc)
+
+    # 2) Fallback: raw /sys/class/thermal thermal_zone* (no psutil parser).
+    #    Only used when psutil produced no temperature entries.
+    if not temps:
+        try:
+            zone_root = Path("/sys/class/thermal")
+            if zone_root.is_dir():
+                for z in sorted(zone_root.glob("thermal_zone*")):
+                    try:
+                        ztype = (z / "type").read_text().strip()
+                        ztemp = int((z / "temp").read_text().strip())
+                        temps.append({
+                            "label": "thermal_zone",
+                            "name": ztype,
+                            "current_c": round(ztemp / 1000.0, 1),
+                            "high_c": None,
+                            "critical_c": None,
+                        })
+                    except Exception:
+                        continue
+        except Exception as exc:
+            logger.debug("thermal_zone fallback failed: %s", exc)
+
+    # 3) Fallback: /sys/class/hwmon fan*_input (no psutil parser).
+    if not fans:
+        try:
+            hwmon_root = Path("/sys/class/hwmon")
+            if hwmon_root.is_dir():
+                for h in sorted(hwmon_root.glob("hwmon*")):
+                    try:
+                        name = (h / "name").read_text().strip()
+                    except Exception:
+                        name = h.name
+                    for fan in sorted(h.glob("fan*_input")):
+                        try:
+                            rpm = int(fan.read_text().strip())
+                            fans.append({"label": name, "name": fan.stem, "current_rpm": rpm})
+                        except Exception:
+                            continue
+        except Exception as exc:
+            logger.debug("hwmon fan fallback failed: %s", exc)
+
+    peak = max((t["current_c"] for t in temps if t["current_c"] is not None), default=None)
+
+    def _status(temp_c):
+        if temp_c is None:
+            return "unknown"
+        if temp_c >= 80:
+            return "critical"
+        if temp_c >= 70:
+            return "warning"
+        return "ok"
+
+    return {
+        "temperatures": temps,
+        "fans": fans,
+        "battery": battery,
+        "peak_c": peak,
+        "status": _status(peak),
+        "available": bool(temps or fans),
     }
 
 
@@ -1806,11 +1925,12 @@ async def collect_all_stats() -> SystemStats:
                 logger.warning("Peripheral stats collector failed: %s", exc)
                 return None
 
-        gpu, vms, containers, pods = await asyncio.gather(
+        gpu, vms, containers, pods, thermal = await asyncio.gather(
             _optional(get_gpu_stats()),
             _optional(get_vm_stats()),
             _optional(get_docker_containers()),
             _optional(get_kubernetes_pods()),
+            _optional(get_thermal_stats()),
         )
         # SQLite persistence (P2 deferred)
         try:
@@ -1824,7 +1944,7 @@ async def collect_all_stats() -> SystemStats:
         return SystemStats(
             timestamp=datetime.now().isoformat(), cpu=cpu, memory=memory, disk=disk,
             network=network, gpu=gpu, processes=processes, system=system, vms=vms,
-            containers=containers, pods=pods
+            containers=containers, pods=pods, thermal=thermal
         )
 
 
@@ -1924,14 +2044,87 @@ def persist_snapshot_and_evaluate_alerts(stats):
                     # Re-arm the rule only after the cooldown since resolution.
                     should_open = _age_seconds(last['timestamp']) >= cooldown
                 if should_open:
-                    conn.execute("INSERT INTO incidents(timestamp,rule_id,title,severity,value) VALUES(?,?,?,?,?)", (now, rule['id'], rule['name'], 'critical' if value >= rule['threshold'] + 5 else 'warning', value))
+                    severity = 'critical' if value >= rule['threshold'] + 5 else 'warning'
+                    conn.execute("INSERT INTO incidents(timestamp,rule_id,title,severity,value) VALUES(?,?,?,?,?)", (now, rule['id'], rule['name'], severity, value))
                     conn.execute("INSERT INTO operations_audit(timestamp,action,target,outcome,detail) VALUES(?,?,?,?,?)", (now, 'alert_opened', rule['id'], 'success', f'{value:.1f}'))
+                    # Optional outbound notification (fires on the event loop).
+                    try:
+                        asyncio.create_task(_notify_webhook(
+                            rule['name'], severity, f"{value:.1f}", rule['metric'],
+                        ))
+                    except Exception as exc:
+                        logger.warning("Webhook scheduling failed: %s", exc)
             elif last is not None and last['status'] == 'open':
                 conn.execute("UPDATE incidents SET status='resolved', acknowledged_at=COALESCE(acknowledged_at,?) WHERE id=?", (now, last['id']))
 
 def audit_operation(action, target, outcome='success', detail=''):
     with _ops_conn() as conn:
         conn.execute("INSERT INTO operations_audit(timestamp,action,target,outcome,detail) VALUES(?,?,?,?,?)", (datetime.now().isoformat(), action, target, outcome, detail[:500]))
+
+
+# =============================================================================
+# Alert notification webhooks
+#
+# An optional, additive outbound channel: when a threshold incident opens, a
+# JSON POST is fired to a configured webhook URL (Slack/Discord/generic). The
+# payload is deliberately generic ({ title, severity, value, metric, host,
+# timestamp }) so any receiver can format it. Config lives in the operations
+# `settings` table and is disabled until the operator saves a URL.
+# =============================================================================
+WEBHOOK_TIMEOUT = 8.0
+
+def _webhook_config():
+    with _ops_conn() as conn:
+        row_url = conn.execute("SELECT value FROM settings WHERE key='webhook_url'").fetchone()
+        row_en = conn.execute("SELECT value FROM settings WHERE key='webhook_enabled'").fetchone()
+    return {
+        "url": (row_url["value"] if row_url else "") or "",
+        "enabled": (row_en["value"] == "1") if row_en else False,
+    }
+
+
+def _fire_webhook_sync(title: str, severity: str, value: str, metric: str) -> Optional[str]:
+    """Best-effort synchronous webhook POST. Returns error string or None."""
+    cfg = _webhook_config()
+    if not cfg["enabled"] or not cfg["url"]:
+        return None
+    payload = {
+        "title": title,
+        "severity": severity,
+        "value": value,
+        "metric": metric,
+        "host": socket.gethostname(),
+        "timestamp": datetime.now().isoformat(),
+        "source": "MonitorX",
+    }
+    req = urllib.request.Request(
+        cfg["url"],
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "MonitorX/1.0"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=WEBHOOK_TIMEOUT) as resp:
+            resp.read()
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
+async def _notify_webhook(title: str, severity: str, value: str, metric: str):
+    """Fire a webhook notification off the event loop (never blocks a frame)."""
+    try:
+        loop = asyncio.get_running_loop()
+        err = await loop.run_in_executor(None, _fire_webhook_sync, title, severity, value, metric)
+        if err:
+            logger.warning("Webhook notification failed: %s", err)
+    except RuntimeError:
+        # No running loop (rare, direct call path) — fall back to inline send.
+        err = _fire_webhook_sync(title, severity, value, metric)
+        if err:
+            logger.warning("Webhook notification failed: %s", err)
+    except Exception as exc:
+        logger.warning("Webhook scheduling failed: %s", exc)
 
 class AlertRuleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
@@ -1958,6 +2151,84 @@ async def create_alert_rule(rule: AlertRuleRequest):
     with _ops_conn() as conn: conn.execute("INSERT INTO alert_rules VALUES (?,?,?,?,?,?,?)", (rule_id, rule.name, rule.metric, '>=', rule.threshold, rule.cooldown_minutes, int(rule.enabled)))
     audit_operation('alert_rule_created', rule.name)
     return {'id': rule_id, **rule.model_dump()}
+
+
+class RuleUpdateRequest(BaseModel):
+    """Optional fields to update on an existing alert rule (all fields optional)."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    metric: Optional[str] = Field(default=None, pattern="^(cpu|memory|disk|net_rx|net_tx)$")
+    threshold: Optional[float] = Field(default=None, ge=0)
+    cooldown_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    enabled: Optional[bool] = None
+
+
+@app.patch('/api/operations/alert-rules/{rule_id}')
+async def update_alert_rule(rule_id: str, update: RuleUpdateRequest):
+    """Update one or more fields of an alert rule (used to edit or toggle it)."""
+    with _ops_conn() as conn:
+        row = conn.execute("SELECT * FROM alert_rules WHERE id=?", (rule_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Alert rule not found")
+        sets = []
+        params = []
+        if update.name is not None:
+            sets.append("name=?"); params.append(update.name)
+        if update.metric is not None:
+            sets.append("metric=?"); params.append(update.metric)
+        if update.threshold is not None:
+            sets.append("threshold=?"); params.append(update.threshold)
+        if update.cooldown_minutes is not None:
+            sets.append("cooldown_minutes=?"); params.append(update.cooldown_minutes)
+        if update.enabled is not None:
+            sets.append("enabled=?"); params.append(int(update.enabled))
+        if sets:
+            params.append(rule_id)
+            conn.execute(f"UPDATE alert_rules SET {', '.join(sets)} WHERE id=?", params)
+        updated = conn.execute("SELECT * FROM alert_rules WHERE id=?", (rule_id,)).fetchone()
+    audit_operation('alert_rule_updated', rule_id)
+    return dict(updated)
+
+
+@app.delete('/api/operations/alert-rules/{rule_id}')
+async def delete_alert_rule(rule_id: str):
+    with _ops_conn() as conn:
+        row = conn.execute("SELECT * FROM alert_rules WHERE id=?", (rule_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Alert rule not found")
+        conn.execute("DELETE FROM alert_rules WHERE id=?", (rule_id,))
+        conn.execute("UPDATE incidents SET status='resolved', acknowledged_at=COALESCE(acknowledged_at,?) WHERE rule_id=? AND status='open'", (datetime.now().isoformat(), rule_id))
+    audit_operation('alert_rule_deleted', dict(row)['name'])
+    return {'success': True}
+
+
+@app.get('/api/operations/webhook')
+async def get_webhook_config():
+    cfg = _webhook_config()
+    return {"enabled": cfg["enabled"], "url": cfg["url"]}
+
+
+class WebhookConfigRequest(BaseModel):
+    url: str = Field(default="", max_length=512)
+    enabled: bool = True
+
+
+@app.post('/api/operations/webhook')
+async def set_webhook_config(cfg: WebhookConfigRequest):
+    with _ops_conn() as conn:
+        conn.execute("INSERT INTO settings(key,value) VALUES('webhook_url',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (cfg.url,))
+        conn.execute("INSERT INTO settings(key,value) VALUES('webhook_enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ('1' if cfg.enabled else '0',))
+    audit_operation('webhook_configured', 'enabled' if cfg.enabled else 'disabled')
+    return {"enabled": cfg.enabled, "url": cfg.url}
+
+
+@app.post('/api/operations/webhook/test')
+async def test_webhook():
+    err = await asyncio.get_running_loop().run_in_executor(
+        None, _fire_webhook_sync, "MonitorX webhook test", "info", "--", "test"
+    )
+    if err:
+        raise HTTPException(status_code=502, detail=f"Webhook delivery failed: {err}")
+    return {"success": True, "message": "Webhook delivered successfully"}
 
 @app.post('/api/operations/incidents/{incident_id}/acknowledge')
 async def acknowledge_incident(incident_id: int):
@@ -2105,6 +2376,108 @@ async def get_processes(limit: int = Query(30, ge=1, le=500)):
 @app.get("/api/stats/system")
 async def get_system():
     return await get_system_info()
+
+
+@app.get("/api/stats/thermal")
+async def get_thermal():
+    return await get_thermal_stats()
+
+
+# =============================================================================
+# DIAGNOSTICS REPORT EXPORT
+# =============================================================================
+
+async def _collect_report_data() -> Dict[str, Any]:
+    """Gather a self-contained snapshot of the host for a diagnostics report."""
+    cpu = await get_cpu_stats()
+    memory = await get_memory_stats()
+    disk = await get_disk_stats()
+    network = await get_network_stats()
+    system = await get_system_info()
+    processes = await get_process_stats(limit=15)
+    thermal = await get_thermal_stats()
+    return {
+        "generated": datetime.now().isoformat(),
+        "system": system,
+        "cpu": cpu,
+        "memory": memory,
+        "disk": disk,
+        "network": {
+            "rx_bytes_sec": network.get("rx_bytes_sec"),
+            "tx_bytes_sec": network.get("tx_bytes_sec"),
+            "connections_count": network.get("connections_count"),
+            "interfaces": network.get("interfaces"),
+        },
+        "thermal": thermal,
+        "top_processes": processes,
+    }
+
+
+def _report_to_markdown(data: Dict[str, Any]) -> str:
+    s = data["system"]
+    lines = [
+        "# MonitorX Diagnostics Report",
+        "",
+        f"Generated: `{data['generated']}`",
+        "",
+        "## System",
+        f"- Hostname: `{s['hostname']}`",
+        f"- Platform: `{s['platform']} {s['platform_release']}`",
+        f"- Kernel: `{s['platform_version']}`",
+        f"- Architecture: `{s['architecture']}`",
+        f"- Processor: `{s['processor']}`",
+        f"- Boot time: `{s['boot_time']}`",
+        f"- Uptime: `{s['uptime_str']}`",
+        "",
+        "## CPU",
+        f"- Utilization: `{data['cpu'].get('percent_total', 0):.1f}%`",
+        f"- Cores: `{data['cpu'].get('count_logical', 0)}`",
+        f"- Load (1/5/15m): `{data['cpu'].get('load_1min', 0):.2f} / {data['cpu'].get('load_5min', 0):.2f} / {data['cpu'].get('load_15min', 0):.2f}`",
+        "",
+        "## Memory",
+        f"- Used: `{data['memory'].get('percent', 0)}%`",
+        f"- Available: `{data['memory'].get('available', 0)}` bytes",
+        f"- Swap: `{data['memory'].get('swap_percent', 0)}%`",
+        "",
+        "## Thermal",
+    ]
+    if data["thermal"]["temperatures"]:
+        for t in data["thermal"]["temperatures"]:
+            cur = f"{t['current_c']}°C" if t["current_c"] is not None else "n/a"
+            lines.append(f"- `{t['name']}`: {cur}")
+    else:
+        lines.append("- No temperature sensors exposed.")
+    if data["thermal"]["fans"]:
+        for f in data["thermal"]["fans"]:
+            lines.append(f"- Fan `{f['name']}`: {f['current_rpm']} RPM")
+    lines.append("")
+    lines.append("## Top Processes (by CPU)")
+    lines.append("")
+    lines.append("| PID | Name | CPU % | RAM % | RSS | User | Status |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for p in data["top_processes"]:
+        lines.append(f"| {p['pid']} | {p['name']} | {p['cpu_percent']} | {p['memory_percent']} | {p['memory_mb']} MB | {p['username']} | {p['status']} |")
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/api/report/export")
+async def report_export(format: str = Query("json", pattern="^(json|markdown)$")):
+    data = await _collect_report_data()
+    if format == "markdown":
+        body = _report_to_markdown(data)
+        filename = f"monitorx-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+        return Response(
+            content=body,
+            media_type="text/markdown",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    body = json.dumps(data, indent=2)
+    filename = f"monitorx-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/stats/vms")

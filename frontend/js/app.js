@@ -140,6 +140,7 @@ function updateDashboard(data) {
     guard('disk',     () => updateDisk(data.disk));
     guard('network',  () => updateNetwork(data.network));
     guard('gpu',      () => updateGpu(data.gpu));
+    guard('thermal',  () => updateThermal(data.thermal));
     guard('system',   () => updateSystem(data.system));
     guard('processes',() => updateTopProcesses(data.processes));
     guard('issues',   () => checkOSIssues(data));
@@ -236,16 +237,78 @@ function updateNetwork(net) {
 
     const list = document.getElementById('net-list');
     list.innerHTML = '';
+    let totalErrors = 0;
     for (const [name, stats] of Object.entries(net.interfaces || {})) {
         if (name === 'lo') continue;
         const item = document.createElement('div');
         item.className = 'net-item';
+        // Per-interface detail: RX/TX bytes plus cumulative errors & drops.
+        const errin = stats.errin || 0, errout = stats.errout || 0, dropin = stats.dropin || 0, dropout = stats.dropout || 0;
+        totalErrors += errin + errout + dropin + dropout;
+        const detail = [errin + errout, dropin + dropout].some(v => v > 0)
+            ? ` · <span class="net-warn">err ${errin + errout} · drop ${dropin + dropout}</span>`
+            : '';
         item.innerHTML = `
-            <span><b>${escapeHtml(name)}</b></span>
-            <span>↓ ${formatBytes(stats.bytes_recv)} | ↑ ${formatBytes(stats.bytes_sent)}</span>
+            <span><b>${escapeHtml(name)}</b><small>${formatBytes(stats.bytes_recv)} ↓ / ${formatBytes(stats.bytes_sent)} ↑ ${detail}</small></span>
+            <span>${formatBytes(stats.bytes_recv)} / ${formatBytes(stats.bytes_sent)}</span>
         `;
         list.appendChild(item);
     }
+    const errEl = document.getElementById('net-errors');
+    if (errEl) errEl.textContent = totalErrors;
+}
+
+function updateThermal(thermal) {
+    const content = document.getElementById('thermal-content');
+    const peakEl = document.getElementById('thermal-peak');
+    const countEl = document.getElementById('thermal-count');
+    const fansEl = document.getElementById('thermal-fans');
+    if (!content) return;
+    if (!thermal || !thermal.available) {
+        content.innerHTML = '<p class="no-data">No temperature sensors exposed by this host.</p>';
+        if (peakEl) peakEl.textContent = 'N/A';
+        if (countEl) countEl.textContent = '0';
+        if (fansEl) fansEl.textContent = '0';
+        return;
+    }
+    const temps = thermal.temperatures || [];
+    const fans = thermal.fans || [];
+    if (countEl) countEl.textContent = temps.length;
+    if (fansEl) fansEl.textContent = fans.length;
+
+    // Peak sensor headline, colored by severity.
+    if (peakEl) {
+        if (thermal.peak_c != null) {
+            peakEl.textContent = thermal.peak_c.toFixed(0) + '°C';
+            peakEl.style.webkitTextFillColor =
+                thermal.status === 'critical' ? 'var(--danger)'
+                : thermal.status === 'warning' ? 'var(--warning)'
+                : '';
+        } else {
+            peakEl.textContent = 'N/A';
+        }
+    }
+
+    let html = '';
+    // Sensors that actually report a current temperature.
+    const measured = temps.filter(t => t.current_c != null);
+    if (measured.length) {
+        html += '<div class="thermal-list">';
+        measured.forEach(t => {
+            const cls = t.current_c >= 80 ? 'therm-critical' : t.current_c >= 70 ? 'therm-warning' : '';
+            html += `<div class="thermal-item ${cls}"><span><b>${escapeHtml(t.name)}</b></span><span>${t.current_c.toFixed(1)}°C${t.high_c != null ? ' / ' + t.high_c.toFixed(0) + ' max' : ''}</span></div>`;
+        });
+        html += '</div>';
+    } else {
+        html += '<p class="no-data">Sensors present but not reporting current values.</p>';
+    }
+    if (fans.length) {
+        html += '<div class="thermal-fans">' + fans.map(f => `<span><b>${escapeHtml(f.name)}</b> ${f.current_rpm} RPM</span>`).join('') + '</div>';
+    }
+    if (thermal.battery) {
+        html += `<div class="thermal-battery">🔋 ${thermal.battery.percent}% ${thermal.battery.plugged ? '(on AC)' : '(on battery)'}</div>`;
+    }
+    content.innerHTML = html;
 }
 
 function updateGpu(gpus) {
@@ -2055,6 +2118,7 @@ function renderServices(services) {
                 <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','reload', this)">Reload</button>
                 <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','enable', this)">Enable</button>
                 <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','disable', this)">Disable</button>
+                <button class="btn btn-sm btn-outline" onclick="openServiceLogs('${escapedName}')">📜 Logs</button>
             </div></td>`;
         tbody.appendChild(row);
     });
@@ -2077,6 +2141,58 @@ async function controlService(name, action, button) {
     } catch (e) {
         showToast(`Could not ${action} ${name}: ${e.message}`, 'error');
         if (button) { button.disabled = false; button.textContent = originalLabel; }
+    }
+}
+
+/* Open the journal log viewer for a systemd unit (reuses /api/troubleshoot/logs). */
+async function openServiceLogs(unit) {
+    const modal = document.getElementById('service-logs-modal');
+    if (!modal) return;
+    document.getElementById('service-logs-name').textContent = unit;
+    const out = document.getElementById('service-logs-output');
+    out.textContent = 'Loading journal…';
+    modal.classList.add('show');
+    await fetchServiceLogs(unit);
+}
+async function fetchServiceLogs(unit) {
+    const out = document.getElementById('service-logs-output');
+    if (!out) return;
+    const lines = document.getElementById('service-logs-lines')?.value || 100;
+    out.textContent = 'Loading journal…';
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/logs?lines=${lines}&level=all&service=${encodeURIComponent(unit)}`);
+        if (!res.ok) throw new Error(await readApiError(res));
+        const data = await res.json();
+        if (!data.logs || !data.logs.length) {
+            out.textContent = 'No log lines matched (empty journal or permission denied).';
+            return;
+        }
+        out.textContent = data.logs.map(l => l.text).join('\n');
+    } catch (e) {
+        out.textContent = 'Could not load journal: ' + e.message;
+    }
+}
+function closeServiceLogs() {
+    document.getElementById('service-logs-modal')?.classList.remove('show');
+}
+
+/* Export a diagnostics report (JSON or Markdown) as a download. */
+async function exportReport(format) {
+    try {
+        const res = await fetch(`${API_BASE}/api/report/export?format=${format}`);
+        if (!res.ok) throw new Error(await readApiError(res));
+        const blob = await res.blob();
+        const disposition = res.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="([^"]+)"/);
+        const filename = match ? match[1] : `monitorx-report.${format === 'markdown' ? 'md' : 'json'}`;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        showToast('Report exported: ' + filename, 'success');
+    } catch (e) {
+        showToast('Export failed: ' + e.message, 'error');
     }
 }
 
@@ -2310,6 +2426,26 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('service-filter')?.addEventListener('change', fetchServices);
     document.getElementById('service-search')?.addEventListener('input', fetchServices);
     document.getElementById('refresh-services-btn')?.addEventListener('click', () => fetchServices(true));
+
+    // Service journal viewer modal
+    document.getElementById('service-logs-close')?.addEventListener('click', closeServiceLogs);
+    document.getElementById('service-logs-modal')?.addEventListener('click', (e) => {
+        if (e.target === document.getElementById('service-logs-modal')) closeServiceLogs();
+    });
+    document.getElementById('service-logs-refresh')?.addEventListener('click', () => {
+        const unit = document.getElementById('service-logs-name')?.textContent;
+        if (unit) fetchServiceLogs(unit);
+    });
+    document.getElementById('service-logs-lines')?.addEventListener('change', () => {
+        const unit = document.getElementById('service-logs-name')?.textContent;
+        if (unit) fetchServiceLogs(unit);
+    });
+
+    // Report export button (opens a small choice: JSON or Markdown)
+    document.getElementById('report-export-btn')?.addEventListener('click', () => {
+        const fmt = confirm('Export diagnostics report.\n\nOK = Markdown\nCancel = JSON') ? 'markdown' : 'json';
+        exportReport(fmt);
+    });
 
     // Console Modal
     document.getElementById('console-modal-close')?.addEventListener('click', closeConsole);
