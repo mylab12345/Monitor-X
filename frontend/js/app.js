@@ -1,4 +1,4 @@
-/* MonitorX v2.0 - Application Logic */
+/* MonitorX v2.5 - Application Logic */
 const API_BASE = '';
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 
@@ -8,10 +8,76 @@ let statsData = null;
 let autoTailInterval = null;
 let healthData = null;
 let serviceCapabilities = null;
+let servicesCache = [];
+let serviceSearchTimer = null;
 // Auto-Fix Engine state
 let fixCapabilities = null;
 let fixRunning = false;
 let currentFixPlan = [];
+let authPromptVisible = false;
+
+// Keep one native fetch reference so protected deployments can surface a
+// friendly login prompt without changing every API call site.
+const monitorxNativeFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+    const response = await monitorxNativeFetch(...args);
+    if (response.status === 401) {
+        window.dispatchEvent(new CustomEvent('monitorx:auth-required'));
+    }
+    return response;
+};
+
+function showAuthOverlay() {
+    if (authPromptVisible || document.getElementById('monitorx-auth-overlay')) return;
+    authPromptVisible = true;
+    const overlay = document.createElement('div');
+    overlay.id = 'monitorx-auth-overlay';
+    overlay.className = 'modal show auth-overlay';
+    overlay.innerHTML = `
+        <div class="modal-content auth-card" role="dialog" aria-modal="true" aria-labelledby="monitorx-auth-title">
+            <div class="modal-header"><h3 id="monitorx-auth-title">🔐 MonitorX sign-in</h3></div>
+            <div class="modal-body">
+                <p class="text-muted">This dashboard is protected. Enter the MonitorX authentication token to continue.</p>
+                <form id="monitorx-auth-form" class="auth-form">
+                    <label for="monitorx-auth-token">Authentication token</label>
+                    <input id="monitorx-auth-token" type="password" autocomplete="current-password" required class="search-input">
+                    <p id="monitorx-auth-error" class="auth-error" role="alert"></p>
+                    <button type="submit" class="btn btn-primary">Sign in</button>
+                </form>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const form = overlay.querySelector('#monitorx-auth-form');
+    const input = overlay.querySelector('#monitorx-auth-token');
+    const error = overlay.querySelector('#monitorx-auth-error');
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const button = form.querySelector('button');
+        button.disabled = true;
+        button.textContent = 'Signing in…';
+        error.textContent = '';
+        try {
+            const response = await monitorxNativeFetch(`${API_BASE}/api/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: input.value })
+            });
+            if (!response.ok) throw new Error('Invalid authentication token.');
+            overlay.remove();
+            authPromptVisible = false;
+            connectWebSocket();
+            fetchStats();
+        } catch (err) {
+            error.textContent = err.message;
+            input.select();
+        } finally {
+            button.disabled = false;
+            button.textContent = 'Sign in';
+        }
+    });
+    input.focus();
+}
+window.addEventListener('monitorx:auth-required', showAuthOverlay);
 
 // History buffer for sparkline charts (last 30 samples)
 const historyBuffer = {
@@ -50,8 +116,10 @@ const state = {
     resizeVmId: null,
     resizeVcpus: 2,
     resizeMemMb: 2048,
-    // Container stats cache
-    containerStats: {},
+    // Full process table cache (WebSocket keeps a lightweight top-N sample).
+    processesFull: null,
+    processListLoading: false,
+    processListLastFetch: 0,
 };
 
 /* Format Helpers */
@@ -110,12 +178,69 @@ function fixActionAvailable(action) {
            fixCapabilities.available_actions[action] !== false;
 }
 
+/* Modal accessibility: focus the dialog on open, keep Tab inside it, restore
+   focus on close, and make Escape behave consistently across every modal. */
+function setupModalAccessibility() {
+    let activeModal = null;
+    let previouslyFocused = null;
+    const focusable = (modal) => Array.from(modal.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+    ));
+
+    const sync = () => {
+        const open = Array.from(document.querySelectorAll('.modal.show')).pop() || null;
+        document.querySelectorAll('.modal').forEach(modal => modal.setAttribute('aria-hidden', modal === open ? 'false' : 'true'));
+        if (open && open !== activeModal) {
+            activeModal = open;
+            previouslyFocused = document.activeElement;
+            const first = focusable(open)[0] || open.querySelector('.modal-content');
+            if (first) {
+                if (first === open.querySelector('.modal-content')) first.setAttribute('tabindex', '-1');
+                setTimeout(() => first.focus(), 0);
+            }
+        } else if (!open && activeModal) {
+            activeModal = null;
+            if (previouslyFocused && document.contains(previouslyFocused)) previouslyFocused.focus();
+            previouslyFocused = null;
+        }
+    };
+
+    const observer = new MutationObserver(sync);
+    document.querySelectorAll('.modal').forEach(modal => observer.observe(modal, { attributes: true, attributeFilter: ['class'] }));
+    sync();
+
+    document.addEventListener('keydown', (event) => {
+        const modal = Array.from(document.querySelectorAll('.modal.show')).pop();
+        if (!modal) return;
+        if (event.key === 'Escape' && modal.id !== 'monitorx-auth-overlay') {
+            event.preventDefault();
+            const close = modal.querySelector('.modal-close');
+            if (close) close.click();
+            else modal.classList.remove('show');
+            return;
+        }
+        if (event.key !== 'Tab') return;
+        const items = focusable(modal);
+        if (!items.length) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    });
+}
+
 /* WebSocket Connection */
 function connectWebSocket() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
+        window.dispatchEvent(new CustomEvent('monitorx:datalink', { detail: { connected: true } }));
         document.getElementById('ws-status').className = 'status-indicator';
         document.getElementById('ws-status-text').textContent = 'Connected';
         document.querySelector('.status-dot').className = 'status-dot connected';
@@ -124,6 +249,9 @@ function connectWebSocket() {
     ws.onmessage = (event) => {
         try {
             statsData = JSON.parse(event.data);
+            // Mission Control and other progressive modules consume the same
+            // frame; no second WebSocket is opened by the browser.
+            window.dispatchEvent(new CustomEvent('monitorx:stats', { detail: statsData }));
             // P1: aria-live announcement + throttle (update max 1/sec)
             if (window.__announceTimeout) clearTimeout(window.__announceTimeout);
             window.__announceTimeout = setTimeout(() => {
@@ -135,6 +263,7 @@ function connectWebSocket() {
         } catch (e) { console.error('Error parsing WebSocket frame:', e); }
     };
     ws.onclose = () => {
+        window.dispatchEvent(new CustomEvent('monitorx:datalink', { detail: { connected: false } }));
         document.querySelector('.status-dot').className = 'status-dot disconnected';
         document.getElementById('ws-status-text').textContent = 'Disconnected';
         if (!reconnectTimer) {
@@ -171,9 +300,12 @@ function updateDashboard(data) {
     guard('system',   () => updateSystem(data.system));
     guard('processes',() => updateTopProcesses(data.processes));
     guard('issues',   () => checkOSIssues(data));
-    guard('charts',   () => updateCharts(data));
+    if (state.currentTab === 'dashboard') guard('charts', () => updateCharts(data));
 
-    if (state.currentTab === 'processes') guard('process-table', filterProcesses);
+    if (state.currentTab === 'processes') {
+        guard('process-table', filterProcesses);
+        fetchProcessList();
+    }
 
     // VM panel: render inventory only when we have a real payload.
     if (state.currentTab === 'vms') {
@@ -181,19 +313,6 @@ function updateDashboard(data) {
         else if (data.vms === null) guard('vms', renderVmsUnavailable);
     }
 
-    if (state.currentTab === 'dashboard') {
-        // Containers: [] = daemon up with zero containers; null = unavailable.
-        if (Array.isArray(data.containers)) guard('containers', () => renderContainers(data.containers));
-        else if (data.containers === null) guard('containers', renderContainersUnavailable);
-        if (Array.isArray(data.pods)) {
-            document.getElementById('pods-panel').style.display = data.pods.length > 0 ? 'block' : 'none';
-            guard('pods', () => renderPods(data.pods));
-        } else if (data.pods === null) {
-            document.getElementById('pods-panel').style.display = 'none';
-            const pc = document.getElementById('pod-count');
-            if (pc) pc.textContent = 'K8s N/A';
-        }
-    }
 }
 
 function updateCpu(cpu) {
@@ -674,7 +793,7 @@ async function showProcessDetail(pid) {
             <h4 style="margin:12px 0 6px;font-size:0.85rem;color:var(--text-secondary);">Active Socket Connections (${proc.connections.length})</h4>
             <pre style="background:var(--bg-primary);padding:10px;border-radius:6px;font-size:0.75rem;max-height:140px;overflow-y:auto;border:1px solid var(--border);">${escapeHtml((proc.connections || []).map(c => `${c.status || 'CONNECTED'} ${c.laddr ? c.laddr.ip + ':' + c.laddr.port : ''} -> ${c.raddr ? c.raddr.ip + ':' + c.raddr.port : ''}`).join('\n') || 'No active sockets')}</pre>
             <div style="margin-top:16px;display:flex;justify-content:flex-end;">
-                <button class="btn btn-danger" onclick="killProcess(${proc.pid})">💀 Terminate Process</button>
+                <button type="button" class="btn btn-danger" onclick="killProcess(${proc.pid})">💀 Terminate Process</button>
             </div>
         `;
         modal.classList.add('show');
@@ -1254,13 +1373,13 @@ function renderHealthChecks(checks) {
         const legacyAction = c.action;
         let navHtml = '';
         if (!fixList.length && legacyAction === 'view_bottlenecks') {
-            navHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('bottlenecks')">🔥 Open Bottleneck Finder</button>`;
+            navHtml = `<button type="button" class="btn btn-sm btn-primary" onclick="switchSubTab('bottlenecks')">🔥 Open Bottleneck Finder</button>`;
         } else if (!fixList.length && legacyAction === 'view_logs') {
-            navHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('log-inspector')">📋 Inspect Logs</button>`;
+            navHtml = `<button type="button" class="btn btn-sm btn-primary" onclick="switchSubTab('log-inspector')">📋 Inspect Logs</button>`;
         } else if (!fixList.length && legacyAction === 'run_net_diag') {
-            navHtml = `<button class="btn btn-sm btn-primary" onclick="switchSubTab('net-suite')">🌐 Open Network Suite</button>`;
+            navHtml = `<button type="button" class="btn btn-sm btn-primary" onclick="switchSubTab('net-suite')">🌐 Open Network Suite</button>`;
         } else if (!fixList.length && legacyAction === 'view_processes') {
-            navHtml = `<button class="btn btn-sm btn-primary" onclick="switchTab('processes')">📋 Open Process Manager</button>`;
+            navHtml = `<button type="button" class="btn btn-sm btn-primary" onclick="switchTab('processes')">📋 Open Process Manager</button>`;
         }
 
         card.innerHTML = `
@@ -1287,7 +1406,7 @@ async function fetchLogs() {
     const container = document.getElementById('logs-container');
     const level = state.logLevel;
     const lines = state.logLines;
-    const search = document.getElementById('log-search-input').value;
+    const search = document.getElementById('log-search-input').value.slice(0, 128);
 
     try {
         const res = await fetch(`${API_BASE}/api/troubleshoot/logs?lines=${lines}&level=${level}&search=${encodeURIComponent(search)}`);
@@ -1476,7 +1595,7 @@ async function fetchBottlenecks() {
             stuckBox.innerHTML = data.stuck_processes.map(p => `
                 <div class="issue-item danger">
                     <span><b>${escapeHtml(p.name)}</b> (PID ${p.pid}) - State: <b>${p.status}</b></span>
-                    <button class="btn btn-sm btn-danger" onclick="remediateAction('kill_process', '${p.pid}')">💀 Terminate Process</button>
+                    <button type="button" class="btn btn-sm btn-danger" onclick="remediateAction('kill_process', '${p.pid}')">💀 Terminate Process</button>
                 </div>
             `).join('');
         }
@@ -1564,7 +1683,7 @@ async function switchTab(tabId) {
     document.getElementById(`tab-${tabId}`).classList.add('active');
     state.currentTab = tabId;
 
-    if (tabId === 'processes') fetchStats();
+    if (tabId === 'processes') fetchProcessList(true);
     if (tabId === 'vms') {
         await fetchVmCapabilities();
         fetchVms();
@@ -1575,16 +1694,35 @@ async function switchTab(tabId) {
 }
 
 /* Process Filtering & Sorting */
+async function fetchProcessList(force = false) {
+    if (state.processListLoading) return;
+    if (!force && Date.now() - state.processListLastFetch < 5000) return;
+    state.processListLoading = true;
+    try {
+        const res = await fetch(`${API_BASE}/api/stats/processes?limit=500`);
+        if (!res.ok) throw new Error(await readApiError(res));
+        state.processesFull = await res.json();
+        state.processListLastFetch = Date.now();
+        if (state.currentTab === 'processes') filterProcesses();
+    } catch (error) {
+        console.error('Full process list unavailable:', error);
+        // Keep the WebSocket top-N sample as a useful fallback.
+    } finally {
+        state.processListLoading = false;
+    }
+}
+
 function filterProcesses() {
     const tbody = document.getElementById('all-processes-body');
-    if (!tbody || !statsData?.processes) return;
+    const source = state.processesFull || statsData?.processes;
+    if (!tbody || !source) return;
 
-    let procs = [...statsData.processes];
+    let procs = [...source];
     const search = state.processSearch;
     const filter = state.processFilter;
 
     if (search) {
-        procs = procs.filter(p => p.name.toLowerCase().includes(search) || String(p.pid).includes(search) || p.username.toLowerCase().includes(search));
+        procs = procs.filter(p => String(p.name || '').toLowerCase().includes(search) || String(p.pid).includes(search) || String(p.username || '').toLowerCase().includes(search));
     }
 
     if (filter === 'cpu') procs.sort((a, b) => b.cpu_percent - a.cpu_percent);
@@ -1607,8 +1745,8 @@ function filterProcesses() {
             <td>${p.threads || 1}</td>
             <td style="font-size:0.75rem">${p.create_time}</td>
             <td>
-                <button class="btn btn-sm btn-outline" onclick="showProcessDetail(${p.pid})">Inspect</button>
-                <button class="btn btn-sm btn-danger" onclick="killProcess(${p.pid})">Kill</button>
+                <button type="button" class="btn btn-sm btn-outline" onclick="showProcessDetail(${p.pid})">Inspect</button>
+                <button type="button" class="btn btn-sm btn-danger" onclick="killProcess(${p.pid})">Kill</button>
             </td>
         `;
         tbody.appendChild(row);
@@ -1657,7 +1795,7 @@ function vmExtraButtons(vm) {
 
     // Console button - available for running VMs
     if (running) {
-        html += `<button type="button" class="btn btn-sm btn-accent vm-console-btn" data-vm-console="${id}" data-vm-console-name="${name}" title="Open VM Console">🖥️ Console</button>`;
+        html += `<button type="button" class="btn btn-sm btn-accent vm-console-btn" data-vm-console="${id}" data-vm-console-name="${name}" title="Open VM serial console">🖥️ Serial Console</button>`;
     }
 
     // Resize button - available for running or stopped VMs
@@ -1720,7 +1858,7 @@ function renderVms(vms) {
     if (!vms.length) {
         container.innerHTML = `
             <div class="vm-empty-state">
-                <div class="icon">🐳</div>
+                <div class="icon">🖥️</div>
                 <h3>No libvirt/KVM guests found</h3>
                 <p>This host has no defined virtual machines. New guests can be created with
                 <code>virt-install</code> or via the <code>cockpit-machines</code> web UI.</p>
@@ -2146,10 +2284,34 @@ function setVmAutoRefresh(intervalSeconds) {
 
 
 /* ==========================================================================
-   VM CONSOLE (xterm.js + WebSocket)
+   VM SERIAL CONSOLE (lazy-loaded xterm.js + WebSocket)
    ========================================================================== */
 
-function openConsole(vmId, vmName) {
+let consoleDependenciesPromise = null;
+function loadConsoleDependencies() {
+    if (typeof Terminal !== 'undefined' && typeof FitAddon !== 'undefined') return Promise.resolve();
+    if (consoleDependenciesPromise) return consoleDependenciesPromise;
+
+    const style = document.createElement('link');
+    style.rel = 'stylesheet';
+    style.href = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css';
+    document.head.appendChild(style);
+    const scripts = [
+        'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js',
+        'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js',
+    ];
+    consoleDependenciesPromise = scripts.reduce((promise, src) => promise.then(() => new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = true;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('Could not load the serial console library.'));
+        document.head.appendChild(script);
+    })), Promise.resolve());
+    return consoleDependenciesPromise;
+}
+
+async function openConsole(vmId, vmName) {
     state.consoleVmId = vmId;
     document.getElementById('console-vm-name').textContent = vmName || vmId;
     document.getElementById('console-conn-status').textContent = 'Connecting...';
@@ -2157,9 +2319,20 @@ function openConsole(vmId, vmName) {
     document.getElementById('console-type-badge').textContent = '';
 
     const modal = document.getElementById('console-modal');
-    modal.classList.add('show');
 
-    // Initialize xterm.js
+    // xterm is loaded only when the operator opens a serial console, keeping
+    // the normal dashboard shell fast and allowing the CDN to fail gracefully.
+    if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {
+        showToast('Loading serial console…', 'info');
+        try {
+            await loadConsoleDependencies();
+        } catch (error) {
+            consoleDependenciesPromise = null;
+            showToast(error.message, 'error');
+            return;
+        }
+    }
+    modal.classList.add('show');
     if (state.consoleTerminal) {
         state.consoleTerminal.dispose();
         state.consoleTerminal = null;
@@ -2205,11 +2378,7 @@ function openConsole(vmId, vmName) {
     ws.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
-            if (data.type === 'vnc') {
-                document.getElementById('console-type-badge').textContent = `VNC :${data.port}`;
-                document.getElementById('console-type-badge').className = 'badge badge-success';
-                document.getElementById('console-conn-status').textContent = `VNC connected to ${data.host}:${data.port}`;
-            } else if (data.type === 'serial') {
+            if (data.type === 'serial') {
                 document.getElementById('console-type-badge').textContent = 'Serial Console';
                 document.getElementById('console-type-badge').className = 'badge badge-warning';
                 document.getElementById('console-conn-status').textContent = 'Serial console connected';
@@ -2218,7 +2387,7 @@ function openConsole(vmId, vmName) {
                 document.getElementById('console-conn-status').style.color = 'var(--danger)';
             }
         } catch (e) {
-            // Binary data from VNC
+            // Serial console bytes
             if (event.data instanceof ArrayBuffer) {
                 term.write(new Uint8Array(event.data));
             } else if (event.data instanceof Blob) {
@@ -2345,173 +2514,6 @@ function closeResizeModal() {
 }
 
 
-/* ==========================================================================
-   DOCKER CONTAINERS
-   ========================================================================== */
-
-async function fetchContainers() {
-    const panel = document.getElementById('containers-panel');
-    const content = document.getElementById('containers-content');
-    if (!content) return;
-
-    try {
-        const res = await fetch(`${API_BASE}/api/stats/containers`);
-        if (res.status === 404) {
-            renderContainersUnavailable();
-            return;
-        }
-        if (!res.ok) throw new Error(await readApiError(res));
-        const containers = await res.json();
-        renderContainers(containers);
-    } catch (e) {
-        content.innerHTML = `<p class="no-data">Error: ${escapeHtml(e.message)}</p>`;
-    }
-}
-
-// Rendered when the WebSocket snapshot carries containers:null (docker CLI
-// missing, daemon down, or the 10s/20s collection timeout elapsed).
-function renderContainersUnavailable() {
-    const content = document.getElementById('containers-content');
-    if (!content) return;
-    content.innerHTML = '<p class="no-data">Docker is not installed or the daemon is unreachable on this host. Install Docker to monitor containers.</p>';
-    const badge = document.getElementById('container-count');
-    if (badge) badge.textContent = 'Docker N/A';
-}
-
-function renderContainers(containers) {
-    const content = document.getElementById('containers-content');
-    if (!content) return;
-
-    const running = containers.filter(c => c.running);
-    const stopped = containers.filter(c => !c.running);
-
-    document.getElementById('container-count').textContent = `${containers.length} Containers (${running.length} running)`;
-
-    if (containers.length === 0) {
-        content.innerHTML = '<p class="no-data">No Docker containers found on this host.</p>';
-        return;
-    }
-
-    let html = '<div class="container-grid">';
-
-    // Running containers first
-    running.forEach(c => {
-        html += renderContainerCard(c);
-    });
-    // Then stopped
-    stopped.forEach(c => {
-        html += renderContainerCard(c);
-    });
-
-    html += '</div>';
-    content.innerHTML = html;
-}
-
-function renderContainerCard(c) {
-    const stateClass = c.running ? 'running' : 'stopped';
-    const stateLabel = c.running ? 'RUNNING' : 'STOPPED';
-    return `
-        <div class="container-card ${stateClass}">
-            <div class="container-card-header">
-                <div>
-                    <strong>${escapeHtml(c.name)}</strong>
-                    <div class="container-id">${escapeHtml(c.id)}</div>
-                </div>
-                <span class="vm-state ${stateClass}">${stateLabel}</span>
-            </div>
-            <div class="container-details">
-                <div><span>Image:</span><b>${escapeHtml(c.image)}</b></div>
-                <div><span>Status:</span><b>${escapeHtml(c.status)}</b></div>
-                ${c.ports ? `<div><span>Ports:</span><b>${escapeHtml(c.ports)}</b></div>` : ''}
-                ${c.size ? `<div><span>Size:</span><b>${escapeHtml(c.size)}</b></div>` : ''}
-            </div>
-            <div class="container-actions">
-                <button class="btn btn-sm btn-outline" onclick="showContainerLogs('${escapeHtml(c.id)}', '${escapeHtml(c.name)}')">📋 Logs</button>
-            </div>
-        </div>
-    `;
-}
-
-async function showContainerLogs(containerId, containerName) {
-    document.getElementById('logs-container-name').textContent = containerName || containerId;
-    const output = document.getElementById('container-logs-output');
-    output.textContent = 'Loading logs...';
-    document.getElementById('container-logs-modal').classList.add('show');
-
-    try {
-        const res = await fetch(`${API_BASE}/api/stats/containers/${containerId}/logs?lines=200`);
-        if (!res.ok) throw new Error(await readApiError(res));
-        const data = await res.json();
-        output.textContent = data.logs || 'No logs available.';
-    } catch (e) {
-        output.textContent = `Error: ${e.message}`;
-    }
-}
-
-
-/* ==========================================================================
-   KUBERNETES PODS
-   ========================================================================== */
-
-async function fetchPods() {
-    const panel = document.getElementById('pods-panel');
-    const content = document.getElementById('pods-content');
-    if (!content) return;
-
-    try {
-        const res = await fetch(`${API_BASE}/api/stats/pods`);
-        if (res.status === 404) {
-            panel.style.display = 'none';
-            document.getElementById('pod-count').textContent = 'K8s N/A';
-            return;
-        }
-        if (!res.ok) throw new Error(await readApiError(res));
-        const pods = await res.json();
-        panel.style.display = 'block';
-        renderPods(pods);
-    } catch (e) {
-        panel.style.display = 'none';
-    }
-}
-
-function renderPods(pods) {
-    const content = document.getElementById('pods-content');
-    if (!content) return;
-
-    const running = pods.filter(p => p.status === 'Running');
-    document.getElementById('pod-count').textContent = `${pods.length} Pods (${running.length} running)`;
-
-    if (pods.length === 0) {
-        content.innerHTML = '<p class="no-data">No Kubernetes pods found.</p>';
-        return;
-    }
-
-    let html = '<div class="pod-grid">';
-    pods.forEach(p => {
-        const stateClass = p.status === 'Running' ? 'running' : (p.status === 'Failed' ? 'crashed' : 'paused');
-        const stateLabel = p.status.toUpperCase();
-        html += `
-            <div class="container-card ${stateClass}">
-                <div class="container-card-header">
-                    <div>
-                        <strong>${escapeHtml(p.name)}</strong>
-                        <div class="container-id">${escapeHtml(p.namespace)} / ${escapeHtml(p.node)}</div>
-                    </div>
-                    <span class="vm-state ${stateClass}">${stateLabel}</span>
-                </div>
-                <div class="container-details">
-                    <div><span>IP:</span><b>${escapeHtml(p.pod_ip || '—')}</b></div>
-                    <div><span>Containers:</span><b>${p.container_count}</b></div>
-                    <div><span>Restarts:</span><b class="${p.restarts > 5 ? 'text-danger' : ''}">${p.restarts}</b></div>
-                    ${p.waiting_reasons.length ? `<div><span>Issues:</span><b class="text-danger">${escapeHtml(p.waiting_reasons.join(', '))}</b></div>` : ''}
-                </div>
-            </div>
-        `;
-    });
-    html += '</div>';
-    content.innerHTML = html;
-}
-
 
 
 /* Services */
@@ -2548,7 +2550,8 @@ async function fetchServices(refreshPermissions = false) {
         if (!serviceCapabilities || refreshPermissions) await fetchServiceCapabilities();
         const res = await fetch(`${API_BASE}/api/services`);
         if (!res.ok) throw new Error(await readApiError(res));
-        renderServices(await res.json());
+        servicesCache = await res.json();
+        renderServices(servicesCache);
     } catch (e) {
         showToast('Error fetching services: ' + e.message, 'error');
     }
@@ -2579,13 +2582,13 @@ function renderServices(services) {
             <td><span class="badge ${s.active === 'active' ? 'badge-success' : s.active === 'failed' ? 'badge-danger' : 'badge-warning'}">${escapeHtml(s.active)}</span></td>
             <td>${escapeHtml(s.sub)}</td><td style="font-size:0.8rem">${escapeHtml(s.description)}</td>
             <td><div class="service-actions">
-                ${s.active !== 'active' ? `<button class="btn btn-sm btn-success" ${disabled} onclick="controlService('${escapedName}','start', this)">Start</button>` : ''}
-                ${s.active === 'active' ? `<button class="btn btn-sm btn-warning" ${disabled} onclick="controlService('${escapedName}','stop', this)">Stop</button>` : ''}
-                <button class="btn btn-sm btn-primary" ${disabled} onclick="controlService('${escapedName}','restart', this)">Restart</button>
-                <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','reload', this)">Reload</button>
-                <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','enable', this)">Enable</button>
-                <button class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','disable', this)">Disable</button>
-                <button class="btn btn-sm btn-outline" onclick="openServiceLogs('${escapedName}')">📜 Logs</button>
+                ${s.active !== 'active' ? `<button type="button" class="btn btn-sm btn-success" ${disabled} onclick="controlService('${escapedName}','start', this)">Start</button>` : ''}
+                ${s.active === 'active' ? `<button type="button" class="btn btn-sm btn-warning" ${disabled} onclick="controlService('${escapedName}','stop', this)">Stop</button>` : ''}
+                <button type="button" class="btn btn-sm btn-primary" ${disabled} onclick="controlService('${escapedName}','restart', this)">Restart</button>
+                <button type="button" class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','reload', this)">Reload</button>
+                <button type="button" class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','enable', this)">Enable</button>
+                <button type="button" class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','disable', this)">Disable</button>
+                <button type="button" class="btn btn-sm btn-outline" onclick="openServiceLogs('${escapedName}')">📜 Logs</button>
             </div></td>`;
         tbody.appendChild(row);
     });
@@ -2867,14 +2870,19 @@ document.addEventListener('DOMContentLoaded', () => {
     let logSearchTimer = null;
     document.getElementById('log-search-input')?.addEventListener('input', () => {
         clearTimeout(logSearchTimer);
-        logSearchTimer = setTimeout(() => fetchLogs(), 250);
+        logSearchTimer = setTimeout(() => fetchLogs(), 350);
     });
     document.getElementById('fetch-logs-btn')?.addEventListener('click', () => fetchLogs());
 
-    document.getElementById('copy-logs-btn')?.addEventListener('click', () => {
+    document.getElementById('copy-logs-btn')?.addEventListener('click', async () => {
         const container = document.getElementById('logs-container');
-        navigator.clipboard.writeText(container.textContent);
-        showToast('Logs copied to clipboard', 'success');
+        try {
+            if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable in this browser.');
+            await navigator.clipboard.writeText(container.textContent);
+            showToast('Logs copied to clipboard', 'success');
+        } catch (error) {
+            showToast(error.message, 'error');
+        }
     });
 
     document.getElementById('log-autotail-toggle')?.addEventListener('change', (e) => {
@@ -2973,8 +2981,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Services Filters
-    document.getElementById('service-filter')?.addEventListener('change', fetchServices);
-    document.getElementById('service-search')?.addEventListener('input', fetchServices);
+    document.getElementById('service-filter')?.addEventListener('change', () => renderServices(servicesCache));
+    document.getElementById('service-search')?.addEventListener('input', () => {
+        clearTimeout(serviceSearchTimer);
+        serviceSearchTimer = setTimeout(() => renderServices(servicesCache), 120);
+    });
     document.getElementById('refresh-services-btn')?.addEventListener('click', () => fetchServices(true));
 
     // Service journal viewer modal
@@ -3034,19 +3045,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('resize-mem-slider').value = Math.min(parseInt(e.target.value) || 256, 65536);
     });
 
-    // Container Logs Modal
-    document.getElementById('container-logs-close')?.addEventListener('click', () => {
-        document.getElementById('container-logs-modal').classList.remove('show');
-    });
-    document.getElementById('container-logs-modal')?.addEventListener('click', (e) => {
-        if (e.target === document.getElementById('container-logs-modal')) {
-            e.target.classList.remove('show');
-        }
-    });
 
-    // Container & Pod refresh buttons
-    document.getElementById('refresh-containers-btn')?.addEventListener('click', fetchContainers);
-    document.getElementById('refresh-pods-btn')?.addEventListener('click', fetchPods);
 
     // Process Modal Close (original)
     document.getElementById('close-modal')?.addEventListener('click', () => {
@@ -3058,12 +3057,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Startup initialization
+    setupModalAccessibility();
+
+    // Startup initialization. The WebSocket sends the first snapshot; keep a
+    // delayed REST fallback only for blocked/very slow WebSocket upgrades.
     connectWebSocket();
-    fetchStats();
+    setTimeout(() => { if (!statsData) fetchStats(); }, 5000);
     fetchVmCapabilities();
     setVmAutoRefresh(document.getElementById('vm-refresh-select')?.value ?? 2);
-    // Fetch containers and pods on startup
-    fetchContainers();
-    fetchPods();
 });

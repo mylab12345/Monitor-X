@@ -257,7 +257,7 @@ body {
 /* Draws 4 corner brackets on every key panel using 8 gradient fragments. */
 .metric-card, .chart-card, .issues-panel, .top-processes, .table-container,
 .troubleshoot-header-card, .troubleshoot-card, .check-card,
-.vm-card, .container-card, .containers-panel, .pods-panel, .vm-audit-panel,
+.vm-card, .vm-audit-panel,
 .modal-content, .logs-window, .terminal-box {
     position: relative;
 }
@@ -265,7 +265,6 @@ body {
 .metric-card::before, .chart-card::before, .issues-panel::before,
 .top-processes::before, .table-container::before, .troubleshoot-header-card::before,
 .troubleshoot-card::before, .check-card::before, .vm-card::before,
-.container-card::before, .containers-panel::before, .pods-panel::before,
 .vm-audit-panel::before, .modal-content::before {
     content: '';
     position: absolute;
@@ -425,7 +424,7 @@ canvas { filter: drop-shadow(0 0 6px rgba(56, 198, 255, 0.25)); border-radius: 4
 .cpu-bar-fill.warning { box-shadow: 0 0 8px rgba(255, 176, 32, 0.5); }
 .cpu-bar-fill.danger  { box-shadow: 0 0 8px rgba(255, 77, 94, 0.5); }
 
-/* ───────────────────────────  VM / CONTAINER STATES  ────────────────────── */
+/* ───────────────────────────  VM STATES  ────────────────────────────────── */
 .vm-state::before { box-shadow: 0 0 8px currentColor; }
 .vm-kpi b { text-shadow: 0 0 14px currentColor; }
 .vm-kpi-label { letter-spacing: 0.12em; }

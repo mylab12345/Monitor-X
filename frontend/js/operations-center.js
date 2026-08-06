@@ -21,7 +21,7 @@
   function render() {
     const open = overview.incidents.filter(x => x.status === 'open');
     el('ops-summary').textContent = open.length ? `${open.length} item${open.length === 1 ? '' : 's'} need attention now` : 'All monitored thresholds are within their configured limits';
-    el('ops-incidents').innerHTML = open.length ? open.map(i => `<div class="ops-incident ${i.severity}"><span><b>${esc(i.title)}</b> · ${Number(i.value).toFixed(1)}% <small>opened ${new Date(i.timestamp).toLocaleTimeString()}</small></span><button class="btn btn-sm btn-outline" data-ack="${i.id}">Acknowledge</button></div>`).join('') : '<div class="ops-empty">✓ No active threshold incidents. Continue monitoring live telemetry below.</div>';
+    el('ops-incidents').innerHTML = open.length ? open.map(i => `<div class="ops-incident ${i.severity}"><span><b>${esc(i.title)}</b> · ${Number(i.value).toFixed(1)}% <small>opened ${new Date(i.timestamp).toLocaleTimeString()}</small></span><button type="button" class="btn btn-sm btn-outline" data-ack="${i.id}">Acknowledge</button></div>`).join('') : '<div class="ops-empty">✓ No active threshold incidents. Continue monitoring live telemetry below.</div>';
     el('ops-incidents').querySelectorAll('[data-ack]').forEach(b => b.onclick = async () => { await fetch(`${api}/incidents/${b.dataset.ack}/acknowledge`, {method:'POST'}); load(); });
     draw(overview.history);
   }
@@ -49,8 +49,8 @@
         <div class="rule-item ${r.enabled ? '' : 'disabled'}">
           <span class="rule-toggle" title="${r.enabled ? 'Click to disable' : 'Click to enable'}">${r.enabled ? '🟢' : '⚪'}</span>
           <span class="rule-meta"><b>${esc(r.name)}</b><small>${esc(r.metric)} ${esc(r.operator)} ${r.threshold} · cooldown ${r.cooldown_minutes}m</small></span>
-          <button class="btn btn-sm btn-outline" data-rule-toggle="${r.id}">${r.enabled ? 'Disable' : 'Enable'}</button>
-          <button class="btn btn-sm btn-danger" data-rule-del="${r.id}">Delete</button>
+          <button type="button" class="btn btn-sm btn-outline" data-rule-toggle="${r.id}">${r.enabled ? 'Disable' : 'Enable'}</button>
+          <button type="button" class="btn btn-sm btn-danger" data-rule-del="${r.id}">Delete</button>
         </div>`).join('');
       box.querySelectorAll('[data-rule-toggle]').forEach(b => b.onclick = async () => {
         const id = b.dataset.ruleToggle;

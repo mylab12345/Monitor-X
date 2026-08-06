@@ -3,10 +3,9 @@
 # Bring up:
 #   docker compose up -d --build
 #
-# The containers panel needs access to the host docker daemon. The compose file
-# resolves the docker socket's GID automatically so the unprivileged container
-# user can talk to it. libvirt's socket is mounted when present for VM
-# monitoring (guest *control* still needs the host-side policy — see README).
+# The image is a deployment format only. MonitorX does not invoke Docker or
+# kubectl CLIs and does not mount the Docker socket. Mount libvirt only when VM
+# monitoring is required (guest control still needs the host-side policy).
 services:
   monitorx:
     build: .
@@ -17,14 +16,13 @@ services:
       - "8080:8080"
     volumes:
       - monitorx-data:/app/data
-      # Host Docker daemon socket — enables the containers panel.
-      - /var/run/docker.sock:/var/run/docker.sock
       # Host libvirt socket — enables VM monitoring (mount only if libvirtd runs).
       - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock:ro
-    # Grant the container's unprivileged user the host docker socket's group.
-    group_add:
-      - ${DOCKER_GID:-999}
     environment:
+      # Containers must listen on their network interface; localhost remains
+      # the default for direct host launches.
+      MONITORX_HOST: "0.0.0.0"
+      MONITORX_AUTH_TOKEN: "${MONITORX_AUTH_TOKEN:-}"
       MONITORX_LIBVIRT_URI: "qemu:///system"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]

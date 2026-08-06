@@ -1,5 +1,5 @@
 /* ============================================================================
-   MonitorX — MISSION CONTROL (v2.4)
+   MonitorX — MISSION CONTROL (v2.5)
    Flight-control GO/NO-GO poll board driven by live telemetry.
 
    Nine flight-controller stations (BOOSTER, GUIDO, TELMU, INCO, EECOM,
@@ -8,7 +8,7 @@
    the MASTER ALARM.
 
    Pure progressive enhancement:
-     - Opens its own WebSocket to /ws (never touches app.js state).
+     - Consumes the shared /ws telemetry bus owned by app.js.
      - Every DOM access is guarded; if the board markup is missing the
        module silently no-ops and the dashboard keeps working.
      - Datalink loss degrades stations to STANDBY instead of failing.
@@ -89,8 +89,7 @@
 
     /* ── Telemetry state ───────────────────────────────────────────────── */
     var lastFrameAt = 0;
-    var ws = null;
-    var wsReconnectTimer = null;
+    var sharedDatalinkOpen = false;
     var prevNetErrs = null;      // cumulative err+drop counters (for rate)
     var netErrRate = 0;          // errors+drops per second
     var zombieCount = null;      // from bottlenecks poll (null = unknown)
@@ -179,7 +178,7 @@
         if (!gpus || !gpus.length) return paint('surgeon', 'STANDBY', 'N/A', 'no GPU hardware');
         var util = 0, memMax = 0;
         gpus.forEach(function (g) {
-            var u = g.utilization != null ? g.utilization : (g.gpu_util != null ? g.gpu_util : g.util);
+            var u = g.utilization_gpu != null ? g.utilization_gpu : (g.utilization != null ? g.utilization : g.gpu_util);
             if (u != null) util = Math.max(util, u);
             if (g.memory_percent != null) memMax = Math.max(memMax, g.memory_percent);
         });
@@ -196,7 +195,7 @@
     }
 
     function evalCapcom() {
-        var open = ws && ws.readyState === WebSocket.OPEN;
+        var open = sharedDatalinkOpen;
         var age = Date.now() - lastFrameAt;
         if (open && lastFrameAt && age < 8000) {
             paint('capcom', 'GO', 'LOCKED', 'frame age ' + (age / 1000).toFixed(1) + 's');
@@ -251,31 +250,25 @@
         }
     }
 
-    /* ── Datalink (own WebSocket, isolated from app.js) ────────────────── */
-    function connect() {
-        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-        try {
-            var proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-            ws = new WebSocket(proto + '://' + window.location.host + '/ws');
-        } catch (e) { scheduleReconnect(); return; }
-        ws.onmessage = function (ev) {
-            lastFrameAt = Date.now();
-            try { evaluateFrame(JSON.parse(ev.data)); } catch (e) { /* ignore bad frame */ }
-        };
-        ws.onopen = function () { evalCapcom(); };
-        ws.onclose = function () { evalCapcom(); scheduleReconnect(); };
-        ws.onerror = function () { try { ws.close(); } catch (e) {} };
-    }
-    function scheduleReconnect() {
-        if (wsReconnectTimer) return;
-        wsReconnectTimer = setTimeout(function () { wsReconnectTimer = null; connect(); }, 3000);
-    }
+    /* ── Shared datalink from app.js ─────────────────────────────────────── */
+    // app.js owns the single /ws connection. Sharing its frames avoids a
+    // duplicate socket and duplicate JSON serialization for every browser.
+    window.addEventListener('monitorx:stats', function (event) {
+        lastFrameAt = Date.now();
+        try { evaluateFrame(event.detail || {}); } catch (e) { /* isolate HUD */ }
+    });
+    window.addEventListener('monitorx:datalink', function (event) {
+        sharedDatalinkOpen = !!(event.detail && event.detail.connected);
+        evalCapcom();
+        paintMissionStatus();
+    });
 
     /* CAPCOM freshness re-check between frames (cheap, 2s cadence) */
     setInterval(function () { evalCapcom(); paintMissionStatus(); }, 2000);
 
     /* ── Slow polls: full zombie sweep + failed systemd units ──────────── */
     function pollBottlenecks() {
+        if (document.hidden) return;
         fetch('/api/troubleshoot/bottlenecks').then(function (r) {
             if (!r.ok) throw new Error('http ' + r.status);
             return r.json();
@@ -288,6 +281,7 @@
     }
 
     function pollServices() {
+        if (document.hidden) return;
         fetch('/api/services').then(function (r) {
             if (!r.ok) return r.json().then(function (b) { throw new Error(b && b.detail || ('http ' + r.status)); });
             return r.json();
@@ -296,8 +290,8 @@
             var units = Array.isArray(data) ? data : (data.services || []);
             failedServices = 0;
             units.forEach(function (u) {
-                var sub = String(u.sub_state || u.substate || '').toLowerCase();
-                var active = String(u.active_state || u.activestate || '').toLowerCase();
+                var sub = String(u.sub || u.sub_state || u.substate || '').toLowerCase();
+                var active = String(u.active || u.active_state || u.activestate || '').toLowerCase();
                 if (sub === 'failed' || active === 'failed') failedServices++;
             });
             evalGc(); paintMissionStatus();
@@ -329,5 +323,4 @@
         return (n / Math.pow(k, i)).toFixed(i ? 1 : 0) + ' ' + sizes[i];
     }
 
-    connect();
 })();

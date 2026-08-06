@@ -6,6 +6,7 @@ import asyncio
 import collections
 import concurrent.futures
 import glob
+import hmac
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
@@ -48,6 +50,18 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Runtime tuning. Core telemetry stays responsive while slower host integrations
+# are cached independently (see _cached_optional below).
+MONITORX_HOST = os.environ.get("MONITORX_HOST", "127.0.0.1")
+STATS_INTERVAL = max(float(os.environ.get("MONITORX_STATS_INTERVAL", "2")), 0.5)
+PROCESS_STATS_LIMIT = max(int(os.environ.get("MONITORX_PROCESS_LIMIT", "30")), 1)
+PROCESS_STATS_TTL = max(float(os.environ.get("MONITORX_PROCESS_TTL", "5")), 1.0)
+NETWORK_CONNECTIONS_TTL = max(float(os.environ.get("MONITORX_CONNECTIONS_TTL", "10")), 1.0)
+MONITORX_AUTH_TOKEN = os.environ.get("MONITORX_AUTH_TOKEN", "").strip()
+AUTH_COOKIE_NAME = "monitorx_auth"
+AUTH_EXEMPT_PATHS = {"/api/health", "/api/auth/login", "/api/auth/logout"}
+MAX_DIAGNOSTIC_OUTPUT = 100_000
+
 # Global state tracking for rate calculations
 # Network/disk rates are derived from a previous sample; serialize snapshots.
 stats_lock = asyncio.Lock()
@@ -56,6 +70,15 @@ last_net_io = None
 last_net_time = None
 last_disk_io = None
 last_disk_time = None
+last_net_connections_count = None
+last_net_connections_time = 0.0
+
+# Slow optional collectors are cached so hardware and hypervisor reads
+# cannot block the two-second core telemetry loop.
+_peripheral_cache = {}
+_peripheral_cache_lock = asyncio.Lock()
+_process_stats_cache = {}
+_process_stats_cache_lock = asyncio.Lock()
 
 # Libvirt counters are cumulative. Keep one prior sample per domain to calculate
 # instantaneous CPU, disk, and network rates.
@@ -245,15 +268,103 @@ async def lifespan(app: FastAPI):
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 
+
+def _request_token(request: Request) -> str:
+    """Read the optional bearer token or HttpOnly auth cookie."""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return request.cookies.get(AUTH_COOKIE_NAME, "")
+
+
+def _websocket_authenticated(websocket: WebSocket) -> bool:
+    """Validate the optional token for WebSocket upgrades."""
+    if not MONITORX_AUTH_TOKEN:
+        return True
+    auth = websocket.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    token = token or websocket.cookies.get(AUTH_COOKIE_NAME, "") or websocket.query_params.get("token", "")
+    return bool(token) and hmac.compare_digest(token, MONITORX_AUTH_TOKEN)
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """Optional authentication guard for non-static HTTP endpoints.
+
+    Local installs remain plug-and-play when MONITORX_AUTH_TOKEN is unset.
+    Operators exposing MonitorX beyond localhost can set a token and use the
+    built-in login form; the HttpOnly SameSite cookie also authenticates the
+    WebSocket connections without putting the token in browser JavaScript.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if (not MONITORX_AUTH_TOKEN
+                or request.url.path.startswith("/static/")
+                or request.url.path == "/"
+                or request.url.path in AUTH_EXEMPT_PATHS
+                or request.method == "OPTIONS"):
+            return await call_next(request)
+        token = _request_token(request)
+        if not token or not hmac.compare_digest(token, MONITORX_AUTH_TOKEN):
+            return JSONResponse(
+                {"detail": "Authentication required. Set the MonitorX auth token and sign in."},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return await call_next(request)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add baseline browser hardening without blocking the embedded preview UI."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        return response
+
+
+class AuthLoginRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+
+
 app = FastAPI(
     title="System Monitoring Dashboard",
     description="Real-time system monitoring dashboard with WebSocket support and Troubleshoot Suite",
-    version="2.4.0",
+    version="2.5.0",
     lifespan=lifespan
 )
 
+app.add_middleware(AuthMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 templates = Jinja2Templates(directory=str(FRONTEND_DIR))
+
+
+@app.post("/api/auth/login")
+async def auth_login(payload: AuthLoginRequest, request: Request):
+    """Create a short-lived browser session for protected deployments."""
+    if not MONITORX_AUTH_TOKEN:
+        return {"authenticated": True, "auth_required": False}
+    if not hmac.compare_digest(payload.token, MONITORX_AUTH_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid MonitorX authentication token.")
+    response = JSONResponse({"authenticated": True, "auth_required": True})
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        MONITORX_AUTH_TOKEN,
+        httponly=True,
+        secure=(request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"),
+        samesite="strict",
+        max_age=60 * 60 * 12,
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    response = JSONResponse({"authenticated": False})
+    response.delete_cookie(AUTH_COOKIE_NAME)
+    return response
 
 
 # Pydantic models
@@ -267,8 +378,6 @@ class SystemStats(BaseModel):
     processes: List[Dict[str, Any]]
     system: Dict[str, Any]
     vms: Optional[List[Dict[str, Any]]] = None
-    containers: Optional[List[Dict[str, Any]]] = None
-    pods: Optional[List[Dict[str, Any]]] = None
     thermal: Optional[Dict[str, Any]] = None
 
 
@@ -381,15 +490,22 @@ class ConnectionManager:
         logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
     
     async def broadcast(self, message: dict):
-        disconnected = []
-        for connection in self.active_connections:
+        """Fan out one frame concurrently so a slow browser cannot stall all peers."""
+        connections = list(self.active_connections)
+        if not connections:
+            return
+
+        async def send(connection):
             try:
-                await connection.send_json(message)
-            except Exception:
-                disconnected.append(connection)
-        
-        for conn in disconnected:
-            self.disconnect(conn)
+                await asyncio.wait_for(connection.send_json(message), timeout=3.0)
+                return connection, None
+            except Exception as exc:
+                return connection, exc
+
+        results = await asyncio.gather(*(send(connection) for connection in connections))
+        for connection, error in results:
+            if error is not None:
+                self.disconnect(connection)
 
 
 manager = ConnectionManager()
@@ -403,6 +519,7 @@ async def get_cpu_stats() -> Dict[str, Any]:
     cpu_count_physical = psutil.cpu_count(logical=False)
     load_avg = os.getloadavg() if hasattr(os, 'getloadavg') else (0, 0, 0)
     
+    cpu_times = psutil.cpu_times()
     return {
         "percent_per_core": cpu_percent,
         "percent_total": sum(cpu_percent) / len(cpu_percent) if cpu_percent else 0,
@@ -414,7 +531,7 @@ async def get_cpu_stats() -> Dict[str, Any]:
         "load_1min": load_avg[0],
         "load_5min": load_avg[1],
         "load_15min": load_avg[2],
-        "times": dict(psutil.cpu_times()._asdict()) if psutil.cpu_times() else {}
+        "times": dict(cpu_times._asdict()) if cpu_times else {}
     }
 
 
@@ -529,11 +646,18 @@ async def get_network_stats() -> Dict[str, Any]:
             "dropout": stats.dropout
         }
     
-    connections_count = 0
-    try:
-        connections_count = len(psutil.net_connections(kind='inet'))
-    except Exception:
-        pass
+    global last_net_connections_count, last_net_connections_time
+    if (last_net_connections_count is None
+            or now - last_net_connections_time >= NETWORK_CONNECTIONS_TTL):
+        try:
+            last_net_connections_count = len(psutil.net_connections(kind='inet'))
+            last_net_connections_time = now
+        except Exception:
+            # Keep the last known count when permissions are restricted.
+            if last_net_connections_count is None:
+                last_net_connections_count = 0
+
+    connections_count = last_net_connections_count or 0
 
     return {
         "interfaces": interfaces,
@@ -605,11 +729,13 @@ async def get_gpu_stats() -> Optional[List[Dict[str, Any]]]:
     return gpus if gpus else None
 
 
-async def get_process_stats(limit: int = 30) -> List[Dict[str, Any]]:
-    """Get processes sorted by resource usage"""
+def _collect_process_stats_sync(limit: int) -> List[Dict[str, Any]]:
+    """Synchronous psutil walk kept off the asyncio event loop."""
     processes = []
-    
-    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'memory_info', 'status', 'username', 'create_time', 'num_threads']):
+    for proc in psutil.process_iter([
+        'pid', 'name', 'cpu_percent', 'memory_percent', 'memory_info',
+        'status', 'username', 'create_time', 'num_threads'
+    ]):
         try:
             info = proc.info
             processes.append({
@@ -623,11 +749,24 @@ async def get_process_stats(limit: int = 30) -> List[Dict[str, Any]]:
                 "threads": info['num_threads'] or 1,
                 "create_time": datetime.fromtimestamp(info['create_time']).strftime('%Y-%m-%d %H:%M:%S') if info['create_time'] else "unknown"
             })
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError, ValueError):
             continue
-    
     processes.sort(key=lambda x: x['cpu_percent'], reverse=True)
     return processes[:limit]
+
+
+async def get_process_stats(limit: int = PROCESS_STATS_LIMIT) -> List[Dict[str, Any]]:
+    """Get a cached process sample without blocking the asyncio event loop."""
+    limit = max(int(limit), 1)
+    now = time.monotonic()
+    async with _process_stats_cache_lock:
+        cached = _process_stats_cache.get(limit)
+        if cached and now - cached["time"] < PROCESS_STATS_TTL:
+            return cached["value"]
+
+        value = await asyncio.to_thread(_collect_process_stats_sync, limit)
+        _process_stats_cache[limit] = {"time": time.monotonic(), "value": value}
+        return value
 
 
 async def _scan_process_states() -> Dict[str, int]:
@@ -785,158 +924,8 @@ async def get_thermal_stats() -> Dict[str, Any]:
 
 
 # =============================================================================
-# DOCKER CONTAINER & KUBERNETES POD MONITORING
+# LIBVIRT / VM SUPPORT
 # =============================================================================
-
-async def get_docker_containers() -> Optional[List[Dict[str, Any]]]:
-    """List all Docker containers on the host using the docker CLI."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "ps", "-a", "--no-trunc",
-            "--format", "{{json .}}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        if proc.returncode != 0:
-            return None
-        containers = []
-        for line in stdout.decode(errors="replace").strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-                containers.append({
-                    "id": raw.get("ID", "")[:12],
-                    "name": raw.get("Name", ""),
-                    "image": raw.get("Image", ""),
-                    "status": raw.get("Status", ""),
-                    "state": raw.get("State", ""),
-                    "ports": raw.get("Ports", ""),
-                    "created": raw.get("CreatedAt", ""),
-                    "size": raw.get("Size", ""),
-                    "running": raw.get("State", "").lower() == "running",
-                })
-            except json.JSONDecodeError:
-                continue
-        return containers if containers else []
-    except FileNotFoundError:
-        return None
-    except asyncio.TimeoutError:
-        return None
-    except Exception as e:
-        logger.warning("Error listing Docker containers: %s", e)
-        return None
-
-
-async def get_docker_container_logs(container_id: str, lines: int = 100) -> Optional[str]:
-    """Fetch recent logs from a Docker container."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "logs", "--tail", str(lines), container_id,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        output = stdout.decode(errors="replace")
-        err = stderr.decode(errors="replace")
-        return output + ("\n" + err if err else "")
-    except Exception:
-        return None
-
-
-async def get_docker_container_stats() -> Optional[List[Dict[str, Any]]]:
-    """Get live resource usage for running Docker containers."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "stats", "--no-stream",
-            "--format", "{{json .}}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
-        if proc.returncode != 0:
-            return None
-        stats = []
-        for line in stdout.decode(errors="replace").strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-                cpu_str = raw.get("CPUPerc", "0%").replace("%", "").strip()
-                stats.append({
-                    "id": raw.get("ID", "")[:12],
-                    "name": raw.get("Name", ""),
-                    "cpu_percent": float(cpu_str) if cpu_str else 0.0,
-                    "mem_usage": raw.get("MemUsage", ""),
-                    "net_io": raw.get("NetIO", ""),
-                    "block_io": raw.get("BlockIO", ""),
-                    "pids": raw.get("PIDs", "0"),
-                })
-            except (json.JSONDecodeError, ValueError):
-                continue
-        return stats if stats else []
-    except FileNotFoundError:
-        return None
-    except asyncio.TimeoutError:
-        return None
-    except Exception as e:
-        logger.warning("Error getting Docker container stats: %s", e)
-        return None
-
-
-async def get_kubernetes_pods() -> Optional[List[Dict[str, Any]]]:
-    """List Kubernetes pods if kubectl is available and configured."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "kubectl", "get", "pods", "-A", "-o", "json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
-        if proc.returncode != 0:
-            return None
-        data = json.loads(stdout.decode(errors="replace"))
-        pods = []
-        for item in data.get("items", []):
-            metadata = item.get("metadata", {})
-            spec = item.get("spec", {})
-            status = item.get("status", {})
-            container_statuses = status.get("containerStatuses", [])
-            total_restarts = sum(c.get("restartCount", 0) for c in container_statuses)
-            pod_phase = status.get("phase", "Unknown")
-            containers = [c.get("name", "") for c in spec.get("containers", [])]
-            restart_reasons = []
-            for cs in container_statuses:
-                state = cs.get("state", {})
-                if "waiting" in state:
-                    reason = state["waiting"].get("reason", "")
-                    if reason:
-                        restart_reasons.append(f"{cs.get('name','')}: {reason}")
-            pods.append({
-                "name": metadata.get("name", ""),
-                "namespace": metadata.get("namespace", "default"),
-                "status": pod_phase,
-                "restarts": total_restarts,
-                "node": spec.get("nodeName", ""),
-                "pod_ip": status.get("podIP", ""),
-                "containers": containers,
-                "container_count": len(containers),
-                "age": metadata.get("creationTimestamp", ""),
-                "waiting_reasons": restart_reasons,
-            })
-        return pods if pods else []
-    except FileNotFoundError:
-        return None
-    except asyncio.TimeoutError:
-        return None
-    except Exception as e:
-        logger.warning("Error listing Kubernetes pods: %s", e)
-        return None
-
-
 def _virsh_present() -> bool:
     """True when a virsh binary is actually available to execute."""
     return bool(shutil.which(VIRSH_BIN) or Path(VIRSH_BIN).exists())
@@ -1894,59 +1883,86 @@ def _collect_domain_snapshot(domain, state_map: Dict[int, str]) -> Optional[Dict
         return None
 
 
-async def collect_all_stats() -> SystemStats:
-    """Collect a consistent stats snapshot.
+async def _cached_optional(name: str, factory, ttl: float, timeout: float = 20.0):
+    """Run a slow optional collector at most once per TTL.
 
-    Disk and network rates use previous samples, so serializing collection avoids
-    concurrent REST/WebSocket requests corrupting those calculations.
-
-    Core telemetry (CPU/memory/disk/network/processes/system) is always gathered
-    first because it is fast and never optional. The peripheral subsystems
-    (GPU, libvirt VMs, Docker containers, Kubernetes pods) are then collected
-    concurrently, each with its own hard timeout and failure isolation. A hung
-    docker daemon, unreachable kubectl, or wedged libvirtd therefore degrades
-    only its own panel on the dashboard instead of stalling the broadcast for
-    every client.
+    A cached ``None`` is intentional: unavailable hardware should not cause a
+    subprocess or libvirt retry on every frame. The next TTL expiry retries it.
     """
+    now = time.monotonic()
+    async with _peripheral_cache_lock:
+        cached = _peripheral_cache.get(name)
+        if cached and now - cached["time"] < ttl:
+            return cached["value"]
+    try:
+        value = await asyncio.wait_for(factory(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning("Peripheral stats collector %s timed out", name)
+        value = None
+    except Exception as exc:
+        logger.warning("Peripheral stats collector %s failed: %s", name, exc)
+        value = None
+    async with _peripheral_cache_lock:
+        _peripheral_cache[name] = {"time": time.monotonic(), "value": value}
+    return value
+
+
+async def collect_all_stats() -> SystemStats:
+    """Collect core telemetry quickly and cache slower optional subsystems."""
     async with stats_lock:
-        cpu = await get_cpu_stats()
-        memory = await get_memory_stats()
-        disk = await get_disk_stats()
-        network = await get_network_stats()
-        processes = await get_process_stats()
-        system = await get_system_info()
-
-        async def _optional(coro):
-            """Run one peripheral collector, bounded and failure-isolated."""
-            try:
-                return await asyncio.wait_for(coro, timeout=20)
-            except asyncio.TimeoutError:
-                logger.warning("Peripheral stats collector timed out")
-                return None
-            except Exception as exc:
-                logger.warning("Peripheral stats collector failed: %s", exc)
-                return None
-
-        gpu, vms, containers, pods, thermal = await asyncio.gather(
-            _optional(get_gpu_stats()),
-            _optional(get_vm_stats()),
-            _optional(get_docker_containers()),
-            _optional(get_kubernetes_pods()),
-            _optional(get_thermal_stats()),
+        cpu, memory, disk, network, processes, system = await asyncio.gather(
+            get_cpu_stats(),
+            get_memory_stats(),
+            get_disk_stats(),
+            get_network_stats(),
+            get_process_stats(),
+            get_system_info(),
         )
-        # SQLite persistence (P2 deferred)
+
+        # GPU, VM, and thermal collectors are useful but do not need to run at
+        # the same cadence as CPU/memory. This keeps a slow libvirt or hardware
+        # sensor read from making the UI feel laggy.
+        gpu, vms, thermal = await asyncio.gather(
+            _cached_optional("gpu", get_gpu_stats, 5.0),
+            _cached_optional("vms", get_vm_stats, 3.0),
+            _cached_optional("thermal", get_thermal_stats, 5.0),
+        )
+
+        # Persist the real fields used by the collectors. The old code looked
+        # for non-existent top-level keys and silently stored zeros.
         try:
+            disk_percent = max(
+                (float(p.get("percent", 0)) for p in disk.get("partitions", [])),
+                default=0.0,
+            )
             conn = sqlite3.connect(str(DB_PATH))
-            conn.execute("INSERT OR IGNORE INTO metrics (ts, cpu, mem, disk, net) VALUES (?, ?, ?, ?, ?)",
-                         (time.time(), cpu.get("percent", 0) if isinstance(cpu, dict) else 0, memory.get("percent", 0) if isinstance(memory, dict) else 0, disk.get("percent", 0) if isinstance(disk, dict) else 0, network.get("bytes_recv", 0) if isinstance(network, dict) else 0))
-            conn.execute("DELETE FROM metrics WHERE ts < ?", (time.time() - 86400*7,))
-            conn.commit(); conn.close()
+            conn.execute(
+                "INSERT OR IGNORE INTO metrics (ts, cpu, mem, disk, net) VALUES (?, ?, ?, ?, ?)",
+                (
+                    time.time(),
+                    float(cpu.get("percent_total", 0)),
+                    float(memory.get("percent", 0)),
+                    disk_percent,
+                    float(network.get("rx_bytes_sec", 0)),
+                ),
+            )
+            conn.execute("DELETE FROM metrics WHERE ts < ?", (time.time() - 86400 * 7,))
+            conn.commit()
+            conn.close()
         except Exception:
-            pass
+            logger.debug("Could not persist lightweight metrics snapshot", exc_info=True)
+
         return SystemStats(
-            timestamp=datetime.now().isoformat(), cpu=cpu, memory=memory, disk=disk,
-            network=network, gpu=gpu, processes=processes, system=system, vms=vms,
-            containers=containers, pods=pods, thermal=thermal
+            timestamp=datetime.now().isoformat(),
+            cpu=cpu,
+            memory=memory,
+            disk=disk,
+            network=network,
+            gpu=gpu,
+            processes=processes,
+            system=system,
+            vms=vms,
+            thermal=thermal,
         )
 
 
@@ -1955,11 +1971,11 @@ async def broadcast_stats():
     while True:
         try:
             stats = await collect_all_stats()
-            persist_snapshot_and_evaluate_alerts(stats)
+            await asyncio.to_thread(persist_snapshot_and_evaluate_alerts, stats)
             await manager.broadcast(stats.model_dump())
         except Exception as e:
             logger.error(f"Error broadcasting stats: {e}")
-        await asyncio.sleep(2)
+        await asyncio.sleep(STATS_INTERVAL)
 
 
 # =============================================================================
@@ -2216,6 +2232,13 @@ class WebhookConfigRequest(BaseModel):
 
 @app.post('/api/operations/webhook')
 async def set_webhook_config(cfg: WebhookConfigRequest):
+    if cfg.url:
+        parsed = urlparse(cfg.url)
+        if (parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password):
+            raise HTTPException(status_code=400, detail="Webhook URL must be an http(s) URL without embedded credentials.")
     with _ops_conn() as conn:
         conn.execute("INSERT INTO settings(key,value) VALUES('webhook_url',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (cfg.url,))
         conn.execute("INSERT INTO settings(key,value) VALUES('webhook_enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ('1' if cfg.enabled else '0',))
@@ -2291,6 +2314,8 @@ async def auth_status():
         "virsh_policy_available": False,
         "systemctl_policy_available": False,
         "user_uid": os.getuid(),
+        "auth_required": bool(MONITORX_AUTH_TOKEN),
+        "authenticated": True,
     }
     # Path 1 for VM control: read-write libvirt connection (root, or the
     # dashboard user in the 'libvirt'/'kvm' group).
@@ -2499,6 +2524,9 @@ async def health_check_endpoint():
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    if not _websocket_authenticated(websocket):
+        await websocket.close(code=4401, reason="Authentication required")
+        return
     await manager.connect(websocket)
     try:
         try:
@@ -2527,11 +2555,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.websocket("/ws/vm-console/{vm_id}")
 async def vm_console_ws(websocket: WebSocket, vm_id: str):
-    """WebSocket proxy for VM console access.
+    """WebSocket proxy for an authenticated VM serial console.
 
-    Tries VNC first (graphical), then falls back to serial console via virsh.
-    The frontend connects with xterm.js or noVNC.
+    Proxies the guest serial console through a PTY to xterm.js.
+
+    Graphical VNC is intentionally not advertised: rendering it requires a
+    dedicated noVNC client rather than a terminal emulator.
     """
+    if not _websocket_authenticated(websocket):
+        await websocket.close(code=4401, reason="Authentication required")
+        return
     await websocket.accept()
 
     if not LIBVIRT_AVAILABLE:
@@ -2547,79 +2580,9 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
         await websocket.close(code=1011, reason=error)
         return
 
-    # Try VNC console first
-    vnc_available = False
-    try:
-        xml_desc = await _run_libvirt(domain.XMLDesc, timeout=5.0)
-        root = ET.fromstring(xml_desc)
-        graphics = root.find("./devices/graphics[@type='vnc']")
-        if graphics is not None:
-            # A port of -1/0 means the display uses autoport and libvirtd has
-            # not assigned a concrete port yet — nothing to proxy to. Fall
-            # through to the serial console instead of erroring on port -1.
-            vnc_port = int(graphics.get("port", -1) or -1)
-            vnc_host = graphics.get("listen", "127.0.0.1")
-            if vnc_host in ("0.0.0.0", ""):
-                vnc_host = "127.0.0.1"
-            vnc_available = vnc_port > 0 and vnc_port <= 65535
-
-            if vnc_available:
-                # Probe the TCP connection BEFORE telling the client anything;
-                # a dead listener falls through to the serial console instead
-                # of leaving the terminal stuck on a connection error.
-                try:
-                    reader, writer = await asyncio.wait_for(
-                        asyncio.open_connection(vnc_host, vnc_port),
-                        timeout=5.0,
-                    )
-                except Exception:
-                    logger.warning("VNC port %s not reachable; falling back to serial console", vnc_port)
-                    vnc_available = False
-
-            if vnc_available:
-                # Send VNC connection info to the client, then proxy raw VNC
-                # bytes between WebSocket and TCP.
-                await websocket.send_json({
-                    "type": "vnc",
-                    "host": vnc_host,
-                    "port": vnc_port,
-                })
-
-                async def ws_to_vnc():
-                    try:
-                        while True:
-                            data = await websocket.receive_bytes()
-                            writer.write(data)
-                            await writer.drain()
-                    except Exception:
-                        try:
-                            writer.close()
-                        except Exception:
-                            pass
-
-                async def vnc_to_ws():
-                    try:
-                        while True:
-                            data = await reader.read(65536)
-                            if not data:
-                                break
-                            await websocket.send_bytes(data)
-                    except Exception:
-                        pass
-
-                try:
-                    await asyncio.gather(ws_to_vnc(), vnc_to_ws())
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        writer.close()
-                    except Exception:
-                        pass
-                return
-    except Exception as exc:
-        logger.warning("VNC console path failed: %s", exc)
-
+    # The dashboard exposes a serial console only. xterm.js is a terminal
+    # emulator, not a VNC renderer; advertising raw VNC bytes as a terminal
+    # made the previous graphical-console button appear broken.
     # Fallback: serial console via `virsh console`.
     #
     # The argv mirrors the sudoers policy from systemd/install-service.sh
@@ -3515,59 +3478,7 @@ async def troubleshoot_health_check():
             "fix": None,
         })
 
-    # 10. Exited / crashed Docker containers (only when the CLI exists)
-    docker_bin = shutil.which("docker")
-    if docker_bin:
-        exited_containers = []
-        try:
-            returncode, stdout, _ = await _run_cmd(
-                [docker_bin, "ps", "-a", "--filter", "status=exited", "--filter", "status=dead",
-                 "--format", "{{.Names}}\t{{.Status}}"],
-                timeout=10.0,
-            )
-            if returncode == 0:
-                for line in stdout.decode(errors="replace").splitlines():
-                    parts = line.split("\t")
-                    if parts and parts[0].strip():
-                        exited_containers.append({"name": parts[0].strip(), "status": parts[1].strip() if len(parts) > 1 else "exited"})
-        except Exception:
-            pass
-
-        if exited_containers:
-            health_score -= 8
-            container_fixes = []
-            for c in exited_containers[:5]:
-                container_fixes.append({
-                    "action": "restart_docker_container",
-                    "label": f"↻ Restart {c['name']}",
-                    "level": "warning",
-                    "sudo": False,
-                    "target": c["name"],
-                })
-            checks.append({
-                "id": "docker_containers",
-                "category": "Containers",
-                "name": "Exited Docker Containers",
-                "status": "warning",
-                "value": f"{len(exited_containers)} exited/dead container(s): " + ", ".join(c["name"] for c in exited_containers[:3]),
-                "message": f"Containers are not running: {', '.join(c['name'] + ' (' + c['status'] + ')' for c in exited_containers[:5])}",
-                "remediation": "Restart stopped container(s) using the buttons below, or run 'docker start <container_name>'. Check crash logs by executing 'docker logs <container_name>' to diagnose the failure.",
-                "fix": container_fixes[0] if container_fixes else None,
-                "fixes": container_fixes,
-            })
-        else:
-            checks.append({
-                "id": "docker_containers",
-                "category": "Containers",
-                "name": "Exited Docker Containers",
-                "status": "ok",
-                "value": "0 exited/dead containers",
-                "message": "All detected containers are in a running state.",
-                "remediation": None,
-                "fix": None,
-            })
-
-    # 11. File descriptor pressure (informational; no automated fix)
+    # 10. File descriptor pressure (informational; no automated fix)
     try:
         with open("/proc/sys/fs/file-nr") as fh:
             parts = fh.read().split()
@@ -3930,8 +3841,11 @@ async def troubleshoot_logs(
     Fallback to dmesg if journalctl lacks permissions.
     """
     raw_logs = []
+    search = search[:128]
+    if service and not SERVICE_NAME_PATTERN.fullmatch(service):
+        raise HTTPException(status_code=400, detail="Only valid .service unit names can be inspected.")
     
-    cmd = ["journalctl", "-n", str(lines), "--no-pager"]
+    cmd = [JOURNALCTL_BIN, "-n", str(lines), "--no-pager"]
     if level == "error":
         cmd.extend(["-p", "3"])
     elif level == "warning":
@@ -3949,7 +3863,7 @@ async def troubleshoot_logs(
             if "No journal files were opened due to insufficient permissions" in out_str or not out_str:
                 try:
                     returncode_d, d_out, _ = await _run_cmd(["dmesg", "-T"], timeout=10.0)
-                    d_lines = [l for l in d_out.decode().strip().split('\n') if l.strip()]
+                    d_lines = [l for l in d_out.decode(errors="replace")[-MAX_DIAGNOSTIC_OUTPUT:].strip().split('\n') if l.strip()]
                     raw_logs = d_lines[-lines:] if d_lines else []
                 except Exception:
                     raw_logs = [out_str or "Unable to read system logs due to permissions"]
@@ -3959,12 +3873,19 @@ async def troubleshoot_logs(
             raw_logs = ["Log read timed out after 15s. The journal may be under heavy write load."]
 
         parsed_logs = []
-        search_lower = search.lower()
+        search_pattern = None
+        if search:
+            try:
+                search_pattern = re.compile(search, re.IGNORECASE)
+            except re.error:
+                # A malformed pattern should not make the inspector fail;
+                # fall back to a literal, escaped search instead.
+                search_pattern = re.compile(re.escape(search), re.IGNORECASE)
         
         for line in raw_logs:
             if not line:
                 continue
-            if search_lower and search_lower not in line.lower():
+            if search_pattern and not search_pattern.search(line):
                 continue
             
             log_level = "info"
@@ -4266,7 +4187,7 @@ FIX_ACTION_META = {
         "category": "CPU & Load",
         "level": "critical",
         "sudo": False,
-        "description": "Terminates the single highest-CPU non-essential process to relieve a load spike. PID 1, the MonitorX process tree, and essential services (systemd, sshd, containerd, libvirtd, NetworkManager, ...) are never targeted, and the kill is owner-guarded exactly like a manual kill.",
+        "description": "Terminates the single highest-CPU non-essential process to relieve a load spike. PID 1, the MonitorX process tree, and essential services (systemd, sshd, libvirtd, NetworkManager, ...) are never targeted, and the kill is owner-guarded exactly like a manual kill.",
     },
     "reap_zombies": {
         "label": "Reap zombie processes",
@@ -4288,13 +4209,6 @@ FIX_ACTION_META = {
         "level": "warning",
         "sudo": True,
         "description": "Deletes regular files under /tmp and /var/tmp not modified for 7+ days (max depth 2). Frees disk space without touching active sessions.",
-    },
-    "restart_docker_container": {
-        "label": "Restart container",
-        "category": "Containers",
-        "level": "warning",
-        "sudo": False,
-        "description": "Runs `docker restart` on the target container so a crashed / exited workload comes back up.",
     },
 }
 
@@ -4433,7 +4347,7 @@ async def _fix_kill_top_cpu(target: Optional[str] = None) -> Dict[str, Any]:
     bounded regardless of how many processes are running.
     """
     ESSENTIAL_NAMES = {
-        "systemd", "init", "kthreadd", "kernel", "containerd", "dockerd",
+        "systemd", "init", "kthreadd", "kernel",
         "libvirtd", "sshd", "dbus-daemon", "dbus-broker", "udevd",
         "systemd-journald", "systemd-udevd", "cron", "rsyslogd", "rsyslog",
         "chronyd", "systemd-resolved", "NetworkManager", "networkmanager",
@@ -4586,23 +4500,6 @@ async def _fix_clean_tmp(target: Optional[str] = None) -> Dict[str, Any]:
     return {"success": False, "message": stderr.decode(errors="replace").strip() or f"Cleanup exited with code {returncode}"}
 
 
-async def _fix_restart_docker_container(target: Optional[str] = None) -> Dict[str, Any]:
-    docker = shutil.which("docker")
-    if not docker:
-        return {"success": False, "message": "Docker CLI is not available on this host."}
-    if not target:
-        return {"success": False, "message": "Container name required"}
-    try:
-        returncode, stdout, stderr = await _run_cmd([docker, "restart", target], timeout=90.0)
-    except asyncio.TimeoutError:
-        return {"success": False, "message": f"docker restart {target} timed out after 90s"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
-    if returncode == 0:
-        return {"success": True, "message": stdout.decode().strip() or f"Container {target} restarted."}
-    return {"success": False, "message": stderr.decode(errors="replace").strip() or f"docker restart {target} failed"}
-
-
 FIX_EXECUTORS = {
     "clear_pagecache": _fix_clear_pagecache,
     "vacuum_journal": _fix_vacuum_journal,
@@ -4616,7 +4513,6 @@ FIX_EXECUTORS = {
     "reap_zombies": _fix_reap_zombies,
     "flush_dns": _fix_flush_dns,
     "clean_tmp": _fix_clean_tmp,
-    "restart_docker_container": _fix_restart_docker_container,
 }
 
 
@@ -4747,26 +4643,25 @@ async def troubleshoot_fix_capabilities():
         "resolvectl": have("resolvectl"),
         "systemd_resolve": have("systemd-resolve"),
         "nscd": have("nscd"),
-        "docker": have("docker"),
         "find": have("find"),
         "sudo": bool(sudo),
     }
     elevated = is_root or has_sudo
+    service_policy = await _service_sudo_allowed()
 
     available = {
         "clear_pagecache": elevated and bins["sysctl"],
         "vacuum_journal": elevated and bins["journalctl"],
-        "restart_failed_services": bins["systemctl"],
-        "restart_service": bins["systemctl"],
-        "start_service": bins["systemctl"],
-        "enable_service": bins["systemctl"],
+        "restart_failed_services": service_policy and bins["systemctl"],
+        "restart_service": service_policy and bins["systemctl"],
+        "start_service": service_policy and bins["systemctl"],
+        "enable_service": service_policy and bins["systemctl"],
         "clear_kernel_logs": elevated and bins["dmesg"],
         "kill_process": True,
         "kill_top_cpu": True,
         "reap_zombies": True,
         "flush_dns": (bins["resolvectl"] or bins["systemd_resolve"] or bins["nscd"]),
         "clean_tmp": elevated and bins["find"],
-        "restart_docker_container": bins["docker"],
     }
     return {
         "is_root": is_root,
@@ -4776,6 +4671,14 @@ async def troubleshoot_fix_capabilities():
         "available_actions": available,
         "fix_actions": {k: {"label": v["label"], "level": v["level"]} for k, v in FIX_ACTION_META.items()},
     }
+
+
+@app.delete("/api/troubleshoot/fix-history")
+async def clear_troubleshoot_fix_history():
+    """Delete remediation entries without touching alert history."""
+    with _ops_conn() as conn:
+        conn.execute("DELETE FROM operations_audit WHERE action LIKE 'remediate:%'")
+    return {"success": True}
 
 
 @app.get("/api/troubleshoot/fix-history")
@@ -4833,7 +4736,7 @@ async def run_command(request: Request):
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
-        output = stdout.decode(errors="replace")
+        output = stdout.decode(errors="replace")[:MAX_DIAGNOSTIC_OUTPUT]
         if tail_lines:
             output = "\n".join(output.splitlines()[-tail_lines:])
         return {"output": output, "error": stderr.decode(errors="replace"), "returncode": proc.returncode}
@@ -4851,52 +4754,10 @@ async def run_command(request: Request):
         raise HTTPException(status_code=500, detail="Diagnostic command could not be executed.")
 
 
-# =============================================================================
-# DOCKER & CONTAINER REST API ENDPOINTS
-# =============================================================================
-
-@app.get("/api/stats/containers")
-async def get_containers():
-    """List all Docker containers on the host."""
-    containers = await get_docker_containers()
-    if containers is None:
-        raise HTTPException(status_code=404,
-                            detail="Docker is not installed or not running on this host.")
-    return containers
-
-
-@app.get("/api/stats/containers/stats")
-async def get_container_stats():
-    """Get live resource usage for running Docker containers."""
-    stats = await get_docker_container_stats()
-    if stats is None:
-        raise HTTPException(status_code=404,
-                            detail="Docker stats unavailable.")
-    return stats
-
-
-@app.get("/api/stats/containers/{container_id}/logs")
-async def get_container_logs(container_id: str, lines: int = Query(100, ge=1, le=5000)):
-    """Fetch recent logs from a Docker container."""
-    logs = await get_docker_container_logs(container_id, lines)
-    if logs is None:
-        raise HTTPException(status_code=404,
-                            detail=f"Cannot fetch logs for container '{container_id}'.")
-    return {"container_id": container_id, "lines": lines, "logs": logs}
-
-
-@app.get("/api/stats/pods")
-async def get_pods():
-    """List Kubernetes pods if kubectl is available."""
-    pods = await get_kubernetes_pods()
-    if pods is None:
-        raise HTTPException(status_code=404,
-                            detail="kubectl is not installed or not configured on this host.")
-    return pods
 
 
 if __name__ == "__main__":
     import uvicorn
-    # Default to the documented plug-and-play bind (README/MEMORY: 0.0.0.0:8080).
-    # Set MONITORX_HOST=127.0.0.1 to lock the dashboard to the local machine.
-    uvicorn.run(app, host=os.environ.get("MONITORX_HOST", "0.0.0.0"), port=8080)
+    # Secure default: localhost only. Set MONITORX_HOST=0.0.0.0 explicitly
+    # when a reverse proxy/authenticated preview needs a network bind.
+    uvicorn.run(app, host=MONITORX_HOST, port=int(os.environ.get("MONITORX_PORT", "8080")))

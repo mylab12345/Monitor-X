@@ -2,15 +2,14 @@
 
 Real-time, modern monitoring and automated troubleshooting dashboard for Linux servers (CPU, RAM, Storage, Network, GPU, VMs, Systemd Services, and Logs).
 
-![MonitorX UI](https://img.shields.shields.gradient)
 
 ## Features
 
 - **Ultra-Modern Glassmorphism UI** — High-tech dark slate interface with neon accent glows, live sparklines, and a **nine-theme picker** (Midnight, Aurora, Ember, Forest, Nebula, Graphite, Ocean, Desert, Arctic) that re-skins the entire dashboard in one click.
 - **NASA Mission-Control Flight Loop** — A live GO/NO-GO poll board on the Dashboard: nine flight-controller stations (BOOSTER/storage, GUIDO/CPU, TELMU/memory, INCO/network, EECOM/thermal, FIDO/processes, SURGEON/GPU, GC/services, CAPCOM/datalink) each vote GO / CAUTION / NO-GO from real telemetry. The worst vote drives the mission status lamp, and any NO-GO raises a blinking **MASTER ALARM**. Hardware-less stations degrade to STANDBY. Header carries MET, UTC, and DOY (day-of-year) mission clocks, plus a flight-control boot sequence and live telemetry ticker.
 - **Real-Time Canvas Sparklines** — Live 30s trend graphs for CPU, Memory, and Network Bandwidth.
-- **Troubleshoot Mode Hub** — Automated diagnostic scan (17 check categories across CPU, Memory, Storage, Services, Processes, Kernel, Network, Hardware, and Security) calculating a **System Health Index (0-100)** score with **1-Click Remediation Fixes** and a **rolling health-score trend sparkline** so you can watch whether the host improves or degrades across scans.
-- **Auto-Fix Engine** — Every issue the scan detects gets a fix button *inside* the hub, plus a **⚡ Fix All Issues** batch runner and a **Review Fix Plan** modal to pick exactly which repairs to apply. The scanner also surfaces hard-to-find problems: CPU overheating/thermal pressure, interface RX/TX errors and drops, process/thread exhaustion, a sharply rising load trend, NTP clock desync, and spikes in failed login attempts. Fixes include: clear RAM page cache, vacuum systemd journal, restart failed or individual services, clear the kernel error buffer, kill runaway processes (owner-guarded), reap zombie processes via SIGCHLD, flush the DNS resolver cache, clean stale temp files, and restart exited Docker containers. Every execution is timed, audited, and shown in the **Remediation History** panel — the hub re-scans automatically after each fix and reports which issues it resolved.
+- **Troubleshoot Mode Hub** — Automated diagnostic scan (up to 16 check categories across CPU, Memory, Storage, Services, Processes, Kernel, Network, Hardware, and Security) calculating a **System Health Index (0-100)** score with **1-Click Remediation Fixes** and a **rolling health-score trend sparkline** so you can watch whether the host improves or degrades across scans.
+- **Auto-Fix Engine** — Every issue the scan detects gets a fix button *inside* the hub, plus a **⚡ Fix All Issues** batch runner and a **Review Fix Plan** modal to pick exactly which repairs to apply. The scanner also surfaces hard-to-find problems: CPU overheating/thermal pressure, interface RX/TX errors and drops, process/thread exhaustion, a sharply rising load trend, NTP clock desync, and spikes in failed login attempts. Fixes include: clear RAM page cache, vacuum systemd journal, restart failed or individual services, clear the kernel error buffer, kill runaway processes (owner-guarded), reap zombie processes via SIGCHLD, flush the DNS resolver cache, and clean stale temp files. Every execution is timed, audited, and shown in the **Remediation History** panel — the hub re-scans automatically after each fix and reports which issues it resolved.
 - **Live Log Inspector** — Auto-tail streaming for system logs and `dmesg` with level filtering (`ALL`, `🔴 ERROR`, `⚠️ WARN`, `ℹ️ INFO`) and regex search.
 - **Network Diagnostic Suite** — Interactive ICMP Ping latency tester, TCP Port connectivity checker, DNS resolver benchmark, and active listening ports table.
 - **Resource Bottleneck Finder** — Identifies top CPU, RAM, and thread consumers alongside stuck/zombie process killers.
@@ -18,7 +17,7 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 - **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections). Multi-select kill runs as a single batched request and is **owner-guarded per process**: PIDs owned by another user are individually refused with the reason shown in the summary toast, while authorized PIDs are still terminated — the bulk kill never aborts wholesale on the first unauthorized target.
 - **Service & VM Management** — Start, stop, restart, and reload systemd services, with an in-UI authorization status and actionable errors. Running libvirt/KVM guests show live vCPU, RAM, disk I/O, and network throughput metrics.
 - **KVM Guest Lifecycle Controls** — `Start`, `Shutdown`, `Reboot`, `Suspend`, `Resume`, and a destructive `Poweroff` for every libvirt domain discovered on the host, with a state-aware action matrix, bulk operations on multiple guests, KPI counters (Total / Running / Stopped / Paused / Other), search/filter/sort, an auto-refresh interval selector, and a built-in audit log of the last 50 control actions. Controls run through the libvirt API when MonitorX has read-write access and transparently fall back to a narrowly scoped `sudo virsh` policy otherwise; a dropped `libvirtd` connection is re-established automatically without restarting the dashboard.
-- **No Authentication Required** — Plug-and-play local/internal server monitoring.
+- **Secure Local-First Access** — Authentication is optional for localhost; set `MONITORX_AUTH_TOKEN` when exposing MonitorX through a trusted reverse proxy or container network.
 
 ---
 
@@ -33,6 +32,24 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 ```
 
 Open **http://localhost:8080** in your browser.
+
+For a network-facing deployment, set a strong token before starting MonitorX:
+
+```bash
+export MONITORX_AUTH_TOKEN="replace-with-a-long-random-secret"
+export MONITORX_HOST=0.0.0.0   # only behind a trusted HTTPS reverse proxy
+./launch.sh
+```
+
+Performance can be tuned without editing code. Core telemetry defaults to two
+seconds; process samples are cached for five seconds and slower hardware/VM
+collectors use their own cache windows:
+
+```bash
+export MONITORX_STATS_INTERVAL=2
+export MONITORX_PROCESS_TTL=5
+export MONITORX_CONNECTIONS_TTL=10
+```
 
 ---
 
@@ -63,6 +80,14 @@ To run MonitorX as a background systemd service that starts automatically on boo
 ```bash
 # Run installer script (creates and enables /etc/systemd/system/monitorx.service)
 ./systemd/install-service.sh
+```
+
+To keep token authentication enabled for the systemd deployment, run the
+installer with the token in its environment; it writes `/etc/monitorx.env`
+with mode `0600` and the unit loads it automatically:
+
+```bash
+MONITORX_AUTH_TOKEN="replace-with-a-long-random-secret" ./systemd/install-service.sh
 ```
 
 ### Dashboard service controls
@@ -164,15 +189,23 @@ MonitorX/
    - Connect an embedded SQLite, TimescaleDB, or Prometheus exporter to store historical metrics over days/weeks for long-term trend analysis.
 2. **Automated Notification Webhooks**:
    - Send instant alerts (Slack, Discord, Telegram, or Email) when the System Health Index drops below a threshold (e.g. `< 70`). *Partially done: the Operations Center already ships alert rules + webhooks.*
-3. **Docker & Container Monitoring**:
-   - Add a dedicated Container tab integrating with the Docker daemon API to monitor container CPU/RAM usage, status, and logs. *Partially done: exited/crashed containers are detected by the health scan and can be restarted from the Auto-Fix Engine.*
-4. **Custom Dashboard Widgets**:
+3. **Custom Dashboard Widgets**:
    - Allow users to pin, drag, and resize metric cards or custom command outputs to create personalized monitoring views.
-5. **Service safety workflow**:
+4. **Service safety workflow**:
    - Add maintenance windows, dependency previews, per-service log tails, and an audit timeline recording who invoked each action and its result.
-6. **Role-based access and authentication**:
-   - Protect control endpoints with local accounts/SSO and granular roles (view, diagnose, operate) before exposing the dashboard beyond a trusted network.
-7. **Alert rules UI**:
+5. **Role-based operator permissions**:
+   - Extend token authentication into granular Viewer, Diagnostician, and Operator roles before exposing the dashboard to multiple administrators.
+6. **Alert rules UI**:
    - Let operators create threshold rules with cooldowns, acknowledgement, silencing, and notification routing directly from the dashboard.
-8. **Fleet view**:
+7. **Fleet view**:
    - Securely aggregate multiple MonitorX agents into a host inventory with tags, health rollups, and drill-down diagnostics.
+
+
+### Performance and security defaults
+
+MonitorX uses one shared WebSocket telemetry stream and caches slower hardware
+collectors so the live dashboard remains responsive. The default bind is
+`127.0.0.1`; set `MONITORX_HOST=0.0.0.0` only behind a trusted reverse proxy.
+For a protected deployment, set `MONITORX_AUTH_TOKEN` and sign in through the
+dashboard. Docker and Kubernetes CLI monitoring integrations are intentionally
+removed; the Dockerfile/Compose files are deployment formats only.

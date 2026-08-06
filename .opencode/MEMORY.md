@@ -1,3 +1,5 @@
+> **Current implementation note (2026-08-06):** The historical Docker/container and Kubernetes/kubectl integration notes in this memory file are retained for provenance only. Those CLI integrations, endpoints, UI panels, and remediation actions have been removed from the current MonitorX implementation.
+
 # MonitorX - AI Agent Memory File
 
 > **Purpose**: This file gives any AI agent a fast, complete understanding of the MonitorX codebase without scanning every file. Read this FIRST before any task.

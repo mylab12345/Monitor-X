@@ -18,6 +18,11 @@
 
     const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const isMobile = matchMedia('(max-width: 768px)').matches;
+    const escapeText = (value) => {
+        const node = document.createElement('span');
+        node.textContent = String(value ?? '');
+        return node.innerHTML;
+    };
 
     /* ── Inject new stylesheet link ──────────────────────────────────────── */
     // (already linked via index.html in this patch; no-op if missing)
@@ -123,7 +128,7 @@
     /* ── Section reveal (IntersectionObserver) ──────────────────────────── */
     function setupReveals() {
         const targets = document.querySelectorAll(
-            '.charts-row, .metrics-grid, .containers-panel, .pods-panel, .issues-panel, .top-processes, .troubleshoot-header-card, .sub-tab-nav, .troubleshoot-grid, .vm-kpi-row, .vm-controls-bar, #vm-list, .vm-audit-panel, .service-controls, .process-controls'
+            '.charts-row, .metrics-grid, .issues-panel, .top-processes, .troubleshoot-header-card, .sub-tab-nav, .troubleshoot-grid, .vm-kpi-row, .vm-controls-bar, #vm-list, .vm-audit-panel, .service-controls, .process-controls'
         );
         targets.forEach((el, i) => {
             el.classList.add('nx-reveal');
@@ -183,11 +188,11 @@
             { label: 'Dashboard',           icon: '📊', keys: ['g','d'], action: () => switchTab('dashboard') },
             { label: 'Processes',           icon: '📋', keys: ['g','p'], action: () => switchTab('processes') },
             { label: 'Troubleshoot Hub',    icon: '🔧', keys: ['g','t'], action: () => switchTab('troubleshoot') },
-            { label: 'VMs (Libvirt)',       icon: '🐳', keys: ['g','v'], action: () => switchTab('vms') },
+            { label: 'VMs (Libvirt)',       icon: '🖥️', keys: ['g','v'], action: () => switchTab('vms') },
             { label: 'Systemd Services',    icon: '⚙️', keys: ['g','s'], action: () => switchTab('services') },
         ]},
         { group: 'Actions', items: [
-            { label: 'Refresh Dashboard',   icon: '🔄', keys: ['r'],     action: () => click('#refresh-btn, #refresh-containers-btn') },
+            { label: 'Refresh Dashboard',   icon: '🔄', keys: ['r'],     action: () => click('#refresh-btn') },
             { label: 'Run Diagnostic Scan', icon: '⚡', keys: ['D'],     action: () => { switchTab('troubleshoot'); click('#run-full-scan-btn'); } },
             { label: 'Cycle Theme',         icon: '🎨', keys: ['t'],     action: cycleTheme },
             { label: 'Toggle Live Log Tail',icon: '📡', keys: ['L'],     action: () => { switchTab('troubleshoot'); switchSubtab('log-inspector'); toggle('#log-autotail-toggle'); } },
@@ -210,7 +215,7 @@
         <div class="nx-cmdk-panel" role="document">
             <div class="nx-cmdk-head">
                 <span class="nx-cmdk-ico">⌘</span>
-                <input type="text" placeholder="Type a command or search… (e.g. logs, vm, docker, refresh)" aria-label="Command search">
+                <input type="text" placeholder="Type a command or search… (e.g. logs, vm, refresh)" aria-label="Command search">
                 <kbd>esc</kbd>
             </div>
             <div class="nx-cmdk-list"></div>
@@ -411,8 +416,8 @@
         const dur = opts.duration || 3200;
         t.innerHTML = `
             <span class="toast-icon">${icon}</span>
-            <span class="toast-msg">${message}</span>
-            <button class="toast-close" aria-label="Close">×</button>
+            <span class="toast-msg">${escapeText(message)}</span>
+            <button type="button" class="toast-close" aria-label="Close">×</button>
             <span class="toast-progress" style="animation-duration:${dur}ms;color:currentColor"></span>
         `;
         toastContainer.appendChild(t);
