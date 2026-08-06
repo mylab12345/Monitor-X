@@ -1,0 +1,587 @@
+/* ============================================================================
+   MonitorX — MULTI-THEME SYSTEM (v3.0)
+   Loaded LAST so these palettes reliably override every earlier layer
+   (styles.css, nasa-theme.css, nexus-hud.css, dashboard-refresh.css).
+
+   Six complete themes, each driven by a shared set of CSS custom properties
+   so a single swap re-skins the whole dashboard (backgrounds, surfaces,
+   text, accents, status colours, HUD overlays and glows):
+
+     midnight  → deep-space flight control (default)
+     aurora    → clean daylight console (light)
+     ember     → warm sunset operations room
+     forest    → deep green telemetry lab
+     nebula    → violet mission deck
+     graphite  → minimal monochrome ops desk
+
+   Applied by setting <body class="theme-NAME"> (aurora also sets
+   .light-theme so the existing light-mode overlay handling kicks in).
+   ============================================================================ */
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   1. THEME PICKER  (header control)
+   ──────────────────────────────────────────────────────────────────────────── */
+.theme-picker { position: relative; }
+
+.theme-picker-btn {
+    width: 40px;
+    height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    font-size: 1.05rem;
+}
+
+.theme-menu {
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    min-width: 210px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-card);
+    padding: 6px;
+    display: none;
+    flex-direction: column;
+    gap: 2px;
+    z-index: 300;
+    animation: fadeIn 0.18s ease;
+}
+
+.theme-picker.open .theme-menu { display: flex; }
+
+.theme-menu-title {
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 8px 10px 4px;
+}
+
+.theme-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: 0.84rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition);
+    text-align: left;
+}
+
+.theme-option:hover { background: var(--bg-card-hover); color: var(--text-main); }
+.theme-option.active {
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+    background: var(--accent-glow);
+}
+
+.theme-option .swatch {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    flex: 0 0 auto;
+    border: 1px solid rgba(128,128,128,0.3);
+    background: linear-gradient(135deg, var(--sw-accent) 0 38%, var(--sw-bg) 38% 62%, var(--sw-accent2) 62%);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.25) inset;
+}
+
+.theme-option .check {
+    margin-left: auto;
+    opacity: 0;
+    color: currentColor;
+}
+.theme-option.active .check { opacity: 1; }
+
+/* Collapse the picker nicely on small screens */
+@media (max-width: 768px) {
+    .theme-menu { right: -10px; }
+}
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   2. DEFAULT  →  MIDNIGHT  (deep-space flight control)
+   Re-asserts the current values so the picker stays consistent.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-midnight {
+    --bg-base:        #03060e;
+    --bg-surface:     #060c18;
+    --bg-card:        rgba(9, 17, 31, 0.72);
+    --bg-card-hover:  rgba(15, 27, 47, 0.86);
+    --bg-header:      rgba(5, 10, 20, 0.92);
+    --bg-input:       rgba(6, 13, 25, 0.92);
+
+    --border-card:    rgba(86, 166, 222, 0.16);
+    --border-hover:   rgba(74, 205, 255, 0.6);
+
+    --text-main:      #d8e7f6;
+    --text-muted:     #6f95b6;
+    --text-dim:       #43607a;
+
+    --accent-blue:    #38c6ff;
+    --accent-indigo:  #6ea8ff;
+    --accent-purple:  #b388ff;
+    --accent-glow:    rgba(56, 198, 255, 0.30);
+
+    --success:        #25e6a0;
+    --success-glow:   rgba(37, 230, 160, 0.30);
+    --success-bg:     rgba(37, 230, 160, 0.12);
+
+    --warning:        #ffb020;
+    --warning-glow:   rgba(255, 176, 32, 0.30);
+    --warning-bg:     rgba(255, 176, 32, 0.12);
+
+    --danger:         #ff4d5e;
+    --danger-glow:    rgba(255, 77, 94, 0.30);
+    --danger-bg:      rgba(255, 77, 94, 0.12);
+
+    --nasa-line:      rgba(96, 200, 255, 0.85);
+    --nasa-amber:     #ffb000;
+    --nasa-grid:      rgba(56, 198, 255, 0.05);
+    --nasa-star:      rgba(180, 220, 255, 0.5);
+
+    --nx-glow-cyan:   56, 198, 255;
+    --nx-glow-violet: 179, 136, 255;
+    --nx-glow-green:  37, 230, 160;
+    --nx-glow-amber:  255, 176, 32;
+    --nx-glow-red:    255, 77, 94;
+
+    --mx-surface:       rgba(13, 22, 40, .92);
+    --mx-surface-raised: rgba(20, 32, 54, .94);
+    --mx-line:          rgba(148, 163, 184, .15);
+    --mx-line-strong:   rgba(125, 211, 252, .30);
+    --mx-text-soft:     #a7b7cc;
+    --mx-cyan:          #62d7ff;
+    --mx-shadow:        0 16px 38px rgba(0, 0, 0, .20);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(120, 200, 255, 0.25);
+    --shadow-glow: 0 0 22px rgba(56, 198, 255, 0.30);
+}
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   3. AURORA  →  clean daylight console (light theme)
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-aurora,
+body.light-theme.theme-aurora {
+    --bg-base:        #eaf0f7;
+    --bg-surface:     #ffffff;
+    --bg-card:        rgba(255, 255, 255, 0.88);
+    --bg-card-hover:  #ffffff;
+    --bg-header:      rgba(255, 255, 255, 0.94);
+    --bg-input:       #f2f6fb;
+
+    --border-card:    rgba(30, 64, 120, 0.12);
+    --border-hover:   rgba(37, 99, 235, 0.45);
+
+    --text-main:      #0f1f38;
+    --text-muted:     #425b78;
+    --text-dim:       #8498ae;
+
+    --accent-blue:    #2563eb;
+    --accent-indigo:  #4f46e5;
+    --accent-purple:  #7c3aed;
+    --accent-glow:    rgba(37, 99, 235, 0.18);
+
+    --success:        #059669;
+    --success-glow:   rgba(5, 150, 105, 0.25);
+    --success-bg:     rgba(5, 150, 105, 0.10);
+
+    --warning:        #d97706;
+    --warning-glow:   rgba(217, 119, 6, 0.25);
+    --warning-bg:     rgba(217, 119, 6, 0.10);
+
+    --danger:         #dc2626;
+    --danger-glow:    rgba(220, 38, 38, 0.25);
+    --danger-bg:      rgba(220, 38, 38, 0.08);
+
+    --nasa-line:      rgba(37, 99, 235, 0.55);
+    --nasa-amber:     #d97706;
+    --nasa-grid:      rgba(37, 99, 235, 0.03);
+    --nasa-star:      rgba(37, 99, 235, 0.18);
+
+    --nx-glow-cyan:   37, 99, 235;
+    --nx-glow-violet: 79, 70, 229;
+    --nx-glow-green:  5, 150, 105;
+    --nx-glow-amber:  217, 119, 6;
+    --nx-glow-red:    220, 38, 38;
+
+    --mx-surface:        rgba(255, 255, 255, .94);
+    --mx-surface-raised: #ffffff;
+    --mx-line:           rgba(15, 42, 90, .12);
+    --mx-line-strong:    rgba(37, 99, 235, .35);
+    --mx-text-soft:      #46607e;
+    --mx-cyan:           #2563eb;
+    --mx-shadow:         0 16px 38px rgba(30, 64, 120, .12);
+
+    --shadow-card: 0 10px 28px -12px rgba(30, 64, 120, 0.25), 0 0 1px rgba(30, 64, 120, 0.08);
+    --shadow-glow: 0 0 18px rgba(37, 99, 235, 0.22);
+}
+
+/* Light surfaces — clean and calm, minimal HUD chrome */
+body.theme-aurora {
+    background:
+        radial-gradient(1100px 500px at 8% -10%, rgba(37, 99, 235, 0.08), transparent 60%),
+        radial-gradient(900px 450px at 100% 0%, rgba(79, 70, 229, 0.06), transparent 65%),
+        var(--bg-base);
+}
+body.theme-aurora .nasa-scanline,
+body.theme-aurora .nasa-scanline::after,
+body.theme-aurora .nasa-vignette { opacity: 0 !important; }
+body.theme-aurora::before { opacity: 0.35; }
+body.theme-aurora .metric-card::before,
+body.theme-aurora .chart-card::before,
+body.theme-aurora .table-container::before { opacity: 0.35; }
+body.theme-aurora .metric-card::after { opacity: 0.35; }
+body.theme-aurora .metric-value { text-shadow: none; }
+body.theme-aurora .disk-item,
+body.theme-aurora .net-item,
+body.theme-aurora .system-info span,
+body.theme-aurora .gpu-item,
+body.theme-aurora .cpu-bar,
+body.theme-aurora .progress-bar { background: rgba(15, 42, 90, 0.05); }
+body.theme-aurora .data-table th { background: rgba(15, 42, 90, 0.06); }
+body.theme-aurora canvas { filter: none; }
+body.theme-aurora .cmd-output { color: #047857; }
+body.theme-aurora .logs-window,
+body.theme-aurora .terminal-box { background: #0f1f38; }
+body.theme-aurora .toast.success,
+body.theme-aurora .toast.error,
+body.theme-aurora .toast.warning,
+body.theme-aurora .toast.info { box-shadow: none; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   4. EMBER  →  warm sunset operations room
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-ember {
+    --bg-base:        #150b04;
+    --bg-surface:     #1d1107;
+    --bg-card:        rgba(34, 21, 11, 0.74);
+    --bg-card-hover:  rgba(48, 30, 16, 0.86);
+    --bg-header:      rgba(22, 13, 6, 0.94);
+    --bg-input:       rgba(30, 19, 10, 0.92);
+
+    --border-card:    rgba(224, 130, 42, 0.18);
+    --border-hover:   rgba(255, 165, 66, 0.60);
+
+    --text-main:      #fbe9d1;
+    --text-muted:     #c99d71;
+    --text-dim:       #8a6640;
+
+    --accent-blue:    #ff9d2e;
+    --accent-indigo:  #ff7a3d;
+    --accent-purple:  #e2a26b;
+    --accent-glow:    rgba(255, 157, 46, 0.28);
+
+    --success:        #4ade80;
+    --success-glow:   rgba(74, 222, 128, 0.28);
+    --success-bg:     rgba(74, 222, 128, 0.12);
+
+    --warning:        #f59e0b;
+    --warning-glow:   rgba(245, 158, 11, 0.30);
+    --warning-bg:     rgba(245, 158, 11, 0.12);
+
+    --danger:         #fb5b5b;
+    --danger-glow:    rgba(251, 91, 91, 0.30);
+    --danger-bg:      rgba(251, 91, 91, 0.12);
+
+    --nasa-line:      rgba(255, 163, 80, 0.75);
+    --nasa-amber:     #ffb000;
+    --nasa-grid:      rgba(255, 157, 46, 0.05);
+    --nasa-star:      rgba(255, 205, 150, 0.45);
+
+    --nx-glow-cyan:   255, 157, 46;
+    --nx-glow-violet: 255, 122, 61;
+    --nx-glow-green:  74, 222, 128;
+    --nx-glow-amber:  255, 165, 66;
+    --nx-glow-red:    251, 91, 91;
+
+    --mx-surface:        rgba(34, 21, 11, .92);
+    --mx-surface-raised: rgba(46, 29, 15, .94);
+    --mx-line:           rgba(240, 160, 90, .14);
+    --mx-line-strong:    rgba(255, 170, 90, .32);
+    --mx-text-soft:      #d8b286;
+    --mx-cyan:           #ffad4d;
+    --mx-shadow:         0 16px 38px rgba(20, 8, 2, .25);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(255, 157, 46, 0.25);
+    --shadow-glow: 0 0 22px rgba(255, 157, 46, 0.30);
+}
+body.theme-ember {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(255, 122, 61, 0.10), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(226, 162, 107, 0.07), transparent 65%),
+        var(--bg-base);
+}
+body.theme-ember .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(255, 170, 90, 0.03) 0px, rgba(255, 170, 90, 0.03) 1px, transparent 2px, transparent 4px);
+}
+body.theme-ember .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(255, 157, 46, 0.05) 45%, rgba(255, 157, 46, 0.10) 50%, rgba(255, 157, 46, 0.05) 55%, transparent);
+}
+body.theme-ember .cpu-bar-fill { box-shadow: 0 0 8px rgba(255, 157, 46, 0.4); }
+body.theme-ember .logs-window, body.theme-ember .terminal-box { background: #1a0f06; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   5. FOREST  →  deep green telemetry lab
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-forest {
+    --bg-base:        #04100b;
+    --bg-surface:     #071a12;
+    --bg-card:        rgba(10, 32, 21, 0.74);
+    --bg-card-hover:  rgba(14, 42, 28, 0.86);
+    --bg-header:      rgba(5, 17, 11, 0.94);
+    --bg-input:       rgba(8, 26, 16, 0.92);
+
+    --border-card:    rgba(52, 211, 153, 0.18);
+    --border-hover:   rgba(52, 211, 153, 0.60);
+
+    --text-main:      #daf5e9;
+    --text-muted:     #82bda5;
+    --text-dim:       #4c7c68;
+
+    --accent-blue:    #34d399;
+    --accent-indigo:  #2dd4bf;
+    --accent-purple:  #5eead4;
+    --accent-glow:    rgba(52, 211, 153, 0.26);
+
+    --success:        #22c55e;
+    --success-glow:   rgba(34, 197, 94, 0.30);
+    --success-bg:     rgba(34, 197, 94, 0.12);
+
+    --warning:        #f5a623;
+    --warning-glow:   rgba(245, 166, 35, 0.30);
+    --warning-bg:     rgba(245, 166, 35, 0.12);
+
+    --danger:         #f87171;
+    --danger-glow:    rgba(248, 113, 113, 0.30);
+    --danger-bg:      rgba(248, 113, 113, 0.12);
+
+    --nasa-line:      rgba(52, 211, 153, 0.75);
+    --nasa-amber:     #f5a623;
+    --nasa-grid:      rgba(52, 211, 153, 0.05);
+    --nasa-star:      rgba(150, 255, 212, 0.45);
+
+    --nx-glow-cyan:   52, 211, 153;
+    --nx-glow-violet: 45, 212, 191;
+    --nx-glow-green:  34, 197, 94;
+    --nx-glow-amber:  245, 166, 35;
+    --nx-glow-red:    248, 113, 113;
+
+    --mx-surface:        rgba(10, 32, 21, .92);
+    --mx-surface-raised: rgba(13, 40, 27, .94);
+    --mx-line:           rgba(52, 211, 153, .14);
+    --mx-line-strong:    rgba(52, 211, 153, .32);
+    --mx-text-soft:      #8ecab2;
+    --mx-cyan:           #4ade80;
+    --mx-shadow:         0 16px 38px rgba(2, 12, 8, .25);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(52, 211, 153, 0.25);
+    --shadow-glow: 0 0 22px rgba(52, 211, 153, 0.28);
+}
+body.theme-forest {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(52, 211, 153, 0.08), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(94, 234, 212, 0.06), transparent 65%),
+        var(--bg-base);
+}
+body.theme-forest .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(52, 211, 153, 0.03) 0px, rgba(52, 211, 153, 0.03) 1px, transparent 2px, transparent 4px);
+}
+body.theme-forest .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(52, 211, 153, 0.05) 45%, rgba(52, 211, 153, 0.10) 50%, rgba(52, 211, 153, 0.05) 55%, transparent);
+}
+body.theme-forest .cpu-bar-fill { box-shadow: 0 0 8px rgba(52, 211, 153, 0.4); }
+body.theme-forest .logs-window, body.theme-forest .terminal-box { background: #03100a; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   6. NEBULA  →  violet mission deck
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-nebula {
+    --bg-base:        #0a0618;
+    --bg-surface:     #120a24;
+    --bg-card:        rgba(25, 15, 48, 0.74);
+    --bg-card-hover:  rgba(34, 22, 62, 0.86);
+    --bg-header:      rgba(15, 9, 30, 0.94);
+    --bg-input:       rgba(21, 13, 42, 0.92);
+
+    --border-card:    rgba(167, 139, 250, 0.20);
+    --border-hover:   rgba(196, 181, 253, 0.60);
+
+    --text-main:      #efe9ff;
+    --text-muted:     #b4a8e2;
+    --text-dim:       #7a6ca2;
+
+    --accent-blue:    #a78bfa;
+    --accent-indigo:  #818cf8;
+    --accent-purple:  #f0abfc;
+    --accent-glow:    rgba(167, 139, 250, 0.30);
+
+    --success:        #34d399;
+    --success-glow:   rgba(52, 211, 153, 0.30);
+    --success-bg:     rgba(52, 211, 153, 0.12);
+
+    --warning:        #fbbf24;
+    --warning-glow:   rgba(251, 191, 36, 0.30);
+    --warning-bg:     rgba(251, 191, 36, 0.12);
+
+    --danger:         #fb7185;
+    --danger-glow:    rgba(251, 113, 133, 0.30);
+    --danger-bg:      rgba(251, 113, 133, 0.12);
+
+    --nasa-line:      rgba(167, 139, 250, 0.80);
+    --nasa-amber:     #fbbf24;
+    --nasa-grid:      rgba(167, 139, 250, 0.06);
+    --nasa-star:      rgba(216, 180, 254, 0.5);
+
+    --nx-glow-cyan:   167, 139, 250;
+    --nx-glow-violet: 129, 140, 248;
+    --nx-glow-green:  52, 211, 153;
+    --nx-glow-amber:  251, 191, 36;
+    --nx-glow-red:    251, 113, 133;
+
+    --mx-surface:        rgba(25, 15, 48, .92);
+    --mx-surface-raised: rgba(31, 20, 60, .94);
+    --mx-line:           rgba(167, 139, 250, .15);
+    --mx-line-strong:    rgba(167, 139, 250, .34);
+    --mx-text-soft:      #c4b8e8;
+    --mx-cyan:           #c4b5fd;
+    --mx-shadow:         0 16px 38px rgba(8, 4, 20, .25);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(167, 139, 250, 0.28);
+    --shadow-glow: 0 0 22px rgba(167, 139, 250, 0.30);
+}
+body.theme-nebula {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(167, 139, 250, 0.10), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(240, 171, 252, 0.07), transparent 65%),
+        var(--bg-base);
+}
+body.theme-nebula .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(167, 139, 250, 0.035) 0px, rgba(167, 139, 250, 0.035) 1px, transparent 2px, transparent 4px);
+}
+body.theme-nebula .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(167, 139, 250, 0.05) 45%, rgba(167, 139, 250, 0.10) 50%, rgba(167, 139, 250, 0.05) 55%, transparent);
+}
+body.theme-nebula .cpu-bar-fill { box-shadow: 0 0 8px rgba(167, 139, 250, 0.4); }
+body.theme-nebula .logs-window, body.theme-nebula .terminal-box { background: #0a0520; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   7. GRAPHITE  →  minimal monochrome ops desk
+   A calm, reduced-variation workbench: no starfield, no scanlines, no glow.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-graphite {
+    --bg-base:        #0a0c10;
+    --bg-surface:     #11141a;
+    --bg-card:        rgba(17, 20, 26, 0.82);
+    --bg-card-hover:  rgba(27, 31, 39, 0.92);
+    --bg-header:      rgba(12, 14, 18, 0.96);
+    --bg-input:       rgba(21, 24, 30, 0.94);
+
+    --border-card:    rgba(255, 255, 255, 0.08);
+    --border-hover:   rgba(255, 255, 255, 0.30);
+
+    --text-main:      #e8eaee;
+    --text-muted:     #9aa3af;
+    --text-dim:       #5e6673;
+
+    --accent-blue:    #9aa7b5;
+    --accent-indigo:  #b6c0cc;
+    --accent-purple:  #d3dae2;
+    --accent-glow:    rgba(160, 172, 186, 0.16);
+
+    --success:        #6fdc9a;
+    --success-glow:   rgba(111, 220, 154, 0.22);
+    --success-bg:     rgba(111, 220, 154, 0.10);
+
+    --warning:        #e2bd7c;
+    --warning-glow:   rgba(226, 189, 124, 0.24);
+    --warning-bg:     rgba(226, 189, 124, 0.10);
+
+    --danger:         #ec8e8e;
+    --danger-glow:    rgba(236, 142, 142, 0.24);
+    --danger-bg:      rgba(236, 142, 142, 0.10);
+
+    --nasa-line:      rgba(205, 213, 222, 0.50);
+    --nasa-amber:     #e2bd7c;
+    --nasa-grid:      rgba(255, 255, 255, 0.03);
+    --nasa-star:      rgba(255, 255, 255, 0.22);
+
+    --nx-glow-cyan:   122, 132, 145;
+    --nx-glow-violet: 150, 158, 170;
+    --nx-glow-green:  111, 220, 154;
+    --nx-glow-amber:  226, 189, 124;
+    --nx-glow-red:    236, 142, 142;
+
+    --mx-surface:        rgba(17, 20, 26, .94);
+    --mx-surface-raised: rgba(24, 28, 35, .96);
+    --mx-line:           rgba(255, 255, 255, .07);
+    --mx-line-strong:    rgba(255, 255, 255, .18);
+    --mx-text-soft:      #aab3bf;
+    --mx-cyan:           #c0c9d4;
+    --mx-shadow:         0 16px 38px rgba(0, 0, 0, .25);
+
+    --shadow-card: 0 12px 32px -12px rgba(0, 0, 0, 0.7), 0 0 1px rgba(255, 255, 255, 0.06);
+    --shadow-glow: 0 0 16px rgba(160, 172, 186, 0.18);
+}
+/* Graphite hides the decorative HUD overlays for a clean, focused workbench */
+body.theme-graphite .nasa-overlay,
+body.theme-graphite .nasa-ticker,
+body.theme-graphite .mission-readout,
+body.theme-graphite::before { display: none; }
+body.theme-graphite {
+    background: var(--bg-base);
+}
+body.theme-graphite .metric-card::before,
+body.theme-graphite .chart-card::before,
+body.theme-graphite .table-container::before { display: none; }
+body.theme-graphite .metric-card::after,
+body.theme-graphite .chart-card::after,
+body.theme-graphite .troubleshoot-card::after { display: none; }
+body.theme-graphite .metric-value { text-shadow: none; }
+body.theme-graphite .nasa-boot { display: none; }
+body.theme-graphite canvas { filter: none; }
+body.theme-graphite .toast.success,
+body.theme-graphite .toast.error,
+body.theme-graphite .toast.warning,
+body.theme-graphite .toast.info { box-shadow: none; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   8. SHARED POLISH
+   Sweep-in transition when switching themes for a buttery feel.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-midnight, body.theme-aurora, body.theme-ember,
+body.theme-forest, body.theme-nebula, body.theme-graphite {
+    transition: background-color 0.4s ease, color 0.4s ease;
+}
+body.theme-midnight .metric-card, body.theme-midnight .chart-card,
+body.theme-aurora .metric-card, body.theme-aurora .chart-card,
+body.theme-ember .metric-card, body.theme-ember .chart-card,
+body.theme-forest .metric-card, body.theme-forest .chart-card,
+body.theme-nebula .metric-card, body.theme-nebula .chart-card,
+body.theme-graphite .metric-card, body.theme-graphite .chart-card {
+    transition: transform .35s var(--nx-ease-out),
+                box-shadow .35s var(--nx-ease-out),
+                border-color .25s ease, background-color .4s ease;
+}

@@ -15,6 +15,7 @@
     <link rel="stylesheet" href="/static/css/mission-control.css?v=20260805">
     <link rel="stylesheet" href="/static/css/dashboard-refresh.css">
     <link rel="stylesheet" href="/static/css/fix-engine.css?v=20260805">
+    <link rel="stylesheet" href="/static/css/themes.css?v=20260806">
     <!-- xterm.js for VM Console -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
@@ -66,7 +67,31 @@
                 <div class="uptime-badge" id="uptime">Uptime: --</div>
                 <button class="btn-icon" id="refresh-btn" title="Refresh Dashboard">🔄</button>
                 <button class="btn-icon" id="report-export-btn" title="Export diagnostics report">📄</button>
-                <button class="btn-icon" id="theme-toggle" title="Toggle Light/Dark Theme">🌙</button>
+                <!-- Theme picker: switch between six complete visual themes -->
+                <div class="theme-picker" id="theme-picker">
+                    <button class="btn-icon theme-picker-btn" id="theme-picker-btn" title="Switch theme" aria-haspopup="true" aria-expanded="false">🎨</button>
+                    <div class="theme-menu" id="theme-menu" role="menu" aria-label="Select theme">
+                        <div class="theme-menu-title">Appearance</div>
+                        <button type="button" class="theme-option" data-theme="midnight" role="menuitemradio" aria-checked="true">
+                            <span class="swatch" style="--sw-accent:#38c6ff;--sw-accent2:#b388ff;--sw-bg:#060c18"></span>Midnight<span class="check">✓</span>
+                        </button>
+                        <button type="button" class="theme-option" data-theme="aurora" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#2563eb;--sw-accent2:#7c3aed;--sw-bg:#eef2f8"></span>Aurora<span class="check">✓</span>
+                        </button>
+                        <button type="button" class="theme-option" data-theme="ember" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#ff9d2e;--sw-accent2:#e2a26b;--sw-bg:#1d1107"></span>Ember<span class="check">✓</span>
+                        </button>
+                        <button type="button" class="theme-option" data-theme="forest" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#34d399;--sw-accent2:#5eead4;--sw-bg:#071a12"></span>Forest<span class="check">✓</span>
+                        </button>
+                        <button type="button" class="theme-option" data-theme="nebula" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#a78bfa;--sw-accent2:#f0abfc;--sw-bg:#120a24"></span>Nebula<span class="check">✓</span>
+                        </button>
+                        <button type="button" class="theme-option" data-theme="graphite" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#9aa7b5;--sw-accent2:#d3dae2;--sw-bg:#11141a"></span>Graphite<span class="check">✓</span>
+                        </button>
+                    </div>
+                </div>
                 <button class="btn-icon" onclick="document.body.classList.toggle('large-text')" title="Large text">Aa</button>
                 <button class="btn-icon" onclick="document.getElementById('charts-row').classList.toggle('collapsed')" title="Toggle charts">📊</button>
             </div>
