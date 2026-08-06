@@ -1,9 +1,9 @@
 /* ============================================================================
-   MonitorX — MULTI-THEME SYSTEM (v3.0)
+   MonitorX — MULTI-THEME SYSTEM (v3.1)
    Loaded LAST so these palettes reliably override every earlier layer
    (styles.css, nasa-theme.css, nexus-hud.css, dashboard-refresh.css).
 
-   Six complete themes, each driven by a shared set of CSS custom properties
+   Nine complete themes, each driven by a shared set of CSS custom properties
    so a single swap re-skins the whole dashboard (backgrounds, surfaces,
    text, accents, status colours, HUD overlays and glows):
 
@@ -13,6 +13,9 @@
      forest    → deep green telemetry lab
      nebula    → violet mission deck
      graphite  → minimal monochrome ops desk
+     ocean     → deep-sea command deck (natural)
+     desert    → dusk-dune ops camp (natural)
+     arctic    → polar-night frost station (natural)
 
    Applied by setting <body class="theme-NAME"> (aurora also sets
    .light-theme so the existing light-mode overlay handling kicks in).
@@ -21,18 +24,59 @@
 
 /* ────────────────────────────────────────────────────────────────────────────
    1. THEME PICKER  (header control)
+   A labelled pill with a live accent dot so it reads as a control at a
+   glance — and it always stays on screen (see the header guards below).
    ──────────────────────────────────────────────────────────────────────────── */
 .theme-picker { position: relative; }
 
 .theme-picker-btn {
-    width: 40px;
     height: 38px;
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    padding: 0;
-    font-size: 1.05rem;
+    gap: 8px;
+    padding: 0 14px;
+    font-size: 0.84rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    border-radius: 999px;
+    background: linear-gradient(135deg, var(--accent-glow), rgba(255, 255, 255, 0.03));
+    border: 1px solid var(--accent-glow);
+    color: var(--accent-blue);
+    box-shadow: 0 0 14px -5px var(--accent-glow);
+    white-space: nowrap;
 }
+
+.theme-picker-btn:hover {
+    transform: translateY(-1px);
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 20px -4px var(--accent-glow);
+}
+
+/* Live swatch dot — always mirrors the active theme's accent colours */
+.theme-picker-btn .tp-dot {
+    width: 10px;
+    height: 10px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, var(--accent-purple), var(--accent-blue) 70%);
+    box-shadow: 0 0 8px var(--accent-blue);
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   1b. HEADER GUARDS — the theme picker must never be pushed off screen.
+   The right side of the header (mission clocks + status + uptime + buttons)
+   is ~920px wide and used to overflow on typical laptop widths, clipping the
+   picker behind the viewport edge. As space tightens we shed non-essential
+   readouts first (mission clocks → uptime → status text) and finally wrap;
+   the theme picker + core buttons always remain on screen.
+   ──────────────────────────────────────────────────────────────────────────── */
+@media (max-width: 1480px) { .mission-readout { display: none; } }
+@media (max-width: 1280px) {
+    .uptime-badge { display: none; }
+    .header-right { gap: 12px; }
+}
+@media (max-width: 1150px) { #ws-status-text { display: none; } .status-indicator { gap: 6px; } }
+@media (max-width: 900px)  { .header-right { flex-wrap: wrap; } }
 
 .theme-menu {
     position: absolute;
@@ -60,6 +104,12 @@
     text-transform: uppercase;
     color: var(--text-dim);
     padding: 8px 10px 4px;
+}
+
+.theme-menu-divider {
+    height: 1px;
+    margin: 6px 8px;
+    background: var(--border-card);
 }
 
 .theme-option {
@@ -106,6 +156,10 @@
 /* Collapse the picker nicely on small screens */
 @media (max-width: 768px) {
     .theme-menu { right: -10px; }
+}
+@media (max-width: 480px) {
+    .theme-picker-btn .tp-label { display: none; }
+    .theme-picker-btn { padding: 0 12px; }
 }
 
 
@@ -568,11 +622,240 @@ body.theme-graphite .toast.info { box-shadow: none; }
 
 
 /* ────────────────────────────────────────────────────────────────────────────
-   8. SHARED POLISH
+   8. OCEAN  →  deep-sea command deck (natural theme)
+   Abyssal blues with living-aquarium teal accents and slow-current glows.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-ocean {
+    --bg-base:        #03131c;
+    --bg-surface:     #05222f;
+    --bg-card:        rgba(7, 34, 48, 0.74);
+    --bg-card-hover:  rgba(10, 45, 62, 0.86);
+    --bg-header:      rgba(4, 20, 28, 0.94);
+    --bg-input:       rgba(6, 30, 42, 0.92);
+
+    --border-card:    rgba(34, 211, 238, 0.18);
+    --border-hover:   rgba(103, 232, 249, 0.60);
+
+    --text-main:      #d9f3fb;
+    --text-muted:     #7fb8cc;
+    --text-dim:       #4b7d90;
+
+    --accent-blue:    #22d3ee;
+    --accent-indigo:  #38bdf8;
+    --accent-purple:  #67e8f9;
+    --accent-glow:    rgba(34, 211, 238, 0.26);
+
+    --success:        #2dd4bf;
+    --success-glow:   rgba(45, 212, 191, 0.28);
+    --success-bg:     rgba(45, 212, 191, 0.12);
+
+    --warning:        #fbbf24;
+    --warning-glow:   rgba(251, 191, 36, 0.28);
+    --warning-bg:     rgba(251, 191, 36, 0.12);
+
+    --danger:         #fb7185;
+    --danger-glow:    rgba(251, 113, 133, 0.28);
+    --danger-bg:      rgba(251, 113, 133, 0.12);
+
+    --nasa-line:      rgba(34, 211, 238, 0.75);
+    --nasa-amber:     #fbbf24;
+    --nasa-grid:      rgba(34, 211, 238, 0.06);
+    --nasa-star:      rgba(165, 243, 252, 0.50);
+
+    --nx-glow-cyan:   34, 211, 238;
+    --nx-glow-violet: 56, 189, 248;
+    --nx-glow-green:  45, 212, 191;
+    --nx-glow-amber:  251, 191, 36;
+    --nx-glow-red:    251, 113, 133;
+
+    --mx-surface:        rgba(7, 34, 48, .92);
+    --mx-surface-raised: rgba(10, 43, 60, .94);
+    --mx-line:           rgba(34, 211, 238, .14);
+    --mx-line-strong:    rgba(34, 211, 238, .32);
+    --mx-text-soft:      #8fc7d9;
+    --mx-cyan:           #4dd9f2;
+    --mx-shadow:         0 16px 38px rgba(1, 10, 15, .28);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(34, 211, 238, 0.25);
+    --shadow-glow: 0 0 22px rgba(34, 211, 238, 0.28);
+}
+body.theme-ocean {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(34, 211, 238, 0.09), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(56, 189, 248, 0.07), transparent 65%),
+        var(--bg-base);
+}
+body.theme-ocean .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(34, 211, 238, 0.03) 0px, rgba(34, 211, 238, 0.03) 1px, transparent 2px, transparent 4px);
+}
+body.theme-ocean .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(34, 211, 238, 0.05) 45%, rgba(34, 211, 238, 0.10) 50%, rgba(34, 211, 238, 0.05) 55%, transparent);
+}
+body.theme-ocean .cpu-bar-fill { box-shadow: 0 0 8px rgba(34, 211, 238, 0.4); }
+body.theme-ocean .logs-window, body.theme-ocean .terminal-box { background: #02131c; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   9. DESERT  →  dusk-dune ops camp (natural theme)
+   Warm sand, golden-hour light, and ember-tinted night shadows.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-desert {
+    --bg-base:        #170f06;
+    --bg-surface:     #201407;
+    --bg-card:        rgba(46, 30, 14, 0.74);
+    --bg-card-hover:  rgba(60, 40, 20, 0.86);
+    --bg-header:      rgba(24, 16, 8, 0.94);
+    --bg-input:       rgba(38, 25, 13, 0.92);
+
+    --border-card:    rgba(251, 191, 36, 0.20);
+    --border-hover:   rgba(253, 224, 71, 0.60);
+
+    --text-main:      #fdf0d5;
+    --text-muted:     #cdb38a;
+    --text-dim:       #8a7048;
+
+    --accent-blue:    #fbbf24;
+    --accent-indigo:  #f59e0b;
+    --accent-purple:  #fcd34d;
+    --accent-glow:    rgba(251, 191, 36, 0.26);
+
+    --success:        #a3e635;
+    --success-glow:   rgba(163, 230, 53, 0.28);
+    --success-bg:     rgba(163, 230, 53, 0.12);
+
+    --warning:        #fb923c;
+    --warning-glow:   rgba(251, 146, 60, 0.30);
+    --warning-bg:     rgba(251, 146, 60, 0.12);
+
+    --danger:         #f87171;
+    --danger-glow:    rgba(248, 113, 113, 0.30);
+    --danger-bg:      rgba(248, 113, 113, 0.12);
+
+    --nasa-line:      rgba(251, 191, 36, 0.75);
+    --nasa-amber:     #fbbf24;
+    --nasa-grid:      rgba(251, 191, 36, 0.05);
+    --nasa-star:      rgba(254, 240, 190, 0.45);
+
+    --nx-glow-cyan:   251, 191, 36;
+    --nx-glow-violet: 245, 158, 11;
+    --nx-glow-green:  163, 230, 53;
+    --nx-glow-amber:  251, 146, 60;
+    --nx-glow-red:    248, 113, 113;
+
+    --mx-surface:        rgba(46, 30, 14, .92);
+    --mx-surface-raised: rgba(58, 38, 18, .94);
+    --mx-line:           rgba(251, 191, 36, .14);
+    --mx-line-strong:    rgba(251, 191, 36, .32);
+    --mx-text-soft:      #dcc49a;
+    --mx-cyan:           #fcd34d;
+    --mx-shadow:         0 16px 38px rgba(15, 8, 2, .30);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(251, 191, 36, 0.25);
+    --shadow-glow: 0 0 22px rgba(251, 191, 36, 0.28);
+}
+body.theme-desert {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(251, 191, 36, 0.09), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(245, 158, 11, 0.07), transparent 65%),
+        var(--bg-base);
+}
+body.theme-desert .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(251, 191, 36, 0.03) 0px, rgba(251, 191, 36, 0.03) 1px, transparent 2px, transparent 4px);
+}
+body.theme-desert .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(251, 191, 36, 0.05) 45%, rgba(251, 191, 36, 0.10) 50%, rgba(251, 191, 36, 0.05) 55%, transparent);
+}
+body.theme-desert .cpu-bar-fill { box-shadow: 0 0 8px rgba(251, 191, 36, 0.4); }
+body.theme-desert .logs-window, body.theme-desert .terminal-box { background: #140c05; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   10. ARCTIC  →  polar-night frost station (natural theme)
+   Ice-blue polar darkness with crystalline silver light and frost glows.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-arctic {
+    --bg-base:        #0a1420;
+    --bg-surface:     #0f1c2c;
+    --bg-card:        rgba(17, 30, 46, 0.75);
+    --bg-card-hover:  rgba(24, 41, 60, 0.87);
+    --bg-header:      rgba(11, 20, 32, 0.95);
+    --bg-input:       rgba(15, 28, 42, 0.92);
+
+    --border-card:    rgba(148, 197, 255, 0.16);
+    --border-hover:   rgba(186, 230, 253, 0.60);
+
+    --text-main:      #e6f1fb;
+    --text-muted:     #93acc4;
+    --text-dim:       #5f7890;
+
+    --accent-blue:    #7dd3fc;
+    --accent-indigo:  #a5b4fc;
+    --accent-purple:  #c7d2fe;
+    --accent-glow:    rgba(125, 211, 252, 0.26);
+
+    --success:        #5eead4;
+    --success-glow:   rgba(94, 234, 212, 0.28);
+    --success-bg:     rgba(94, 234, 212, 0.12);
+
+    --warning:        #fde68a;
+    --warning-glow:   rgba(253, 230, 138, 0.28);
+    --warning-bg:     rgba(253, 230, 138, 0.12);
+
+    --danger:         #fda4af;
+    --danger-glow:    rgba(253, 164, 175, 0.28);
+    --danger-bg:      rgba(253, 164, 175, 0.12);
+
+    --nasa-line:      rgba(186, 230, 253, 0.70);
+    --nasa-amber:     #fde68a;
+    --nasa-grid:      rgba(125, 211, 252, 0.05);
+    --nasa-star:      rgba(224, 242, 254, 0.55);
+
+    --nx-glow-cyan:   125, 211, 252;
+    --nx-glow-violet: 165, 180, 252;
+    --nx-glow-green:  94, 234, 212;
+    --nx-glow-amber:  253, 230, 138;
+    --nx-glow-red:    253, 164, 175;
+
+    --mx-surface:        rgba(17, 30, 46, .92);
+    --mx-surface-raised: rgba(22, 38, 56, .94);
+    --mx-line:           rgba(148, 197, 255, .13);
+    --mx-line-strong:    rgba(148, 197, 255, .30);
+    --mx-text-soft:      #a9c0d8;
+    --mx-cyan:           #a5d8fd;
+    --mx-shadow:         0 16px 38px rgba(3, 10, 18, .30);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(125, 211, 252, 0.25);
+    --shadow-glow: 0 0 22px rgba(125, 211, 252, 0.26);
+}
+body.theme-arctic {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(125, 211, 252, 0.08), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(165, 180, 252, 0.06), transparent 65%),
+        var(--bg-base);
+}
+body.theme-arctic .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(186, 230, 253, 0.028) 0px, rgba(186, 230, 253, 0.028) 1px, transparent 2px, transparent 4px);
+}
+body.theme-arctic .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(186, 230, 253, 0.04) 45%, rgba(186, 230, 253, 0.09) 50%, rgba(186, 230, 253, 0.04) 55%, transparent);
+}
+body.theme-arctic .cpu-bar-fill { box-shadow: 0 0 8px rgba(125, 211, 252, 0.4); }
+body.theme-arctic .logs-window, body.theme-arctic .terminal-box { background: #0a1522; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   11. SHARED POLISH
    Sweep-in transition when switching themes for a buttery feel.
    ──────────────────────────────────────────────────────────────────────────── */
 body.theme-midnight, body.theme-aurora, body.theme-ember,
-body.theme-forest, body.theme-nebula, body.theme-graphite {
+body.theme-forest, body.theme-nebula, body.theme-graphite,
+body.theme-ocean, body.theme-desert, body.theme-arctic {
     transition: background-color 0.4s ease, color 0.4s ease;
 }
 body.theme-midnight .metric-card, body.theme-midnight .chart-card,
@@ -580,7 +863,10 @@ body.theme-aurora .metric-card, body.theme-aurora .chart-card,
 body.theme-ember .metric-card, body.theme-ember .chart-card,
 body.theme-forest .metric-card, body.theme-forest .chart-card,
 body.theme-nebula .metric-card, body.theme-nebula .chart-card,
-body.theme-graphite .metric-card, body.theme-graphite .chart-card {
+body.theme-graphite .metric-card, body.theme-graphite .chart-card,
+body.theme-ocean .metric-card, body.theme-ocean .chart-card,
+body.theme-desert .metric-card, body.theme-desert .chart-card,
+body.theme-arctic .metric-card, body.theme-arctic .chart-card {
     transition: transform .35s var(--nx-ease-out),
                 box-shadow .35s var(--nx-ease-out),
                 border-color .25s ease, background-color .4s ease;

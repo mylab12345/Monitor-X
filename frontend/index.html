@@ -15,7 +15,7 @@
     <link rel="stylesheet" href="/static/css/mission-control.css?v=20260805">
     <link rel="stylesheet" href="/static/css/dashboard-refresh.css">
     <link rel="stylesheet" href="/static/css/fix-engine.css?v=20260805">
-    <link rel="stylesheet" href="/static/css/themes.css?v=20260806">
+    <link rel="stylesheet" href="/static/css/themes.css?v=20260807">
     <!-- xterm.js for VM Console -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
@@ -55,21 +55,9 @@
                 </div>
             </div>
             <div class="header-right">
-                <div class="mission-readout" aria-hidden="true">
-                    <div class="met-clock"><span class="met-label">MET</span><span id="met-clock">T+ 00:00:00</span></div>
-                    <div class="utc-clock"><span class="utc-label">UTC</span><span id="utc-clock">--:--:--</span></div>
-                    <div class="doy-clock"><span class="doy-label">DOY</span><span id="doy-clock">---/--:--:--</span></div>
-                </div>
-                <div class="status-indicator" id="ws-status">
-                    <span class="status-dot connected"></span>
-                    <span id="ws-status-text">Live WebSocket</span>
-                </div>
-                <div class="uptime-badge" id="uptime">Uptime: --</div>
-                <button class="btn-icon" id="refresh-btn" title="Refresh Dashboard">🔄</button>
-                <button class="btn-icon" id="report-export-btn" title="Export diagnostics report">📄</button>
-                <!-- Theme picker: switch between six complete visual themes -->
+                <!-- Theme picker: switch between nine complete visual themes -->
                 <div class="theme-picker" id="theme-picker">
-                    <button class="btn-icon theme-picker-btn" id="theme-picker-btn" title="Switch theme" aria-haspopup="true" aria-expanded="false">🎨</button>
+                    <button class="btn-icon theme-picker-btn" id="theme-picker-btn" title="Switch theme" aria-haspopup="true" aria-expanded="false"><span class="tp-dot" aria-hidden="true"></span><span>🎨</span><span class="tp-label">Theme</span></button>
                     <div class="theme-menu" id="theme-menu" role="menu" aria-label="Select theme">
                         <div class="theme-menu-title">Appearance</div>
                         <button type="button" class="theme-option" data-theme="midnight" role="menuitemradio" aria-checked="true">
@@ -90,8 +78,31 @@
                         <button type="button" class="theme-option" data-theme="graphite" role="menuitemradio" aria-checked="false">
                             <span class="swatch" style="--sw-accent:#9aa7b5;--sw-accent2:#d3dae2;--sw-bg:#11141a"></span>Graphite<span class="check">✓</span>
                         </button>
+                        <div class="theme-menu-divider" role="separator"></div>
+                        <div class="theme-menu-title">Natural</div>
+                        <button type="button" class="theme-option" data-theme="ocean" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#22d3ee;--sw-accent2:#38bdf8;--sw-bg:#05222f"></span>Ocean<span class="check">✓</span>
+                        </button>
+                        <button type="button" class="theme-option" data-theme="desert" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#fbbf24;--sw-accent2:#f59e0b;--sw-bg:#201407"></span>Desert<span class="check">✓</span>
+                        </button>
+                        <button type="button" class="theme-option" data-theme="arctic" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#7dd3fc;--sw-accent2:#c7d2fe;--sw-bg:#0f1c2c"></span>Arctic<span class="check">✓</span>
+                        </button>
                     </div>
                 </div>
+                <div class="mission-readout" aria-hidden="true">
+                    <div class="met-clock"><span class="met-label">MET</span><span id="met-clock">T+ 00:00:00</span></div>
+                    <div class="utc-clock"><span class="utc-label">UTC</span><span id="utc-clock">--:--:--</span></div>
+                    <div class="doy-clock"><span class="doy-label">DOY</span><span id="doy-clock">---/--:--:--</span></div>
+                </div>
+                <div class="status-indicator" id="ws-status">
+                    <span class="status-dot connected"></span>
+                    <span id="ws-status-text">Live WebSocket</span>
+                </div>
+                <div class="uptime-badge" id="uptime">Uptime: --</div>
+                <button class="btn-icon" id="refresh-btn" title="Refresh Dashboard">🔄</button>
+                <button class="btn-icon" id="report-export-btn" title="Export diagnostics report">📄</button>
                 <button class="btn-icon" onclick="document.body.classList.toggle('large-text')" title="Large text">Aa</button>
                 <button class="btn-icon" onclick="document.getElementById('charts-row').classList.toggle('collapsed')" title="Toggle charts">📊</button>
             </div>
@@ -923,8 +934,8 @@
     <div class="toast-container" id="toast-container"></div>
 
     <script src="/static/js/nasa-enhance.js?v=20260805"></script>
-    <script src="/static/js/app.js?v=20260805"></script>
-    <script src="/static/js/nexus-hud.js?v=20260805"></script>
+    <script src="/static/js/app.js?v=20260807"></script>
+    <script src="/static/js/nexus-hud.js?v=20260807"></script>
     <script src="/static/js/mission-control.js?v=20260805"></script>
     <script src="/static/js/operations-center.js?v=20260805"></script>
     <div id="sparkline-announce" aria-live="polite" aria-atomic="true" style="position:absolute;left:-9999px;top:-9999px;"></div>

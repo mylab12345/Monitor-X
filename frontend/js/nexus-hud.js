@@ -377,7 +377,7 @@
     /* ── Theme cycling (used by the 't' shortcut and command palette) ───── */
     function cycleTheme() {
         const order = (typeof THEMES !== 'undefined') ? THEMES
-                     : ['midnight', 'aurora', 'ember', 'forest', 'nebula', 'graphite'];
+                     : ['midnight', 'aurora', 'ember', 'forest', 'nebula', 'graphite', 'ocean', 'desert', 'arctic'];
         const current = Array.from(document.body.classList).find(c => c.startsWith('theme-'));
         const cur = current ? current.replace('theme-', '') : 'midnight';
         const idx = Math.max(0, order.indexOf(cur));
