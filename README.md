@@ -6,7 +6,7 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 
 ## Features
 
-- **Ultra-Modern Glassmorphism UI** — High-tech dark slate interface with neon accent glows, live sparklines, and a **six-theme picker** (Midnight, Aurora, Ember, Forest, Nebula, Graphite) that re-skins the entire dashboard in one click.
+- **Ultra-Modern Glassmorphism UI** — High-tech dark slate interface with neon accent glows, live sparklines, and a **nine-theme picker** (Midnight, Aurora, Ember, Forest, Nebula, Graphite, Ocean, Desert, Arctic) that re-skins the entire dashboard in one click.
 - **NASA Mission-Control Flight Loop** — A live GO/NO-GO poll board on the Dashboard: nine flight-controller stations (BOOSTER/storage, GUIDO/CPU, TELMU/memory, INCO/network, EECOM/thermal, FIDO/processes, SURGEON/GPU, GC/services, CAPCOM/datalink) each vote GO / CAUTION / NO-GO from real telemetry. The worst vote drives the mission status lamp, and any NO-GO raises a blinking **MASTER ALARM**. Hardware-less stations degrade to STANDBY. Header carries MET, UTC, and DOY (day-of-year) mission clocks, plus a flight-control boot sequence and live telemetry ticker.
 - **Real-Time Canvas Sparklines** — Live 30s trend graphs for CPU, Memory, and Network Bandwidth.
 - **Troubleshoot Mode Hub** — Automated diagnostic scan (17 check categories across CPU, Memory, Storage, Services, Processes, Kernel, Network, Hardware, and Security) calculating a **System Health Index (0-100)** score with **1-Click Remediation Fixes** and a **rolling health-score trend sparkline** so you can watch whether the host improves or degrades across scans.
@@ -38,7 +38,7 @@ Open **http://localhost:8080** in your browser.
 
 ## Themes
 
-MonitorX ships with **six complete visual themes**, switchable from the 🎨 picker in the top-right corner (or press `t` to cycle through them). Each theme re-skins every element — backgrounds, surfaces, text, accent colours, status colours, HUD overlays and glows — so the whole tool takes on a different character instantly. Your choice is saved and restored across visits.
+MonitorX ships with **nine complete visual themes**, switchable from the **🎨 Theme** button in the top-right corner (or press `t` to cycle through them). Each theme re-skins every element — backgrounds, surfaces, text, accent colours, status colours, HUD overlays and glows — so the whole tool takes on a different character instantly. Your choice is saved and restored across visits.
 
 | Theme      | Look                                              |
 |------------|---------------------------------------------------|
@@ -48,6 +48,9 @@ MonitorX ships with **six complete visual themes**, switchable from the 🎨 pic
 | **Forest**   | Deep-green telemetry lab (emerald / teal)            |
 | **Nebula**   | Violet mission deck (indigo / magenta)              |
 | **Graphite** | Minimal monochrome ops desk — no overlays, no glow  |
+| **Ocean**    | Deep-sea command deck (natural): abyssal blues + aqua  |
+| **Desert**   | Dusk-dune ops camp (natural): sand + golden hour      |
+| **Arctic**   | Polar-night frost station (natural): ice blues + silver |
 
 Themes are driven entirely by CSS custom properties defined in `frontend/css/themes.css` and applied via `<body class="theme-…">`, so they compose cleanly with the existing NASA mission-control, NEXUS HUD and mission-board layers. Use the `🎨` button or `t` shortcut to switch.
 
@@ -143,7 +146,7 @@ MonitorX/
 ├── frontend/
 │   ├── index.html            # Dashboard HTML structure
 │   ├── css/styles.css        # Modern Glassmorphic CSS Theme
-│   ├── css/themes.css        # Multi-theme system (6 themes + picker styles)
+│   ├── css/themes.css        # Multi-theme system (9 themes + picker styles)
 │   └── js/app.js             # Real-time WebSocket logic, Canvas charts & theme switcher
 ├── systemd/
 │   ├── monitorx.service      # Systemd service unit template

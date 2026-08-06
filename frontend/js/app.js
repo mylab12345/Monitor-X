@@ -2664,7 +2664,7 @@ async function exportReport(format) {
 }
 
 /* Event Listeners Initialization */
-const THEMES = ['midnight', 'aurora', 'ember', 'forest', 'nebula', 'graphite'];
+const THEMES = ['midnight', 'aurora', 'ember', 'forest', 'nebula', 'graphite', 'ocean', 'desert', 'arctic'];
 
 /* Normalise legacy localStorage values to the new theme names.
    Older builds stored 'dark' / 'light'; we map them onto the closest theme. */
