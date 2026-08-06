@@ -21,7 +21,7 @@
 /* ── Smooth everything where supported ─────────────────────────────────── */
 @media (prefers-reduced-motion: no-preference) {
     .metric-card, .chart-card, .troubleshoot-card, .vm-card,
-    .container-card, .check-card, .btn, .tab-btn, .sub-tab-btn,
+    .check-card, .btn, .tab-btn, .sub-tab-btn,
     .btn-icon, .pill, .badge, .modal-content, .toast {
         transition:
             transform .35s var(--nx-ease-out),
@@ -80,12 +80,12 @@ body.light-theme .nx-stars { display: none; }
 /* ── Card lift + tilt on hover (non-touch only) ────────────────────────── */
 @media (hover: hover) and (prefers-reduced-motion: no-preference) {
     .metric-card, .chart-card, .troubleshoot-card, .vm-card,
-    .container-card, .check-card {
+    .check-card {
         transform-origin: center;
         will-change: transform;
     }
     .metric-card:hover, .chart-card:hover, .troubleshoot-card:hover,
-    .vm-card:hover, .container-card:hover, .check-card:hover {
+    .vm-card:hover, .check-card:hover {
         transform: translateY(-4px) rotateX(.6deg) rotateY(-.6deg);
         border-color: var(--border-hover);
         box-shadow:
@@ -99,7 +99,7 @@ body.light-theme .nx-stars { display: none; }
     /* soften the corner brackets when hovering so glow reads */
     .metric-card:hover::before, .chart-card:hover::before,
     .troubleshoot-card:hover::before, .vm-card:hover::before,
-    .container-card:hover::before, .check-card:hover::before {
+    .check-card:hover::before {
         opacity: 1;
     }
 }

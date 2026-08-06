@@ -16,11 +16,8 @@
     <link rel="stylesheet" href="/static/css/dashboard-refresh.css">
     <link rel="stylesheet" href="/static/css/fix-engine.css?v=20260805">
     <link rel="stylesheet" href="/static/css/themes.css?v=20260807">
+    <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260806">
     <!-- xterm.js for VM Console -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 </head>
 <body>
     <!-- NASA Mission-Control overlays (scanlines + star/grid field) -->
@@ -57,7 +54,7 @@
             <div class="header-right">
                 <!-- Theme picker: switch between nine complete visual themes -->
                 <div class="theme-picker" id="theme-picker">
-                    <button class="btn-icon theme-picker-btn" id="theme-picker-btn" title="Switch theme" aria-haspopup="true" aria-expanded="false"><span class="tp-dot" aria-hidden="true"></span><span>🎨</span><span class="tp-label">Theme</span></button>
+                    <button type="button" class="btn-icon theme-picker-btn" id="theme-picker-btn" title="Switch theme" aria-label="Switch theme" aria-haspopup="true" aria-expanded="false"><span class="tp-dot" aria-hidden="true"></span><span>🎨</span><span class="tp-label">Theme</span></button>
                     <div class="theme-menu" id="theme-menu" role="menu" aria-label="Select theme">
                         <div class="theme-menu-title">Appearance</div>
                         <button type="button" class="theme-option" data-theme="midnight" role="menuitemradio" aria-checked="true">
@@ -101,28 +98,28 @@
                     <span id="ws-status-text">Live WebSocket</span>
                 </div>
                 <div class="uptime-badge" id="uptime">Uptime: --</div>
-                <button class="btn-icon" id="refresh-btn" title="Refresh Dashboard">🔄</button>
-                <button class="btn-icon" id="report-export-btn" title="Export diagnostics report">📄</button>
-                <button class="btn-icon" onclick="document.body.classList.toggle('large-text')" title="Large text">Aa</button>
-                <button class="btn-icon" onclick="document.getElementById('charts-row').classList.toggle('collapsed')" title="Toggle charts">📊</button>
+                <button type="button" class="btn-icon" id="refresh-btn" title="Refresh Dashboard" aria-label="Refresh Dashboard">🔄</button>
+                <button type="button" class="btn-icon" id="report-export-btn" title="Export diagnostics report" aria-label="Export diagnostics report">📄</button>
+                <button type="button" class="btn-icon" onclick="document.body.classList.toggle('large-text')" title="Large text" aria-label="Toggle large text">Aa</button>
+                <button type="button" class="btn-icon" onclick="document.getElementById('charts-row').classList.toggle('collapsed')" title="Toggle charts" aria-label="Toggle charts">📊</button>
             </div>
         </header>
 
         <!-- Glass Navigation Bar -->
         <nav class="tab-nav" aria-label="Main navigation">
-            <button class="tab-btn active" data-tab="dashboard" aria-current="page">
+            <button type="button" class="tab-btn active" data-tab="dashboard" aria-current="page">
                 <span class="tab-icon">📊</span> Dashboard
             </button>
-            <button class="tab-btn" data-tab="processes">
+            <button type="button" class="tab-btn" data-tab="processes">
                 <span class="tab-icon">📋</span> Processes
             </button>
-            <button class="tab-btn highlight-tab" data-tab="troubleshoot">
+            <button type="button" class="tab-btn highlight-tab" data-tab="troubleshoot">
                 <span class="tab-icon">🔧</span> Troubleshoot Hub
             </button>
-            <button class="tab-btn" data-tab="vms">
-                <span class="tab-icon">🐳</span> VMs (Libvirt)
+            <button type="button" class="tab-btn" data-tab="vms">
+                <span class="tab-icon">🖥️</span> VMs (Libvirt)
             </button>
-            <button class="tab-btn" data-tab="services">
+            <button type="button" class="tab-btn" data-tab="services">
                 <span class="tab-icon">⚙️</span> Systemd Services
             </button>
         </nav>
@@ -167,8 +164,8 @@
                         <div><h2>◈ OPERATIONS CENTER</h2><div class="operations-summary" id="ops-summary">Loading incident intelligence…</div></div>
                         <div class="ops-controls">
                             <select id="ops-range" class="filter-select" aria-label="Historical time range"><option value="1h">Last hour</option><option value="6h">6 hours</option><option value="24h">24 hours</option><option value="7d">7 days</option></select>
-                            <button class="btn btn-sm btn-outline" id="ops-rule-btn" title="Manage alert rules and webhook notifications">⚙️ Alert rules</button>
-                            <button class="btn btn-sm btn-outline" id="focus-mode-btn" aria-pressed="false">Focus mode</button>
+                            <button type="button" class="btn btn-sm btn-outline" id="ops-rule-btn" title="Manage alert rules and webhook notifications">⚙️ Alert rules</button>
+                            <button type="button" class="btn btn-sm btn-outline" id="focus-mode-btn" aria-pressed="false">Focus mode</button>
                         </div>
                     </div>
                     <div id="ops-incidents" class="ops-incidents"></div>
@@ -297,32 +294,6 @@
                     </div>
                 </div>
 
-                <!-- Docker Containers Panel -->
-                <div class="containers-panel" id="containers-panel">
-                    <div class="card-header">
-                        <h2>🐳 Docker Containers</h2>
-                        <div class="container-header-actions">
-                            <span class="badge" id="container-count">0 Containers</span>
-                            <span class="badge" id="pod-count">0 Pods</span>
-                            <button class="btn btn-sm btn-secondary" id="refresh-containers-btn">↻ Refresh</button>
-                        </div>
-                    </div>
-                    <div id="containers-content">
-                        <p class="no-data">Checking Docker availability...</p>
-                    </div>
-                </div>
-
-                <!-- Kubernetes Pods Panel -->
-                <div class="pods-panel" id="pods-panel" style="display:none;">
-                    <div class="card-header">
-                        <h2>☸️ Kubernetes Pods</h2>
-                        <button class="btn btn-sm btn-secondary" id="refresh-pods-btn">↻ Refresh</button>
-                    </div>
-                    <div id="pods-content">
-                        <p class="no-data">Checking Kubernetes availability...</p>
-                    </div>
-                </div>
-
                 <!-- OS Live Alerts Banner -->
                 <div class="issues-panel">
                     <div class="card-header">
@@ -330,7 +301,7 @@
                         <div class="issue-badges">
                             <span class="badge badge-danger" id="issues-count-critical">0 Critical</span>
                             <span class="badge badge-warning" id="issues-count-warning">0 Warning</span>
-                            <button class="btn btn-sm btn-outline" id="clear-issues-btn" title="Dismiss all current alerts">✕ Clear Issues</button>
+                            <button type="button" class="btn btn-sm btn-outline" id="clear-issues-btn" title="Dismiss all current alerts">✕ Clear Issues</button>
                         </div>
                     </div>
                     <div class="issues-list" id="issues-list"></div>
@@ -340,7 +311,7 @@
                 <div class="top-processes">
                     <div class="card-header">
                         <h2>🔥 Top Process Consumers</h2>
-                        <button class="btn btn-sm btn-outline" id="view-all-procs-btn">View All Processes →</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="view-all-procs-btn">View All Processes →</button>
                     </div>
                     <div class="table-container">
                         <table class="data-table compact">
@@ -372,7 +343,7 @@
                         <option value="pid">Sort by PID</option>
                         <option value="name">Sort by Name</option>
                     </select>
-                    <button class="btn btn-danger" id="kill-selected">💀 Terminate Selected</button>
+                    <button type="button" class="btn btn-danger" id="kill-selected">💀 Terminate Selected</button>
                 </div>
                 <div class="table-container">
                     <table class="data-table" id="processes-table">
@@ -419,7 +390,7 @@
                         </div>
                     </div>
                     <div class="scorecard-right">
-                        <button class="btn btn-primary btn-lg glow-btn" id="run-full-scan-btn">⚡ Run Diagnostic Scan</button>
+                        <button type="button" class="btn btn-primary btn-lg glow-btn" id="run-full-scan-btn">⚡ Run Diagnostic Scan</button>
                         <div class="health-trend-block">
                             <canvas id="health-trend-chart" width="240" height="48" aria-label="System Health Index trend across recent scans"></canvas>
                             <span class="health-trend-label" id="health-trend-label">Trend: —</span>
@@ -430,11 +401,11 @@
 
                 <!-- Troubleshoot Sub Tabs -->
                 <div class="sub-tab-nav">
-                    <button class="sub-tab-btn active" data-subtab="health-hub">🏥 Health Scan & Fix Hub</button>
-                    <button class="sub-tab-btn" data-subtab="log-inspector">📋 Log Inspector</button>
-                    <button class="sub-tab-btn" data-subtab="net-suite">🌐 Network Suite</button>
-                    <button class="sub-tab-btn" data-subtab="bottlenecks">🔥 Bottleneck Finder</button>
-                    <button class="sub-tab-btn" data-subtab="command-runner">⚡ Terminal & Presets</button>
+                    <button type="button" class="sub-tab-btn active" data-subtab="health-hub">🏥 Health Scan & Fix Hub</button>
+                    <button type="button" class="sub-tab-btn" data-subtab="log-inspector">📋 Log Inspector</button>
+                    <button type="button" class="sub-tab-btn" data-subtab="net-suite">🌐 Network Suite</button>
+                    <button type="button" class="sub-tab-btn" data-subtab="bottlenecks">🔥 Bottleneck Finder</button>
+                    <button type="button" class="sub-tab-btn" data-subtab="command-runner">⚡ Terminal & Presets</button>
                 </div>
 
                 <!-- SUB-TAB 1: HEALTH SCAN & FIX HUB -->
@@ -448,15 +419,16 @@
                             </div>
                             <div class="fix-engine-actions">
                                 <span class="fix-summary-badge warn" id="fix-summary-badge">0 fixes available</span>
-                                <button class="btn btn-sm btn-outline" id="fix-review-btn" disabled title="Review and customize the repair plan before applying">📋 Review Fix Plan</button>
-                                <button class="btn btn-primary glow-btn" id="fix-all-btn" disabled>⚡ Fix All Issues (0)</button>
+                                <button type="button" class="btn btn-sm btn-outline" id="fix-review-btn" disabled title="Review and customize the repair plan before applying">📋 Review Fix Plan</button>
+                                <button type="button" class="btn btn-primary glow-btn" id="fix-all-btn" disabled>⚡ Fix All Issues (0)</button>
                             </div>
                         </div>
                         <div class="fix-run-area" id="fix-run-area" hidden></div>
                         <div class="fix-history-card">
                             <div class="card-header">
                                 <h4>🕓 Remediation History</h4>
-                                <button class="btn btn-sm btn-outline" id="fix-history-refresh" title="Refresh remediation history">↻ Refresh</button>
+                                <button type="button" class="btn btn-sm btn-outline" id="fix-history-refresh" title="Refresh remediation history">↻ Refresh</button>
+                                <button type="button" class="btn btn-sm btn-outline" id="fix-history-clear" title="Delete remediation history">✕ Clear</button>
                             </div>
                             <div id="fix-history-list">
                                 <p class="no-data">No automated fixes executed yet. Fixes run here are recorded automatically.</p>
@@ -484,10 +456,10 @@
                         <div class="control-group">
                             <label>Severity:</label>
                             <div class="level-pills">
-                                <button class="level-pill active" data-level="all">All</button>
-                                <button class="level-pill pill-err" data-level="error">🔴 Error</button>
-                                <button class="level-pill pill-warn" data-level="warning">⚠️ Warn</button>
-                                <button class="level-pill pill-inf" data-level="info">ℹ️ Info</button>
+                                <button type="button" class="level-pill active" data-level="all">All</button>
+                                <button type="button" class="level-pill pill-err" data-level="error">🔴 Error</button>
+                                <button type="button" class="level-pill pill-warn" data-level="warning">⚠️ Warn</button>
+                                <button type="button" class="level-pill pill-inf" data-level="info">ℹ️ Info</button>
                             </div>
                         </div>
                         <div class="control-group flex-1">
@@ -500,8 +472,8 @@
                                 <span class="toggle-label">Live Auto-Tail</span>
                             </label>
                         </div>
-                        <button class="btn btn-secondary" id="fetch-logs-btn">🔄 Refresh Logs</button>
-                        <button class="btn btn-outline" id="copy-logs-btn">📋 Copy Logs</button>
+                        <button type="button" class="btn btn-secondary" id="fetch-logs-btn">🔄 Refresh Logs</button>
+                        <button type="button" class="btn btn-outline" id="copy-logs-btn">📋 Copy Logs</button>
                     </div>
                     <div class="logs-window" id="logs-container">
                         <p class="no-data">Loading system logs...</p>
@@ -516,7 +488,7 @@
                             <h3>📡 ICMP Ping Latency Tester</h3>
                             <div class="tool-form">
                                 <input type="text" id="ping-host-input" placeholder="e.g. 8.8.8.8 or google.com" value="8.8.8.8" class="search-input">
-                                <button class="btn btn-primary" id="run-ping-btn">Ping</button>
+                                <button type="button" class="btn btn-primary" id="run-ping-btn">Ping</button>
                             </div>
                             <div class="ping-results" id="ping-results-box">
                                 <p class="text-muted">Enter target host and click Ping to measure round-trip latency.</p>
@@ -529,7 +501,7 @@
                             <div class="tool-form-grid">
                                 <input type="text" id="port-host-input" placeholder="Host (e.g. 127.0.0.1)" value="127.0.0.1" class="search-input">
                                 <input type="number" id="port-num-input" placeholder="Port" value="8080" class="search-input" style="width: 100px;">
-                                <button class="btn btn-primary" id="run-port-btn">Test Port</button>
+                                <button type="button" class="btn btn-primary" id="run-port-btn">Test Port</button>
                             </div>
                             <div class="port-results" id="port-results-box">
                                 <p class="text-muted">Test connection to specific TCP server ports.</p>
@@ -541,7 +513,7 @@
                             <h3>🔍 DNS Resolver Inspector</h3>
                             <div class="tool-form">
                                 <input type="text" id="dns-host-input" placeholder="e.g. github.com" value="google.com" class="search-input">
-                                <button class="btn btn-primary" id="run-dns-btn">Resolve DNS</button>
+                                <button type="button" class="btn btn-primary" id="run-dns-btn">Resolve DNS</button>
                             </div>
                             <div class="dns-results" id="dns-results-box">
                                 <p class="text-muted">Compare local DNS resolution speed against Google Public DNS.</p>
@@ -552,7 +524,7 @@
                         <div class="troubleshoot-card full-width">
                             <div class="card-header">
                                 <h3>👂 Active Listening Ports & Bound Process Mapping</h3>
-                                <button class="btn btn-sm btn-secondary" id="refresh-ports-btn">🔄 Refresh Ports</button>
+                                <button type="button" class="btn btn-sm btn-secondary" id="refresh-ports-btn">🔄 Refresh Ports</button>
                             </div>
                             <div class="table-container">
                                 <table class="data-table compact">
@@ -597,18 +569,18 @@
                     <div class="troubleshoot-card full-width">
                         <h3>⚡ Diagnostic Shell Command Presets</h3>
                         <div class="preset-buttons">
-                            <button class="preset-btn" data-cmd="df -h">💾 Storage Usage (df -h)</button>
-                            <button class="preset-btn" data-cmd="free -h">🧠 RAM Usage (free -h)</button>
-                            <button class="preset-btn" data-cmd="ss -tulpn">🌐 Listening Ports (ss -tulpn)</button>
-                            <button class="preset-btn" data-cmd="systemctl --failed">⚙️ Failed Services</button>
-                            <button class="preset-btn" data-cmd="dmesg -T | tail -n 25">🐧 Kernel Dmesg Errors</button>
-                            <button class="preset-btn" data-cmd="uname -a">ℹ️ Kernel Version</button>
+                            <button type="button" class="preset-btn" data-cmd="df -h">💾 Storage Usage (df -h)</button>
+                            <button type="button" class="preset-btn" data-cmd="free -h">🧠 RAM Usage (free -h)</button>
+                            <button type="button" class="preset-btn" data-cmd="ss -tulpn">🌐 Listening Ports (ss -tulpn)</button>
+                            <button type="button" class="preset-btn" data-cmd="systemctl --failed">⚙️ Failed Services</button>
+                            <button type="button" class="preset-btn" data-cmd="dmesg -T | tail -n 25">🐧 Kernel Dmesg Errors</button>
+                            <button type="button" class="preset-btn" data-cmd="uname -a">ℹ️ Kernel Version</button>
                         </div>
 
                         <div class="command-runner mt-12">
                             <input type="text" id="cmd-input" placeholder="Choose an approved diagnostic preset below" class="search-input terminal-input" readonly>
-                            <button class="btn btn-primary" id="run-cmd">Execute</button>
-                            <button class="btn btn-outline" id="clear-cmd-btn">Clear Terminal</button>
+                            <button type="button" class="btn btn-primary" id="run-cmd">Execute</button>
+                            <button type="button" class="btn btn-outline" id="clear-cmd-btn">Clear Terminal</button>
                         </div>
                         <div class="terminal-box">
                             <div class="terminal-header">
@@ -634,7 +606,7 @@
                             <option value="10">10s</option>
                             <option value="30">30s</option>
                         </select>
-                        <button class="btn btn-secondary btn-sm" id="refresh-vms-btn">↻ Refresh</button>
+                        <button type="button" class="btn btn-secondary btn-sm" id="refresh-vms-btn">↻ Refresh</button>
                     </div>
                 </div>
 
@@ -673,11 +645,11 @@
                 <div class="vm-bulk-bar" id="vm-bulk-bar" hidden>
                     <span><b id="vm-selected-count">0</b> selected</span>
                     <div class="vm-bulk-actions">
-                        <button class="btn btn-sm btn-success" id="vm-bulk-start" disabled>▶ Start</button>
-                        <button class="btn btn-sm btn-warning" id="vm-bulk-shutdown" disabled>⏹ Shutdown</button>
-                        <button class="btn btn-sm btn-danger" id="vm-bulk-poweroff" disabled>⏻ Poweroff</button>
-                        <button class="btn btn-sm btn-outline" id="vm-bulk-reboot" disabled>↻ Reboot</button>
-                        <button class="btn btn-sm btn-outline" id="vm-bulk-clear">✕ Clear</button>
+                        <button type="button" class="btn btn-sm btn-success" id="vm-bulk-start" disabled>▶ Start</button>
+                        <button type="button" class="btn btn-sm btn-warning" id="vm-bulk-shutdown" disabled>⏹ Shutdown</button>
+                        <button type="button" class="btn btn-sm btn-danger" id="vm-bulk-poweroff" disabled>⏻ Poweroff</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="vm-bulk-reboot" disabled>↻ Reboot</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="vm-bulk-clear">✕ Clear</button>
                     </div>
                 </div>
 
@@ -689,7 +661,7 @@
                 <div class="vm-audit-panel">
                     <div class="card-header">
                         <h3>🕓 Recent VM Control Actions</h3>
-                        <button class="btn btn-sm btn-outline" id="vm-audit-refresh">↻ Refresh</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="vm-audit-refresh">↻ Refresh</button>
                     </div>
                     <div id="vm-audit-list">
                         <p class="no-data">No VM control actions recorded yet.</p>
@@ -701,7 +673,7 @@
             <div class="tab-content" id="tab-services">
                 <div class="vms-header">
                     <h2>Systemd Services Management</h2>
-                    <button class="btn btn-secondary" id="refresh-services-btn">🔄 Refresh Services</button>
+                    <button type="button" class="btn btn-secondary" id="refresh-services-btn">🔄 Refresh Services</button>
                 </div>
                 <div id="service-permission-notice" class="service-permission-notice" role="status">
                     Checking service-control permissions…
@@ -748,7 +720,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h3>🔍 Detailed Process Inspector</h3>
-                <button class="modal-close" id="close-modal">&times;</button>
+                <button type="button" class="modal-close" aria-label="Close dialog" id="close-modal">&times;</button>
             </div>
             <div class="modal-body" id="modal-body"></div>
         </div>
@@ -759,7 +731,7 @@
         <div class="modal-content" style="max-width: 460px;">
             <div class="modal-header">
                 <h3 id="confirm-modal-title">⚠️ Confirm Action</h3>
-                <button class="modal-close" id="confirm-modal-close">&times;</button>
+                <button type="button" class="modal-close" aria-label="Close dialog" id="confirm-modal-close">&times;</button>
             </div>
             <div class="modal-body">
                 <p id="confirm-modal-message" style="font-size: 0.92rem; color: var(--text-muted); margin-bottom: 16px;">
@@ -768,8 +740,8 @@
                 <p id="confirm-modal-target" style="font-size: 0.82rem; color: var(--text-dim); margin-bottom: 18px;">
                 </p>
                 <div style="display: flex; gap: 10px; justify-content: flex-end;">
-                    <button class="btn btn-outline" id="confirm-modal-cancel">Cancel</button>
-                    <button class="btn btn-danger" id="confirm-modal-confirm">Confirm</button>
+                    <button type="button" class="btn btn-outline" id="confirm-modal-cancel">Cancel</button>
+                    <button type="button" class="btn btn-danger" id="confirm-modal-confirm">Confirm</button>
                 </div>
             </div>
         </div>
@@ -779,7 +751,7 @@
     <div class="modal" id="console-modal">
         <div class="modal-content" style="max-width: 95vw; width: 1200px; height: 85vh;">
             <div class="modal-header">
-                <h3>🖥️ VM Console — <span id="console-vm-name"></span></h3>
+                <h3>🖥️ VM Serial Console — <span id="console-vm-name"></span></h3>
                 <div class="console-header-actions">
                     <select id="console-font-size" class="filter-select" title="Font size">
                         <option value="12">12px</option>
@@ -787,8 +759,8 @@
                         <option value="16">16px</option>
                         <option value="18">18px</option>
                     </select>
-                    <button class="btn btn-sm btn-outline" id="console-clear">Clear</button>
-                    <button class="modal-close" id="console-modal-close">&times;</button>
+                    <button type="button" class="btn btn-sm btn-outline" id="console-clear">Clear</button>
+                    <button type="button" class="modal-close" aria-label="Close dialog" id="console-modal-close">&times;</button>
                 </div>
             </div>
             <div class="modal-body console-body">
@@ -806,7 +778,7 @@
         <div class="modal-content" style="max-width: 520px;">
             <div class="modal-header">
                 <h3>⚙️ Resize VM — <span id="resize-vm-name"></span></h3>
-                <button class="modal-close" id="resize-modal-close">&times;</button>
+                <button type="button" class="modal-close" aria-label="Close dialog" id="resize-modal-close">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="resize-form">
@@ -827,23 +799,10 @@
                         <small class="resize-hint" id="resize-current-mem">Current: —</small>
                     </div>
                     <div class="resize-actions">
-                        <button class="btn btn-outline" id="resize-cancel">Cancel</button>
-                        <button class="btn btn-primary" id="resize-apply">Apply Resize</button>
+                        <button type="button" class="btn btn-outline" id="resize-cancel">Cancel</button>
+                        <button type="button" class="btn btn-primary" id="resize-apply">Apply Resize</button>
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Container Logs Modal -->
-    <div class="modal" id="container-logs-modal">
-        <div class="modal-content" style="max-width: 800px;">
-            <div class="modal-header">
-                <h3>📋 Container Logs — <span id="logs-container-name"></span></h3>
-                <button class="modal-close" id="container-logs-close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <pre id="container-logs-output" class="cmd-output" style="max-height: 500px;"></pre>
             </div>
         </div>
     </div>
@@ -860,8 +819,8 @@
                         <option value="300">300 lines</option>
                         <option value="500">500 lines</option>
                     </select>
-                    <button class="btn btn-sm btn-outline" id="service-logs-refresh">↻ Refresh</button>
-                    <button class="modal-close" id="service-logs-close">&times;</button>
+                    <button type="button" class="btn btn-sm btn-outline" id="service-logs-refresh">↻ Refresh</button>
+                    <button type="button" class="modal-close" aria-label="Close dialog" id="service-logs-close">&times;</button>
                 </div>
             </div>
             <div class="modal-body">
@@ -875,7 +834,7 @@
         <div class="modal-content" style="max-width: 640px;">
             <div class="modal-header">
                 <h3>⚙️ Alert Rules &amp; Notifications</h3>
-                <button class="modal-close" id="rules-modal-close">&times;</button>
+                <button type="button" class="modal-close" aria-label="Close dialog" id="rules-modal-close">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="rules-form">
@@ -891,7 +850,7 @@
                         </select>
                         <input type="number" id="rule-threshold" placeholder="Threshold" class="search-input" style="width:120px;" step="any" min="0">
                         <input type="number" id="rule-cooldown" placeholder="Cooldown min" class="search-input" style="width:120px;" min="1" value="15">
-                        <button class="btn btn-primary" id="rule-create-btn">Create</button>
+                        <button type="button" class="btn btn-primary" id="rule-create-btn">Create</button>
                     </div>
                     <div class="rules-list" id="rules-list"><p class="no-data">Loading rules…</p></div>
                 </div>
@@ -904,8 +863,8 @@
                             <span class="slider"></span>
                             <span class="toggle-label">Enabled</span>
                         </label>
-                        <button class="btn btn-outline" id="webhook-save-btn">Save</button>
-                        <button class="btn btn-sm btn-outline" id="webhook-test-btn">Send test</button>
+                        <button type="button" class="btn btn-outline" id="webhook-save-btn">Save</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="webhook-test-btn">Send test</button>
                     </div>
                 </div>
             </div>
@@ -917,14 +876,14 @@
         <div class="modal-content" style="max-width: 760px;">
             <div class="modal-header">
                 <h3>📋 Fix Plan Review</h3>
-                <button class="modal-close" id="fix-plan-close">&times;</button>
+                <button type="button" class="modal-close" aria-label="Close dialog" id="fix-plan-close">&times;</button>
             </div>
             <div class="modal-body">
                 <p class="fix-plan-note">These are the repairs the scanner recommends. Uncheck anything you don't want to apply — the rest will run in sequence, and every result is recorded in Remediation History.</p>
                 <div id="fix-plan-list"><p class="no-data">Building plan…</p></div>
                 <div class="fix-plan-actions">
-                    <button class="btn btn-outline" id="fix-plan-cancel">Cancel</button>
-                    <button class="btn btn-primary" id="fix-plan-apply">⚡ Apply Selected Fixes</button>
+                    <button type="button" class="btn btn-outline" id="fix-plan-cancel">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="fix-plan-apply">⚡ Apply Selected Fixes</button>
                 </div>
             </div>
         </div>

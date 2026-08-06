@@ -76,7 +76,6 @@
             ['NET ↑', read('net-tx-speed')],
             ['GPU', read('gpu-total')],
             ['PROC', document.querySelectorAll('#top-processes-body tr').length + ' ACTIVE'],
-            ['DOCKER', read('container-count')],
             ['VM', read('vm-count')],
             ['WS', read('ws-status-text')],
             ['LINK', read('uptime').replace('Uptime: ', '')]

@@ -1,0 +1,184 @@
+/* MonitorX quality pass: predictable controls, focus states, responsive density,
+   and a cheaper rendering path for reduced-motion / low-power environments. */
+
+button,
+input,
+select,
+textarea {
+    font: inherit;
+}
+
+button {
+    cursor: pointer;
+}
+
+button:disabled,
+.btn:disabled {
+    cursor: not-allowed;
+}
+
+.btn {
+    min-height: 44px;
+}
+
+.btn.btn-sm {
+    min-height: 38px;
+}
+
+.btn-icon {
+    min-width: 44px;
+    min-height: 44px;
+}
+
+.search-input,
+.filter-select,
+.tool-form input,
+.tool-form-grid input {
+    min-height: 44px;
+}
+
+.btn:focus-visible,
+.btn-icon:focus-visible,
+.tab-btn:focus-visible,
+.sub-tab-btn:focus-visible,
+.search-input:focus-visible,
+.filter-select:focus-visible,
+.level-pill:focus-visible,
+.modal-close:focus-visible,
+input[type="checkbox"]:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--accent-blue, #38bdf8) 75%, white);
+    outline-offset: 2px;
+}
+
+.tab-nav {
+    overflow-x: auto;
+    scrollbar-width: thin;
+    overscroll-behavior-inline: contain;
+}
+
+.tab-btn,
+.sub-tab-btn {
+    white-space: nowrap;
+}
+
+.modal-content {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-padding: 20px;
+}
+
+.modal[aria-hidden="true"] {
+    pointer-events: none;
+}
+
+.auth-overlay {
+    z-index: 10000;
+}
+
+.auth-card {
+    max-width: 440px;
+}
+
+.auth-form {
+    display: grid;
+    gap: 12px;
+    margin-top: 18px;
+}
+
+.auth-form label {
+    color: var(--text-secondary, #cbd5e1);
+    font-weight: 600;
+}
+
+.auth-error {
+    min-height: 1.2em;
+    margin: 0;
+    color: var(--danger, #ef4444);
+}
+
+/* Reduce decorative work in Focus mode while keeping operational content. */
+body.focus-mode .nasa-overlay,
+body.focus-mode .nx-stars,
+body.focus-mode .nasa-ticker,
+body.focus-mode .mission-board {
+    opacity: 0;
+    pointer-events: none;
+    height: 0;
+    overflow: hidden;
+}
+
+body.focus-mode .app-header {
+    box-shadow: 0 8px 26px rgba(0, 0, 0, .22);
+}
+
+/* Do not force a 350px card onto a 375px phone. */
+@media (max-width: 768px) {
+    .metrics-grid {
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+
+    .app-header {
+        gap: 10px;
+    }
+
+    .header-right {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .toast-container {
+        left: 4vw;
+        right: 4vw;
+        max-width: none;
+    }
+
+    .toast {
+        max-width: 100%;
+    }
+}
+
+@media (max-width: 480px) {
+    .metrics-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .btn {
+        padding-inline: 14px;
+    }
+
+    .tab-btn,
+    .sub-tab-btn {
+        padding-inline: 13px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+    }
+
+    .nasa-overlay,
+    .nx-stars,
+    .nasa-boot {
+        display: none !important;
+    }
+}
+
+/* Browsers that implement reduced transparency get a solid, cheaper surface. */
+@media (prefers-reduced-transparency: reduce) {
+    .metric-card,
+    .chart-card,
+    .operations-center,
+    .troubleshoot-card,
+    .modal-content,
+    .app-header {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        background: var(--surface-solid, rgba(15, 23, 42, .96));
+    }
+}

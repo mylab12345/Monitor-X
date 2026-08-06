@@ -1,5 +1,22 @@
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Optional local configuration. Keep secrets in .env (ignored by git); see
+# .env.example. Explicit environment variables take precedence.
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line#${line%%[![:space:]]*}}"
+        [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        # Do not overwrite an explicitly exported environment variable.
+        if [[ -z "${!key+x}" ]]; then
+            value="${value#\"}"; value="${value%\"}"
+            export "$key=$value"
+        fi
+    done < "$SCRIPT_DIR/.env"
+fi
+
 export VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python3"
 
 if [ ! -f "$VENV_PYTHON" ]; then

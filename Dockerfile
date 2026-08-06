@@ -5,27 +5,24 @@
 #
 # Stage 1 (builder) compiles the Python dependencies, including the optional
 # python3-libvirt bindings, against a compatible ABI.
-# Stage 2 (runtime) is the minimal image that ships the app, the CLI tools it
-# shells out to (docker / kubectl / virsh), and a non-root user.
+# Stage 2 (runtime) is the minimal image that ships the app, narrowly scoped
+# host tools (virsh/system diagnostics), and a non-root user.
 #
 # Build:
 #   docker build -t monitorx .
 #
 # Run (host integration — recommended):
-#   DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 #   docker run -d --name monitorx \
 #     -p 8080:8080 \
-#     --group-add "$DOCKER_GID" \
-#     -v /var/run/docker.sock:/var/run/docker.sock \
-#     -v /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock \
+#     -v /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock:ro \
 #     -v monitorx-data:/app/data \
 #     monitorx
 #
 # The dashboard runs unprivileged in the container; VM/service *control*
 # buttons need the host integration documented in README/systemd. Metrics
-# panels (CPU/RAM/disk/network/GPU) work out of the box. Mounting the docker
-# socket enables the containers panel; mounting libvirt's socket enables VM
-# monitoring; kubectl needs a kubeconfig mounted at $HOME/.kube/config.
+# panels (CPU/RAM/disk/network/GPU) work out of the box. Mounting libvirt's
+# socket enables VM monitoring; container and Kubernetes CLI integrations are
+# intentionally not part of MonitorX.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -65,6 +62,7 @@ FROM python:3.12-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
+    MONITORX_HOST="0.0.0.0" \
     MONITORX_LIBVIRT_URI="qemu:///system" \
     PATH="/opt/venv/bin:$PATH"
 
@@ -80,19 +78,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Docker + kubectl CLIs: the app shells out to these binaries for the
-# containers/pods panels. Only the client is needed — the daemon runs on the
-# host and its socket is mounted in at runtime.
-ARG DOCKER_CLI_VERSION="29.1.3"
-ARG KUBECTL_VERSION="v1.33.0"
-# Docker static builds use x86_64/aarch64 paths; Kubernetes uses amd64/arm64.
-RUN DOCKER_ARCH="$(dpkg --print-architecture | sed 's/amd64/x86_64/; s/arm64/aarch64/')" \
-    && KUBE_ARCH="$(dpkg --print-architecture)" \
-    && curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
-       | tar -xz --strip-components=1 -C /usr/local/bin docker/docker \
-    && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBE_ARCH}/kubectl" \
-       -o /usr/local/bin/kubectl \
-    && chmod +x /usr/local/bin/kubectl
 
 # Copy the prebuilt virtualenv from the builder stage.
 COPY --from=builder /opt/venv /opt/venv

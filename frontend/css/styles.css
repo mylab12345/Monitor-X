@@ -1341,7 +1341,7 @@ body.large-text .data-table { font-size: 0.95rem; }
 .vm-audit-entry.failed .vm-audit-msg { color: #fda4af; }
 
 /* ==========================================================================
-   VM CONSOLE, RESIZE, CONTAINERS, PODS
+   VM SERIAL CONSOLE AND RESIZE
    ========================================================================== */
 
 /* VM Extra Actions Row */
@@ -1469,135 +1469,6 @@ body.large-text .data-table { font-size: 0.95rem; }
     gap: 10px;
     justify-content: flex-end;
     margin-top: 8px;
-}
-
-/* Container & Pod Panels */
-.containers-panel, .pods-panel {
-    background: var(--bg-card);
-    backdrop-filter: blur(8px);
-    border-radius: var(--radius-lg);
-    padding: 18px 22px;
-    margin-bottom: 24px;
-    border: 1px solid var(--border-card);
-    box-shadow: var(--shadow-card);
-}
-.container-header-actions {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-.container-grid, .pod-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 12px;
-    margin-top: 12px;
-}
-.container-card {
-    background: rgba(0, 0, 0, 0.25);
-    border: 1px solid var(--border-card);
-    border-radius: var(--radius-md);
-    padding: 14px;
-    transition: var(--transition);
-}
-.container-card:hover {
-    border-color: var(--border-hover);
-}
-.container-card.running {
-    border-left: 3px solid var(--success);
-}
-.container-card.stopped, .container-card.crashed {
-    border-left: 3px solid var(--danger);
-}
-.container-card.paused {
-    border-left: 3px solid var(--warning);
-}
-.container-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 10px;
-}
-.container-card-header strong {
-    font-size: 0.92rem;
-    word-break: break-all;
-}
-.container-id {
-    margin-top: 2px;
-    font-size: 0.68rem;
-    font-family: 'JetBrains Mono', monospace;
-    color: var(--text-dim);
-}
-.container-details {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 0.8rem;
-}
-.container-details div {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-}
-.container-details span { color: var(--text-muted); }
-.container-details b {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.78rem;
-    text-align: right;
-    max-width: 60%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.container-actions {
-    margin-top: 10px;
-    display: flex;
-    gap: 6px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border-card);
-}
-
-/* Per-VM Container Section */
-.vm-containers-section {
-    margin-top: 10px;
-    padding: 10px;
-    background: rgba(0, 0, 0, 0.15);
-    border-radius: var(--radius-sm);
-}
-.vm-containers-label {
-    font-size: 0.78rem;
-    color: var(--text-muted);
-    font-weight: 600;
-}
-.vm-containers-label b { color: var(--text-main); }
-.vm-containers-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 8px;
-}
-.vm-container-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 8px;
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid var(--border-card);
-    border-radius: 99px;
-    font-size: 0.72rem;
-    font-weight: 600;
-    color: var(--text-main);
-}
-.vm-container-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-}
-.vm-container-dot.running { background: var(--success); box-shadow: 0 0 6px var(--success); }
-.vm-container-dot.stopped { background: var(--danger); }
-.vm-container-stats {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.65rem;
-    color: var(--accent-blue);
 }
 
 /* Text utility */

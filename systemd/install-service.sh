@@ -45,6 +45,16 @@ for candidate in libvirt libvirtd kvm; do
     fi
 done
 
+# Keep optional deployment secrets out of the generated unit. If the installer
+# is invoked with MONITORX_AUTH_TOKEN, persist it in a root-readable env file;
+# the unit references it with EnvironmentFile= above. Existing files are kept
+# when the token is not present so upgrades do not silently disable auth.
+AUTH_ENV_DEST="/etc/monitorx.env"
+if [ -n "${MONITORX_AUTH_TOKEN:-}" ]; then
+    printf 'MONITORX_AUTH_TOKEN=%q\n' "$MONITORX_AUTH_TOKEN" | sudo tee "$AUTH_ENV_DEST" > /dev/null
+    sudo chmod 600 "$AUTH_ENV_DEST"
+fi
+
 echo "[1/4] Generating systemd unit file at $SERVICE_DEST..."
 {
 cat <<EOF
@@ -64,6 +74,7 @@ StandardOutput=journal
 StandardError=journal
 Environment="HOME=$HOME"
 Environment="PATH=$REPO_DIR/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=-/etc/monitorx.env
 Environment="MONITORX_LIBVIRT_URI=${MONITORX_LIBVIRT_URI:-qemu:///system}"
 EOF
 # Grant the service read-write libvirt access without sudo. systemd applies

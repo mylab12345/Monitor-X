@@ -61,7 +61,7 @@ The dashboard is running. Open `http://localhost:8080` (or the sandbox preview p
 ### 2.7 Navigation — Tab Overflow
 - **File:** `frontend/index.html` / `frontend/css/styles.css`
 - **Lines:** ~212 (`.tab-nav` flex), ~241 (`.tab-btn` padding 14px 22px).
-- **Issue:** 10 tabs (`Dashboard`, `Processes`, `Troubleshoot Hub`, `VMs`, `Services`, `Logs`, `Network`, `GPU`, `Containers`, `System Info`) in a single flex row. At 1366px or with translated labels this overflows.
+- **Issue:** 5 primary tabs (`Dashboard`, `Processes`, `Troubleshoot Hub`, `VMs`, `Services`) with logs/network/diagnostics inside Troubleshoot in a single flex row. At 1366px or with translated labels this overflows.
 - **Fix:** Add `overflow-x: auto` with fade indicators; consider a `select` dropdown for mobile; add `title` tooltips to each button.
 
 ### 2.8 Touch Targets & Form Visibility
@@ -197,10 +197,10 @@ detects can be repaired **inside the hub**, individually or all at once.
 - [x] New fix actions: `restart_service` / `start_service` / `enable_service`
       (validated against `SERVICE_NAME_PATTERN`), `reap_zombies` (SIGCHLD to
       zombie parents, owner-guarded), `flush_dns` (resolvectl/systemd-resolve/nscd),
-      `clean_tmp` (find -mtime +7 in /tmp & /var/tmp), `restart_docker_container`.
+      `clean_tmp` (find -mtime +7 in /tmp & /var/tmp).
 - [x] `kill_process` now enforces a UID-ownership guard (multi-user safety P0 from audit §3.2).
 - [x] Health scan upgraded to 11 checks: new *Journal Disk Footprint*, *Pending
-      Reboot*, *Exited Docker Containers*, *File Descriptor Pressure* checks; every
+      Reboot* and *File Descriptor Pressure* checks; every
       failing check carries `fix` / `fixes` metadata (label, level, target, sudo flag).
       Failed services expose one button per unit; disk issues expose vacuum + tmp cleanup.
 - [x] New endpoints: `POST /api/troubleshoot/fix-all` (sequential batch runner with

@@ -55,7 +55,7 @@ body {
 .tab-btn.active::after { left: 18px; right: 18px; }
 
 .chart-card, .metric-card, .issues-panel, .top-processes, .table-container,
-.troubleshoot-header-card, .vm-audit-panel, .containers-panel, .pods-panel {
+.troubleshoot-header-card, .vm-audit-panel {
     position: relative;
     overflow: hidden;
 }
