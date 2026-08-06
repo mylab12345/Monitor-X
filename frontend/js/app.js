@@ -793,6 +793,10 @@ async function runFullHealthScan() {
         document.getElementById('health-summary-text').textContent = healthSummaryText(healthData);
 
         document.getElementById('last-scan-time').textContent = `Last Scan: ${new Date().toLocaleTimeString()}`;
+
+        // persist last scan for quick restore on tab switch
+        try { localStorage.setItem('monitorx-last-health', JSON.stringify(healthData)); } catch (_) {}
+
         renderHealthTrend();
         refreshFixEngine();
         loadFixHistory();
@@ -1050,6 +1054,9 @@ async function runFixAll(plan = null) {
 
     fixRunning = false;
     refreshFixEngine();
+    // Re-enable review button explicitly (refreshFixEngine only does it when count>0)
+    const reviewBtn = document.getElementById('fix-review-btn');
+    if (reviewBtn) reviewBtn.disabled = currentFixPlan.length === 0 || fixRunning;
     await refreshAfterFix();
 }
 
@@ -2709,6 +2716,21 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('fix-plan-apply')?.addEventListener('click', applySelectedFixes);
     document.getElementById('fix-history-refresh')?.addEventListener('click', loadFixHistory);
 
+    // Clear Fix History (new improvement)
+    const clearFixHistoryBtn = document.getElementById('fix-history-clear');
+    if (clearFixHistoryBtn) {
+        clearFixHistoryBtn.addEventListener('click', async () => {
+            if (!confirm('Clear all remediation history?')) return;
+            try {
+                await fetch(`${API_BASE}/api/troubleshoot/fix-history`, { method: 'DELETE' });
+                loadFixHistory();
+                showToast('Fix history cleared', 'info');
+            } catch (_) {
+                showToast('Could not clear history (endpoint may not exist)', 'warning');
+            }
+        });
+    }
+
     // Refresh button
     document.getElementById('refresh-btn').addEventListener('click', () => {
         if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
@@ -2788,7 +2810,12 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchLogs();
     });
 
-    document.getElementById('log-search-input')?.addEventListener('input', () => fetchLogs());
+    // Debounced log search
+    let logSearchTimer = null;
+    document.getElementById('log-search-input')?.addEventListener('input', () => {
+        clearTimeout(logSearchTimer);
+        logSearchTimer = setTimeout(() => fetchLogs(), 250);
+    });
     document.getElementById('fetch-logs-btn')?.addEventListener('click', () => fetchLogs());
 
     document.getElementById('copy-logs-btn')?.addEventListener('click', () => {
