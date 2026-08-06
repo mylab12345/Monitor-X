@@ -793,6 +793,7 @@ async function runFullHealthScan() {
         document.getElementById('health-summary-text').textContent = healthSummaryText(healthData);
 
         document.getElementById('last-scan-time').textContent = `Last Scan: ${new Date().toLocaleTimeString()}`;
+        renderHealthTrend();
         refreshFixEngine();
         loadFixHistory();
         if (!fixCapabilities) loadFixCapabilities();
@@ -803,6 +804,95 @@ async function runFullHealthScan() {
         btn.disabled = false;
         btn.textContent = '⚡ Run Diagnostic Scan';
     }
+}
+
+/* Fetch and draw the rolling System Health Index trend sparkline. */
+async function renderHealthTrend() {
+    const canvas = document.getElementById('health-trend-chart');
+    const label = document.getElementById('health-trend-label');
+    if (!canvas || !label) return;
+
+    let history = [];
+    try {
+        const res = await fetch(`${API_BASE}/api/troubleshoot/history?limit=40`);
+        if (res.ok) history = ((await res.json()).history) || [];
+    } catch (e) {
+        history = [];
+    }
+
+    // Always include the current score so the sparkline updates on every scan.
+    if (healthData && history.length && healthData.health_score !== undefined) {
+        const last = history[history.length - 1];
+        if (!last || last.score !== healthData.health_score) {
+            history.push({ score: healthData.health_score });
+        }
+    }
+
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    if (history.length < 2) {
+        label.textContent = 'Trend: run more scans to chart';
+        ctx.fillStyle = 'rgba(148,163,184,0.7)';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('—', W / 2, H / 2 + 4);
+        return;
+    }
+
+    const scores = history.map(h => h.score);
+    const min = Math.min(...scores), max = Math.max(...scores);
+    const pad = 4, bottom = H - pad, top = pad;
+    const range = (max - min) || 1;
+    const x = i => pad + (i * (W - 2 * pad)) / (scores.length - 1);
+    const y = s => bottom - ((s - min) / range) * (bottom - top);
+
+    // Grid line at 100 (perfect score).
+    ctx.strokeStyle = 'rgba(148,163,184,0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad, y(100));
+    ctx.lineTo(W - pad, y(100));
+    ctx.stroke();
+
+    // Area fill under the line.
+    const grad = ctx.createLinearGradient(0, top, 0, bottom);
+    grad.addColorStop(0, 'rgba(56,189,248,0.30)');
+    grad.addColorStop(1, 'rgba(56,189,248,0.02)');
+    ctx.beginPath();
+    scores.forEach((s, i) => i ? ctx.lineTo(x(i), y(s)) : ctx.moveTo(x(i), y(s)));
+    ctx.lineTo(x(scores.length - 1), bottom);
+    ctx.lineTo(x(0), bottom);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Line.
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    scores.forEach((s, i) => i ? ctx.lineTo(x(i), y(s)) : ctx.moveTo(x(i), y(s)));
+    ctx.stroke();
+
+    // Points colored by the severity of the scan they came from.
+    history.forEach((h, i) => {
+        let color = '#38bdf8';
+        if (h.critical > 0) color = '#ef4444';
+        else if (h.warning > 0) color = '#f59e0b';
+        ctx.beginPath();
+        ctx.arc(x(i), y(h.score), i === history.length - 1 ? 3 : 2, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+    });
+
+    // Direction + magnitude caption.
+    const prev = scores[scores.length - 2], curr = scores[scores.length - 1];
+    const delta = curr - prev;
+    const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
+    const tone = delta > 0 ? 'var(--success)' : delta < 0 ? 'var(--danger)' : 'var(--text-dim)';
+    label.textContent = `Trend: ${arrow} ${delta > 0 ? '+' : ''}${delta} (last ${scores.length} scans)`;
+    label.style.color = tone;
 }
 
 /* ==========================================================================
