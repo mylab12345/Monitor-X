@@ -751,6 +751,28 @@ canvas {
     color: var(--text-dim);
 }
 
+/* Health Index trend sparkline (Troubleshoot Hub header) */
+.health-trend-block {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+}
+
+.health-trend-block canvas {
+    background: rgba(8, 13, 26, 0.5);
+    border: 1px solid var(--border-card);
+    border-radius: 8px;
+    height: 48px;
+    display: block;
+}
+
+.health-trend-label {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    letter-spacing: 0.02em;
+}
+
 /* Sub Tab Nav */
 .sub-tab-nav {
     display: flex;

@@ -3,7 +3,9 @@ Monitoring Dashboard Backend - FastAPI Application
 Provides real-time system monitoring via WebSocket and REST API
 """
 import asyncio
+import collections
 import concurrent.futures
+import glob
 import json
 import logging
 import os
@@ -2961,6 +2963,10 @@ async def shutdown_system():
 SYSTEMCTL_BIN = shutil.which("systemctl") or "/usr/bin/systemctl"
 SYSCTL_BIN = shutil.which("sysctl") or "/usr/sbin/sysctl"
 JOURNALCTL_BIN = shutil.which("journalctl") or "/usr/bin/journalctl"
+
+# Rolling history of System Health Index snapshots (one per scan) so the hub
+# can show whether the host is improving or degrading over time.
+_HEALTH_HISTORY = collections.deque(maxlen=60)
 DMESG_BIN = shutil.which("dmesg") or "/usr/bin/dmesg"
 SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@_.:-]*\.service$")
 SERVICE_ACTIONS = ("start", "stop", "restart", "reload", "enable", "disable")
@@ -3595,7 +3601,297 @@ async def troubleshoot_health_check():
     except Exception:
         pass
 
+    # 12. CPU thermal / overheating detection
+    # Hot CPUs auto-throttle to survive, which silently tanks performance and
+    # shortens hardware life — so catching sustained high core temps is valuable.
+    therm_sensors = []
+    try:
+        if hasattr(psutil, "sensors_temperatures"):
+            for key, entries in (psutil.sensors_temperatures() or {}).items():
+                for e in entries:
+                    if getattr(e, "current", None) is not None:
+                        label = (e.label or key).strip() or key
+                        therm_sensors.append((label, float(e.current)))
+        if not therm_sensors:
+            for path in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+                try:
+                    with open(path) as fh:
+                        raw = float(fh.read().strip())
+                    therm_sensors.append((os.path.basename(os.path.dirname(path)), raw / 1000.0))
+                except Exception:
+                    pass
+    except Exception:
+        therm_sensors = []
+
+    if therm_sensors:
+        max_temp = max(t[1] for t in therm_sensors)
+        hottest = max(therm_sensors, key=lambda t: t[1])
+        value_str = ", ".join(f"{l}={v:.0f}°C" for l, v in therm_sensors[:3])
+        if max_temp > 90.0:
+            health_score -= 15
+            checks.append({
+                "id": "thermal",
+                "category": "Hardware",
+                "name": "CPU Thermal / Overheating",
+                "status": "critical",
+                "value": value_str,
+                "message": f"Core temperature critical ({hottest[0]} at {max_temp:.0f}°C). The CPU is likely thermal-throttling and degrading performance.",
+                "remediation": "Inspect cooling (fans, thermal paste, airflow), check 'sensors' output, and review 'dmesg -T | grep -i thermal' for throttling events. Reduce sustained load or shut the host down to cool it before further operation.",
+                "action": None,
+                "fix": None,
+            })
+        elif max_temp > 80.0:
+            health_score -= 8
+            checks.append({
+                "id": "thermal",
+                "category": "Hardware",
+                "name": "CPU Thermal / Overheating",
+                "status": "warning",
+                "value": value_str,
+                "message": f"Core temperature elevated ({hottest[0]} at {max_temp:.0f}°C). Approaching the throttle threshold.",
+                "remediation": "Monitor temperatures with 'watch -n 1 sensors'. Improve cooling or lower sustained workload before the CPU begins throttling.",
+                "action": None,
+                "fix": None,
+            })
+        else:
+            checks.append({
+                "id": "thermal",
+                "category": "Hardware",
+                "name": "CPU Thermal / Overheating",
+                "status": "ok",
+                "value": f"Peak {max_temp:.0f}°C",
+                "message": f"Core temperatures are within normal bounds (peak {hottest[0]} at {max_temp:.0f}°C).",
+                "remediation": None,
+                "fix": None,
+            })
+
+    # 13. Network interface errors & drops
+    # /proc/net/dev reports per-interface RX/TX error and dropped-frame counters;
+    # persistent growth here signals flapping links, duplex mismatch or NIC issues.
+    net_errors = []
+    try:
+        with open("/proc/net/dev") as fh:
+            for line in fh:
+                if ":" not in line:
+                    continue
+                iface, rest = line.split(":", 1)
+                iface = iface.strip()
+                if iface == "lo":
+                    continue
+                fields = rest.split()
+                if len(fields) >= 16:
+                    rx_err, rx_drop = int(fields[2]), int(fields[3])
+                    tx_err, tx_drop = int(fields[10]), int(fields[11])
+                    total = rx_err + rx_drop + tx_err + tx_drop
+                    if total > 0:
+                        net_errors.append((iface, rx_err, rx_drop, tx_err, tx_drop))
+    except Exception:
+        net_errors = []
+
+    if net_errors:
+        health_score -= 8
+        detail = ", ".join(f"{i}: {rxerr} RXerr/{rxd} RXdrop/{txerr} TXerr/{txd} TXdrop"
+                           for i, rxerr, rxd, txerr, txd in net_errors)
+        checks.append({
+            "id": "net_errors",
+            "category": "Network",
+            "name": "Interface Errors & Drops",
+            "status": "warning",
+            "value": f"{sum(e[1]+e[2]+e[3]+e[4] for e in net_errors)} cumulative errors on {len(net_errors)} interface(s)",
+            "message": detail,
+            "remediation": "Run 'ip -s link' and 'ethtool -S <iface>' to inspect counters. Persistent RX/TX errors usually indicate a duplex mismatch, bad cable/connector, or driver issues. Check 'dmesg | grep -iE \"link|eth|nic\"' for interface events.",
+            "action": None,
+            "fix": None,
+        })
+    else:
+        checks.append({
+            "id": "net_errors",
+            "category": "Network",
+            "name": "Interface Errors & Drops",
+            "status": "ok",
+            "value": "No RX/TX errors or drops on active interfaces",
+            "message": "Network interface error and drop counters are clean.",
+            "remediation": None,
+            "fix": None,
+        })
+
+    # 14. Process & thread pressure (thread exhaustion can mimic resource starvation)
+    threads_max = None
+    threads_total = None
+    try:
+        with open("/proc/sys/kernel/threads-max") as fh:
+            threads_max = int(fh.read().split()[0])
+        threads_total = 0
+        for proc in psutil.process_iter(["num_threads"]):
+            try:
+                threads_total += proc.info["num_threads"] or 0
+            except Exception:
+                pass
+    except Exception:
+        threads_max = threads_total = None
+
+    if threads_max and threads_total is not None:
+        thread_pct = (threads_total / threads_max * 100)
+        if thread_pct > 80.0:
+            health_score -= 8
+            checks.append({
+                "id": "thread_pressure",
+                "category": "Processes",
+                "name": "Process / Thread Pressure",
+                "status": "warning",
+                "value": f"{threads_total:,} threads of {threads_max:,} allowed ({thread_pct:.0f}%)",
+                "message": "The host is approaching its maximum thread count; thread exhaustion can stall services and cause 'resource temporarily unavailable' errors.",
+                "remediation": "Find the processes consuming the most threads (view the Threads column in the Process Manager). Restart runaway multi-threaded apps, raise 'ulimit -u' / tasks in '/etc/security/limits.conf', or reduce worker pool sizes.",
+                "action": "view_processes",
+                "fix": None,
+            })
+        else:
+            checks.append({
+                "id": "thread_pressure",
+                "category": "Processes",
+                "name": "Process / Thread Pressure",
+                "status": "ok",
+                "value": f"{threads_total:,} threads of {threads_max:,} allowed ({thread_pct:.0f}%)",
+                "message": "Process and thread counts are well within kernel limits.",
+                "remediation": None,
+                "fix": None,
+            })
+
+    # 15. Load trend (rising load often precedes a problem, even below a hard cap)
+    load1 = cpu["load_1min"]
+    load5 = cpu["load_5min"]
+    load15 = cpu["load_15min"]
+    rising = load1 > cores and load1 > load15 * 1.5 and load1 > load5
+    if rising:
+        health_score -= 8
+        checks.append({
+            "id": "load_trend",
+            "category": "CPU & Load",
+            "name": "Load Trend / Saturation",
+            "status": "warning",
+            "value": f"Load rising: 1m={load1:.2f} / 5m={load5:.2f} / 15m={load15:.2f} (cores: {cores})",
+            "message": "Short-term load is climbing sharply above the 15-minute average and already exceeds core count — an early indicator of a developing bottleneck.",
+            "remediation": "Open the Bottleneck Finder to see which processes are spiking. Investigate cron jobs, scheduled backups, or a service restarted in a tight loop before the system becomes fully saturated.",
+            "action": "view_bottlenecks",
+            "fix": None,
+        })
+    elif load1 <= cores * 0.7:
+        checks.append({
+            "id": "load_trend",
+            "category": "CPU & Load",
+            "name": "Load Trend / Saturation",
+            "status": "ok",
+            "value": f"Load stable: 1m={load1:.2f} / 5m={load5:.2f} / 15m={load15:.2f} (cores: {cores})",
+            "message": "Load is stable and comfortably under the core count.",
+            "remediation": None,
+            "fix": None,
+        })
+
+    # 16. NTP time synchronization
+    # Drift or a lost sync link causes log correlation and TLS/authentication
+    # failures that are hard to diagnose elsewhere.
+    ntp_synced = None
+    try:
+        rc, stdout, _ = await _run_cmd(["timedatectl", "show", "-p", "NTPSynchronized", "-p", "NTP"], timeout=8.0)
+        if rc == 0:
+            for field in stdout.decode(errors="replace").splitlines():
+                if field.startswith("NTPSynchronized="):
+                    ntp_synced = field.split("=", 1)[1].strip().lower() == "yes"
+    except Exception:
+        pass
+
+    if ntp_synced is False:
+        health_score -= 6
+        checks.append({
+            "id": "time_sync",
+            "category": "Kernel & Logs",
+            "name": "NTP Time Synchronization",
+            "status": "warning",
+            "value": "Clock not synchronized",
+            "message": "The system clock is not synchronized with an NTP source. Drift can break TLS validation, Kerberos/auth, and cross-host log correlation.",
+            "remediation": "Enable NTP with 'sudo timedatectl set-ntp true' and check the service via 'systemctl status systemd-timesyncd' (or chronyd). Verify with 'timedatectl'.",
+            "fix": None,
+        })
+    elif ntp_synced:
+        checks.append({
+            "id": "time_sync",
+            "category": "Kernel & Logs",
+            "name": "NTP Time Synchronization",
+            "status": "ok",
+            "value": "Clock synchronized via NTP",
+            "message": "The system clock is synchronized with an NTP source.",
+            "remediation": None,
+            "fix": None,
+        })
+
+    # 17. Security: recent failed authentication attempts
+    # A spike in failed SSH/password attempts usually indicates a brute-force
+    # scan in progress and is worth surfacing in the hub.
+    auth_log = None
+    for candidate in ("/var/log/auth.log", "/var/log/secure"):
+        if os.path.exists(candidate):
+            auth_log = candidate
+            break
+    failed_auth = None
+    if auth_log:
+        try:
+            with open(auth_log, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - 65536))
+                text = fh.read().decode(errors="replace")
+            failed_auth = len(re.findall(r"Failed password", text))
+        except Exception:
+            failed_auth = None
+
+    if failed_auth is not None:
+        if failed_auth >= 100:
+            health_score -= 12
+            checks.append({
+                "id": "security_auth",
+                "category": "Security",
+                "name": "Failed Login Attempts",
+                "status": "critical",
+                "value": f"{failed_auth} failed password attempts in recent auth log",
+                "message": "A high volume of failed login attempts detected — likely an active brute-force attack against this host.",
+                "remediation": "Consider installing fail2ban, tighten 'MaxAuthTries' and 'PermitRootLogin' in '/etc/ssh/sshd_config', and review the source addresses in the auth log. Restrict SSH with firewalld/ufw if exposed to the internet.",
+                "action": None,
+                "fix": None,
+            })
+        elif failed_auth >= 20:
+            health_score -= 6
+            checks.append({
+                "id": "security_auth",
+                "category": "Security",
+                "name": "Failed Login Attempts",
+                "status": "warning",
+                "value": f"{failed_auth} failed password attempts in recent auth log",
+                "message": "An elevated number of failed login attempts has been recorded.",
+                "remediation": "Review '/var/log/auth.log' (or '/var/log/secure') for the source addresses. Consider fail2ban to auto-block repeat offenders.",
+                "action": None,
+                "fix": None,
+            })
+        else:
+            checks.append({
+                "id": "security_auth",
+                "category": "Security",
+                "name": "Failed Login Attempts",
+                "status": "ok",
+                "value": f"{failed_auth} failed password attempt(s) in recent auth log",
+                "message": "No abnormal volume of failed login attempts.",
+                "remediation": None,
+                "fix": None,
+            })
+
     health_score = max(0, min(100, health_score))
+
+    # Record this scan's score for the trend sparkline (capped ring buffer).
+    _HEALTH_HISTORY.append({
+        "score": health_score,
+        "critical": sum(1 for c in checks if c["status"] == "critical"),
+        "warning": sum(1 for c in checks if c["status"] == "warning"),
+        "timestamp": datetime.now().isoformat(),
+    })
     
     status_summary = {
         "critical": sum(1 for c in checks if c["status"] == "critical"),
@@ -3609,6 +3905,17 @@ async def troubleshoot_health_check():
         "timestamp": datetime.now().isoformat(),
         "checks": checks
     }
+
+
+@app.get("/api/troubleshoot/history")
+async def troubleshoot_history(limit: int = Query(60, ge=1, le=120)):
+    """
+    Return the rolling System Health Index history (score over recent scans)
+    so the hub can render a trend sparkline and show whether the host is
+    improving or degrading over time.
+    """
+    snapshots = list(_HEALTH_HISTORY)
+    return {"history": snapshots[-limit:]}
 
 
 @app.get("/api/troubleshoot/logs")
