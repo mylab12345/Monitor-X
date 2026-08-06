@@ -189,7 +189,7 @@
         { group: 'Actions', items: [
             { label: 'Refresh Dashboard',   icon: '🔄', keys: ['r'],     action: () => click('#refresh-btn, #refresh-containers-btn') },
             { label: 'Run Diagnostic Scan', icon: '⚡', keys: ['D'],     action: () => { switchTab('troubleshoot'); click('#run-full-scan-btn'); } },
-            { label: 'Toggle Theme',        icon: '🌓', keys: ['t'],     action: () => click('#theme-toggle') },
+            { label: 'Cycle Theme',         icon: '🎨', keys: ['t'],     action: cycleTheme },
             { label: 'Toggle Live Log Tail',icon: '📡', keys: ['L'],     action: () => { switchTab('troubleshoot'); switchSubtab('log-inspector'); toggle('#log-autotail-toggle'); } },
             { label: 'Show Keyboard Shortcuts', icon: '⌨️', keys: ['?'], action: openHelp },
         ]},
@@ -334,7 +334,7 @@
         }
         // NOTE: plain 'r' is intentionally NOT handled here — app.js already
         // binds it to the refresh button. A second handler would refresh twice.
-        if (e.key.toLowerCase() === 't' && !e.ctrlKey && !e.metaKey && !e.altKey) { click('#theme-toggle'); }
+        if (e.key.toLowerCase() === 't' && !e.ctrlKey && !e.metaKey && !e.altKey) { cycleTheme(); }
         if (e.key === 'D' && !e.ctrlKey && !e.metaKey && !e.altKey) { switchTab('troubleshoot'); click('#run-full-scan-btn'); }
     });
 
@@ -372,6 +372,19 @@
     function switchSubtab(name) {
         const btn = document.querySelector(`.sub-tab-btn[data-subtab="${name}"]`);
         if (btn) btn.click();
+    }
+
+    /* ── Theme cycling (used by the 't' shortcut and command palette) ───── */
+    function cycleTheme() {
+        const order = (typeof THEMES !== 'undefined') ? THEMES
+                     : ['midnight', 'aurora', 'ember', 'forest', 'nebula', 'graphite'];
+        const current = Array.from(document.body.classList).find(c => c.startsWith('theme-'));
+        const cur = current ? current.replace('theme-', '') : 'midnight';
+        const idx = Math.max(0, order.indexOf(cur));
+        const next = order[(idx + 1) % order.length];
+        if (typeof setTheme === 'function') setTheme(next);
+        const label = next.charAt(0).toUpperCase() + next.slice(1);
+        showToast(`Theme: ${label}`, 'info', { icon: '🎨' });
     }
     function click(sel) {
         const el = document.querySelector(sel);

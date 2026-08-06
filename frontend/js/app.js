@@ -2664,18 +2664,57 @@ async function exportReport(format) {
 }
 
 /* Event Listeners Initialization */
+const THEMES = ['midnight', 'aurora', 'ember', 'forest', 'nebula', 'graphite'];
+
+/* Normalise legacy localStorage values to the new theme names.
+   Older builds stored 'dark' / 'light'; we map them onto the closest theme. */
+function normalizeTheme(value) {
+    if (value === 'light') return 'aurora';
+    if (value === 'dark') return 'midnight';
+    return THEMES.includes(value) ? value : 'midnight';
+}
+
+function syncThemeMenu(name) {
+    document.querySelectorAll('.theme-option').forEach(opt => {
+        const active = opt.dataset.theme === name;
+        opt.classList.toggle('active', active);
+        opt.setAttribute('aria-checked', active ? 'true' : 'false');
+    });
+    const btn = document.getElementById('theme-picker-btn');
+    if (btn) {
+        btn.setAttribute('aria-expanded', document.getElementById('theme-picker')?.classList.contains('open') ? 'true' : 'false');
+        btn.title = `Switch theme (current: ${name})`;
+    }
+}
+
+function setTheme(name, persist = true) {
+    const theme = normalizeTheme(name);
+    // Clear every theme class (and the legacy light flag), then apply the chosen one.
+    THEMES.forEach(t => document.body.classList.remove('theme-' + t));
+    document.body.classList.remove('light-theme');
+    document.body.classList.add('theme-' + theme);
+    // Aurora is the light theme — the existing light-mode overlay handling keys off .light-theme.
+    if (theme === 'aurora') document.body.classList.add('light-theme');
+    if (persist) {
+        try { localStorage.setItem('monitorx-theme', theme); } catch (_) {}
+    }
+    syncThemeMenu(theme);
+}
+
 function applySavedTheme() {
     const savedTheme = localStorage.getItem('monitorx-theme');
-    const prefersLight = window.matchMedia?.('(prefers-color-scheme: light)').matches;
-    if (savedTheme === 'light' || (!savedTheme && prefersLight)) {
-        document.body.classList.add('light-theme');
+    // First visit: follow the OS preference for light vs dark.
+    if (!savedTheme) {
+        const prefersLight = window.matchMedia?.('(prefers-color-scheme: light)').matches;
+        setTheme(prefersLight ? 'aurora' : 'midnight', false);
+        return;
     }
-    const themeButton = document.getElementById('theme-toggle');
-    if (themeButton) {
-        const isLight = document.body.classList.contains('light-theme');
-        themeButton.textContent = isLight ? '☀️' : '🌙';
-        themeButton.setAttribute('aria-label', isLight ? 'Switch to dark theme' : 'Switch to light theme');
-    }
+    setTheme(savedTheme, false);
+}
+
+function closeThemeMenu() {
+    document.getElementById('theme-picker')?.classList.remove('open');
+    syncThemeMenu(normalizeTheme(localStorage.getItem('monitorx-theme')));
 }
 
 function focusActiveTabSearch() {
@@ -2739,13 +2778,27 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast('Refreshed data', 'info');
     });
 
-    // Theme toggle
-    document.getElementById('theme-toggle').addEventListener('click', () => {
-        document.body.classList.toggle('light-theme');
-        const isLight = document.body.classList.contains('light-theme');
-        document.getElementById('theme-toggle').textContent = isLight ? '☀️' : '🌙';
-        document.getElementById('theme-toggle').setAttribute('aria-label', isLight ? 'Switch to dark theme' : 'Switch to light theme');
-        localStorage.setItem('monitorx-theme', isLight ? 'light' : 'dark');
+    // Theme picker: toggle the menu, choose a theme, close on outside click / Esc.
+    const picker = document.getElementById('theme-picker');
+    const pickerBtn = document.getElementById('theme-picker-btn');
+    pickerBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        picker.classList.toggle('open');
+        syncThemeMenu(normalizeTheme(localStorage.getItem('monitorx-theme')));
+    });
+    picker.querySelectorAll('.theme-option').forEach(opt => {
+        opt.addEventListener('click', () => {
+            setTheme(opt.dataset.theme);
+            picker.classList.remove('open');
+        });
+    });
+    document.addEventListener('click', (e) => {
+        if (picker.classList.contains('open') && !picker.contains(e.target)) {
+            closeThemeMenu();
+        }
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && picker.classList.contains('open')) closeThemeMenu();
     });
 
     // Lightweight keyboard shortcuts: navigation only, never intercept typing.
