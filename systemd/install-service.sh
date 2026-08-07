@@ -133,14 +133,16 @@ fi
 
 # Fallback path: a narrowly scoped sudo policy matching the EXACT argv MonitorX
 # executes. The command forms must stay in sync with backend/main.py:
-#   virsh --quiet --no-pkttyagent --connect <URI> <verb> -- <domain>
+#   virsh --quiet [--no-pkttyagent] --connect <URI> <verb> -- <domain>
 #     (lifecycle verbs: start shutdown reboot destroy suspend resume)
-#   virsh --quiet --no-pkttyagent --connect <URI> console -- <domain>
+#   virsh --quiet [--no-pkttyagent] --connect <URI> console -- <domain>
 #     (serial console)
-#   virsh --quiet --no-pkttyagent --connect <URI> setvcpus <domain> ...
-#   virsh --quiet --no-pkttyagent --connect <URI> setmem <domain> ...
-#   virsh --quiet --no-pkttyagent --connect <URI> setmaxmem <domain> ...
+#   virsh --quiet [--no-pkttyagent] --connect <URI> setvcpus <domain> ...
+#   virsh --quiet [--no-pkttyagent] --connect <URI> setmem <domain> ...
+#   virsh --quiet [--no-pkttyagent] --connect <URI> setmaxmem <domain> ...
 #     (CPU/RAM resize fallback)
+# --no-pkttyagent is present only on libvirt ≥11.4; older hosts reject it,
+# so both variants are whitelisted for compatibility.
 #
 # Note: '--no-ask-password' (used by earlier releases) is a systemctl flag that
 # virsh rejects outright, and 'poweroff' is not a virsh verb -- the forced-stop
@@ -148,22 +150,30 @@ fi
 # The ':' characters in the URI are escaped for sudoers' parser.
 if [ -n "$VIRSH_BIN" ]; then
     echo "  - Installing limited VM-control sudo policy at $SUDOERS_VM_DEST..."
-    VIRSH_PREFIX="$VIRSH_BIN --quiet --no-pkttyagent --connect $(printf '%s' "$LIBVIRT_URI" | sed 's/:/\\:/g')"
+    # --no-pkttyagent was added in libvirt 11.4 (2025). Hosts with older virsh
+    # reject it as "unsupported option". The dashboard now transparently retries
+    # without the flag, so the sudoers policy must whitelist BOTH forms.
+    VIRSH_ESCAPED_URI="$(printf '%s' "$LIBVIRT_URI" | sed 's/:/\\:/g')"
+    VIRSH_PREFIX="$VIRSH_BIN --quiet --connect $VIRSH_ESCAPED_URI"
+    VIRSH_PREFIX_PKT="$VIRSH_BIN --quiet --no-pkttyagent --connect $VIRSH_ESCAPED_URI"
     {
         echo "# Managed by MonitorX. Required for dashboard lifecycle, console, and resize controls on libvirt/KVM guests."
         echo "# Must match _virsh_command()/_build_virsh_modify_command() in backend/main.py."
+        echo "# Both --no-pkttyagent and legacy forms are allowed for compat with older libvirt."
         printf 'Cmnd_Alias MONITORX_VIRSH = '
         first=1
-        for verb in start shutdown reboot destroy suspend resume; do
-            [ $first -eq 1 ] || printf ', '
-            printf '%s %s -- *' "$VIRSH_PREFIX" "$verb"
-            first=0
+        for prefix in "$VIRSH_PREFIX" "$VIRSH_PREFIX_PKT"; do
+            for verb in start shutdown reboot destroy suspend resume; do
+                [ $first -eq 1 ] || printf ', '
+                printf '%s %s -- *' "$prefix" "$verb"
+                first=0
+            done
+            # Serial console (virsh console) and CPU/RAM resize fallbacks.
+            printf ', %s console -- *' "$prefix"
+            printf ', %s setvcpus *' "$prefix"
+            printf ', %s setmem *' "$prefix"
+            printf ', %s setmaxmem *' "$prefix"
         done
-        # Serial console (virsh console) and CPU/RAM resize fallbacks.
-        printf ', %s console -- *' "$VIRSH_PREFIX"
-        printf ', %s setvcpus *' "$VIRSH_PREFIX"
-        printf ', %s setmem *' "$VIRSH_PREFIX"
-        printf ', %s setmaxmem *' "$VIRSH_PREFIX"
         printf '\n'
         echo "$CURRENT_USER ALL=(root) NOPASSWD: MONITORX_VIRSH"
     } | sudo tee "$SUDOERS_VM_DEST" > /dev/null

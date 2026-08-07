@@ -940,6 +940,35 @@ def _virsh_present() -> bool:
     return bool(shutil.which(VIRSH_BIN) or Path(VIRSH_BIN).exists())
 
 
+_virsh_has_pkttyagent_cache: Optional[bool] = None
+
+
+def _virsh_supports_no_pkttyagent() -> bool:
+    """Whether this host's virsh understands ``--no-pkttyagent``.
+
+    Added in libvirt 11.4 (2025). Older binaries reject the flag with
+    ``unsupported option '--no-pkttyagent'``. The result is cached for the
+    lifetime of the process because virsh binaries do not change at runtime.
+    """
+    global _virsh_has_pkttyagent_cache
+    if _virsh_has_pkttyagent_cache is not None:
+        return _virsh_has_pkttyagent_cache
+    try:
+        import subprocess
+        result = subprocess.run(
+            [VIRSH_BIN, "--help"],
+            capture_output=True, text=True, timeout=5,
+        )
+        out = (result.stdout or "") + (result.stderr or "")
+        _virsh_has_pkttyagent_cache = "--no-pkttyagent" in out
+    except Exception:
+        # If we cannot probe, assume the older behaviour so the retry
+        # without the flag will be attempted; the sudoers policy now
+        # whitelists both forms.
+        _virsh_has_pkttyagent_cache = False
+    return _virsh_has_pkttyagent_cache
+
+
 async def _virsh_fallback_allowed() -> bool:
     """Report whether the ``virsh`` fallback path can actually run.
 
@@ -952,6 +981,9 @@ async def _virsh_fallback_allowed() -> bool:
     "authorized" for a policy that whitelisted the invalid
     ``--no-ask-password`` form. Asking sudo to validate the real argv removes
     the guesswork entirely.
+
+    Both ``--no-pkttyagent`` and legacy forms are checked because the updated
+    sudoers policy whitelists both for compatibility with libvirt <11.4.
     """
     if not _virsh_present():
         return False
@@ -961,21 +993,30 @@ async def _virsh_fallback_allowed() -> bool:
     sudo = shutil.which("sudo")
     if not sudo:
         return False
-    probe = _virsh_command("start", "monitorx-capability-probe")
-    if not probe:
-        return False
-    # probe[0] is the sudo binary and probe[1] is "-n"; validate the rest.
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            sudo, "-n", "-l", "--", *probe[2:],
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(proc.wait(), timeout=10)
-        return proc.returncode == 0
-    except (asyncio.TimeoutError, OSError):
-        return False
+
+    # Probe both variants; either being allowed means the fallback can run
+    # (the executor will retry without --no-pkttyagent on old virsh).
+    probes = []
+    probe_pkt = _virsh_command("start", "monitorx-capability-probe")
+    if probe_pkt:
+        probes.append(probe_pkt)
+        no_pkt = _without_pkttyagent_argv(probe_pkt)
+        if no_pkt:
+            probes.append(no_pkt)
+    for probe in probes:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sudo, "-n", "-l", "--", *probe[2:],
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=10)
+            if proc.returncode == 0:
+                return True
+        except (asyncio.TimeoutError, OSError):
+            continue
+    return False
 
 
 @app.get("/api/vms/capabilities")
@@ -1095,6 +1136,26 @@ async def _resolve_domain(vm_id: str, conn=None):
     return None, f"VM '{vm_id}' was not found."
 
 
+def _without_pkttyagent_argv(cmd: List[str]) -> Optional[List[str]]:
+    """Return *cmd* without ``--no-pkttyagent`` if present, else ``None``.
+
+    ``--no-pkttyagent`` was added in libvirt 11.4 (2025-06-02) to suppress
+    polkit noise. Hosts with an older virsh reject it with
+    ``unsupported option '--no-pkttyagent'``. Callers that hit that error
+    should transparently retry without the flag so resize and lifecycle
+    controls keep working on older distros. The sudoers policy now whitelists
+    *both* forms (``install-service.sh``), so the retry remains authorized.
+    """
+    if "--no-pkttyagent" not in cmd:
+        return None
+    return [c for c in cmd if c != "--no-pkttyagent"]
+
+
+def _is_pkttyagent_unsupported_error(msg: str) -> bool:
+    low = (msg or "").lower()
+    return "unsupported option" in low and "no-pkttyagent" in low
+
+
 def _virsh_command(action: str, vm_id: str) -> List[str]:
     """Build the argv for a constrained virsh lifecycle command.
 
@@ -1110,12 +1171,10 @@ def _virsh_command(action: str, vm_id: str) -> List[str]:
         is plainly visible in the UI.
       * ``--`` terminates option parsing so a domain name is never mistaken
         for a flag.
-      * ``--no-pkttyagent`` MUST stay in the argv: the sudoers policy shipped
-        by systemd/install-service.sh whitelists exactly
-        ``virsh --quiet --no-pkttyagent --connect <URI> <verb> -- <domain>``
-        and sudo matches the full command line. Omitting it makes sudo reject
-        every control command with "not allowed to execute" — the same class
-        of mismatch that silently broke VM controls in earlier releases.
+      * ``--no-pkttyagent`` is included when the host virsh supports it
+        (libvirt ≥11.4); older virsh versions reject it as
+        ``unsupported option`` and callers transparently retry without it.
+        The sudoers policy whitelists both variants.
     """
     verb = VM_ACTION_TO_VIRSH[action]
     args = [
@@ -1137,6 +1196,10 @@ async def _run_virsh_action(action: str, vm_id: str) -> Optional[str]:
     """Run a constrained virsh command as the privileged fallback path.
 
     Returns ``None`` on success, or a human-readable error string on failure.
+
+    Older virsh (<11.4) rejects ``--no-pkttyagent`` with
+    ``unsupported option``. The sudoers policy now allows both forms, so we
+    transparently retry without the flag when that specific error is seen.
     """
     if not _virsh_present():
         return ("virsh is not installed on this host. Install the libvirt-clients "
@@ -1146,35 +1209,48 @@ async def _run_virsh_action(action: str, vm_id: str) -> Optional[str]:
     if not command:
         return "sudo is not installed. Re-run systemd/install-service.sh to configure VM controls."
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        return f"Could not execute {command[0]}: file not found."
-    except PermissionError:
-        return f"Could not execute {command[0]}: permission denied."
-
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=VM_ACTION_TIMEOUT
-        )
-    except asyncio.TimeoutError:
+    async def _exec(cmd: List[str]) -> tuple:
         try:
-            proc.kill()
-            await proc.communicate()
-        except (ProcessLookupError, Exception):
-            pass
-        return (f"virsh {action} timed out after {int(VM_ACTION_TIMEOUT)}s. "
-                f"The guest may be unresponsive; try Poweroff to force-stop it.")
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            return None, f"Could not execute {cmd[0]}: file not found.", -1
+        except PermissionError:
+            return None, f"Could not execute {cmd[0]}: permission denied.", -1
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=VM_ACTION_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.communicate()
+            except (ProcessLookupError, Exception):
+                pass
+            return None, (f"virsh {action} timed out after {int(VM_ACTION_TIMEOUT)}s. "
+                          f"The guest may be unresponsive; try Poweroff to force-stop it."), -1
+        err = (stderr.decode(errors="replace").strip()
+               or stdout.decode(errors="replace").strip())
+        return proc, err, proc.returncode
 
-    err = (stderr.decode(errors="replace").strip()
-           or stdout.decode(errors="replace").strip())
-    if proc.returncode != 0:
-        return _humanize_vm_error(err, action, proc.returncode)
+    proc, err, rc = await _exec(command)
+    if proc is None:
+        return err
+    if rc != 0 and _is_pkttyagent_unsupported_error(err):
+        retry = _without_pkttyagent_argv(command)
+        if retry:
+            proc2, err2, rc2 = await _exec(retry)
+            if proc2 is None:
+                return err2
+            if rc2 == 0:
+                return None
+            err, rc = err2, rc2
+    if rc != 0:
+        return _humanize_vm_error(err, action, rc)
     return None
 
 
@@ -1282,9 +1358,13 @@ async def _run_native_action(action: str, vm_id: str):
 async def resize_vm(vm_id: str, payload: VMResizeRequest):
     """Resize VM CPU and/or memory via libvirt API.
 
-    For both running and stopped VMs the endpoint first increases the
-    maximum (if the requested value exceeds it) and then sets the current
-    allocation so the change takes effect immediately on next boot or live.
+    Works for both running and powered-off guests:
+
+    * running  -> live (+ config for persistence) when possible, config-only fallback
+    * powered-off -> config only
+    The maximum is raised first when the requested size exceeds the current
+    maximum, otherwise ``cannot set memory higher than max memory``/
+    ``greater than max vcpus`` errors are unavoidable.
     """
     if not LIBVIRT_AVAILABLE:
         raise HTTPException(status_code=503, detail="libvirt is not installed on this host.")
@@ -1297,7 +1377,7 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
     if lookup_error:
         raise HTTPException(status_code=404, detail=lookup_error)
 
-    # Determine whether the VM is running so we pick the right affect flag.
+    # Determine whether the VM is running.
     is_running = False
     try:
         info = await _run_libvirt(domain.info, timeout=5.0)
@@ -1305,214 +1385,344 @@ async def resize_vm(vm_id: str, payload: VMResizeRequest):
     except Exception:
         pass
 
-    # For a running VM we modify live state; for a stopped one we modify the
-    # persistent config so the change takes effect on next start.
-    affect_flag = (libvirt.VIR_DOMAIN_AFFECT_LIVE if is_running
-                   else libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+    # Helpers to obtain the *persistent* maximum from XML + info fallback.
+    async def _get_domain_max(tgt_domain) -> tuple:
+        """Return (max_mem_kib, max_vcpus) for *tgt_domain*."""
+        max_mem = None
+        max_vcpus = None
+        try:
+            xml = await _run_libvirt(lambda: tgt_domain.XMLDesc(0), timeout=5.0)
+            root = ET.fromstring(xml)
+            mem_elem = root.find("memory")
+            if mem_elem is not None and mem_elem.text and mem_elem.text.strip().isdigit():
+                v = int(mem_elem.text.strip())
+                unit = (mem_elem.get("unit") or "KiB").strip()
+                if unit == "KiB":
+                    max_mem = v
+                elif unit == "MiB":
+                    max_mem = v * 1024
+                elif unit == "GiB":
+                    max_mem = v * 1024 * 1024
+                elif unit == "kB":
+                    max_mem = v
+                else:
+                    max_mem = v
+            vcpu_elem = root.find("vcpu")
+            if vcpu_elem is not None and vcpu_elem.text:
+                try:
+                    max_vcpus = int(vcpu_elem.text.strip())
+                except ValueError:
+                    pass
+        except Exception:
+            pass
+        # Fallback to domain.info when XML did not yield a value.
+        try:
+            info2 = await _run_libvirt(tgt_domain.info, timeout=5.0)
+            if max_mem is None:
+                max_mem = info2[1]  # maxMem KiB — NOT info[2]
+            if max_vcpus is None:
+                max_vcpus = info2[3]
+        except Exception:
+            pass
+        return max_mem, max_vcpus
+
+    # Libvirt flag compatibility shims — VIR_DOMAIN_MEM_MAXIMUM /
+    # VIR_DOMAIN_VCPU_MAXIMUM are the documented flags, but older bindings
+    # expose only VIR_DOMAIN_AFFECT_MAXIMUM (same bit 4).
+    VCPU_MAX = getattr(libvirt, "VIR_DOMAIN_VCPU_MAXIMUM",
+                       getattr(libvirt, "VIR_DOMAIN_AFFECT_MAXIMUM", 4))
+    MEM_MAX = getattr(libvirt, "VIR_DOMAIN_MEM_MAXIMUM",
+                      getattr(libvirt, "VIR_DOMAIN_AFFECT_MAXIMUM", 4))
+
+    async def _resolve_rw_domain():
+        """Return a domain handle bound to the RW connection if available."""
+        try:
+            conn, _ = await _ensure_libvirt_rw_conn()
+            if conn:
+                d, _ = await _resolve_domain(vm_id, conn=conn)
+                if d:
+                    return d
+        except Exception:
+            pass
+        return domain
 
     messages = []
     errors: List[str] = []
 
     # ------------------------------------------------------------------
-    # vCPUs
+    # vCPUs  (live + power-off, with max bump when needed)
     # ------------------------------------------------------------------
     if payload.vcpus is not None:
-        # Step 1: increase max vcpus if needed
+        tgt = await _resolve_rw_domain()
+
+        # Step 1: raise persistent max when the request exceeds it.
+        # For a running guest the live max may stay capped on some
+        # hypervisors — that is swallowed and reported as a persistent-only
+        # change later.
         try:
-            conn, _ = await _ensure_libvirt_rw_conn()
-            tgt_domain = domain
-            if conn:
-                d, _ = await _resolve_domain(vm_id, conn=conn)
-                if d:
-                    tgt_domain = d
-            # Read current max
-            info = await _run_libvirt(tgt_domain.info, timeout=5.0)
-            current_max = info[3]  # nrVirtCpu (max)
-            if payload.vcpus > current_max:
-                # Increase max via persistent config first
-                await _run_libvirt(
-                    lambda: tgt_domain.setVcpusFlags(
-                        payload.vcpus,
-                        libvirt.VIR_DOMAIN_AFFECT_CONFIG | libvirt.VIR_DOMAIN_AFFECT_MAXIMUM,
-                    ),
-                    timeout=10.0,
-                )
-                # If running, also increase live max so the next step succeeds
+            _, max_vcpus_val = await _get_domain_max(tgt)
+            # Fallback when XML parsing failed to yield a max.
+            if max_vcpus_val is None:
+                info_tmp = await _run_libvirt(tgt.info, timeout=5.0)
+                max_vcpus_val = info_tmp[3]
+            if payload.vcpus > max_vcpus_val:
+                try:
+                    await _run_libvirt(
+                        lambda: tgt.setVcpusFlags(
+                            payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_CONFIG | VCPU_MAX
+                        ),
+                        timeout=10.0,
+                    )
+                except Exception as e:
+                    # Native config max failed — try virsh fallback now,
+                    # otherwise the following current-set will hit
+                    # "greater than max".
+                    cmd = _build_virsh_modify_command(
+                        "setvcpus", vm_id, str(payload.vcpus), "--maximum", "--config"
+                    )
+                    err = await _run_virsh_modify(cmd) if cmd else "virsh unavailable"
+                    if err:
+                        # Keep exception for outer handling but record it.
+                        raise RuntimeError(f"vCPU max (config) failed: {err}") from e
                 if is_running:
                     try:
                         await _run_libvirt(
-                            lambda: tgt_domain.setVcpusFlags(
-                                payload.vcpus,
-                                libvirt.VIR_DOMAIN_AFFECT_LIVE | libvirt.VIR_DOMAIN_AFFECT_MAXIMUM,
+                            lambda: tgt.setVcpusFlags(
+                                payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_LIVE | VCPU_MAX
                             ),
                             timeout=10.0,
                         )
                     except Exception:
-                        pass  # some hypervisors don't support live max increase
+                        # Hypervisors that forbid LIVE|MAXIMUM (QEMU/KVM must
+                        # set max via --config only) will hit this.
+                        pass
         except Exception as exc:
-            # If native fails, try virsh setvcpus --maximum
-            try:
-                max_args = ["--maximum", "--config"]
+            # Only treat as hard error when virsh also failed — otherwise the
+            # current-set below will still succeed via --config.
+            msg = str(exc)
+            if "vCPU max" not in msg and "maximum" not in msg.lower():
+                # Attempt virsh max bump as last resort.
                 cmd = _build_virsh_modify_command(
-                    "setvcpus", vm_id, str(payload.vcpus), *max_args,
+                    "setvcpus", vm_id, str(payload.vcpus), "--maximum", "--config"
                 )
-                if cmd:
-                    err = await _run_virsh_modify(cmd)
-                    if err:
-                        errors.append(f"vCPU max: {err}")
+                err = await _run_virsh_modify(cmd) if cmd else "virsh unavailable"
+                if err:
+                    errors.append(f"vCPU max: {err}")
                 else:
-                    errors.append("vCPU max: virsh fallback unavailable")
-            except Exception:
-                errors.append(f"vCPU max increase failed: {exc}")
+                    # Max bump via virsh succeeded — clear the native error.
+                    pass
+            else:
+                errors.append(f"vCPU max: {msg}")
 
-        # Step 2: set current vcpus
-        # If the VM is running, try to set live first. If that fails (because
-        # the hypervisor doesn't support live max increase), fall back to
-        # persistent config and tell the user it applies on next boot.
-        live_failed = False
+        # Step 2: set current count.
+        # Running: LIVE first, then CONFIG for persistence.
+        # Powered-off: CONFIG only.
+        vcpu_live_failed = False
+        vcpu_live_succeeded = False
         try:
-            conn, _ = await _ensure_libvirt_rw_conn()
-            tgt_domain = domain
-            if conn:
-                d, _ = await _resolve_domain(vm_id, conn=conn)
-                if d:
-                    tgt_domain = d
+            tgt = await _resolve_rw_domain()
             if is_running:
                 try:
                     await _run_libvirt(
-                        lambda: tgt_domain.setVcpusFlags(payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_LIVE),
+                        lambda: tgt.setVcpusFlags(payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_LIVE),
                         timeout=10.0,
                     )
+                    vcpu_live_succeeded = True
                     messages.append(f"vCPUs set to {payload.vcpus}")
-                except Exception:
-                    live_failed = True
-                    raise  # fall through to config fallback below
-            if not is_running or live_failed:
+                except Exception as e:
+                    vcpu_live_failed = True
+                    low = str(e).lower()
+                    # "greater than max" here means the max bump above failed
+                    # (live max is still capped). Fall through to CONFIG path.
+                    if "greater than max" not in low and "max allowable" not in low:
+                        raise
+            if not is_running or vcpu_live_failed:
                 await _run_libvirt(
-                    lambda: tgt_domain.setVcpusFlags(payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_CONFIG),
+                    lambda: tgt.setVcpusFlags(payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_CONFIG),
                     timeout=10.0,
                 )
-                if live_failed:
-                    messages.append(
-                        f"vCPUs set to {payload.vcpus} (persistent — will take effect after reboot; "
-                        f"live max is capped at the current hardware limit)")
+                if vcpu_live_failed:
+                    # Live failed but persistent succeeded — still useful.
+                    if not vcpu_live_succeeded:
+                        messages.append(
+                            f"vCPUs set to {payload.vcpus} (persistent — will take effect after reboot; "
+                            f"live max is capped by the hypervisor)"
+                        )
                 else:
-                    messages.append(f"vCPUs set to {payload.vcpus}")
+                    if not is_running:
+                        messages.append(f"vCPUs set to {payload.vcpus}")
+            # If running and live succeeded, also persist config for next boot.
+            if is_running and vcpu_live_succeeded:
+                try:
+                    await _run_libvirt(
+                        lambda: tgt.setVcpusFlags(payload.vcpus, libvirt.VIR_DOMAIN_AFFECT_CONFIG),
+                        timeout=10.0,
+                    )
+                except Exception:
+                    pass
         except libvirt.libvirtError as exc:
             msg = str(exc)
             low = msg.lower()
             if ("read only" in low or "denied" in low
-                    or "greater than max" in low or "max allowable" in low):
-                extra_args = ["--config"] if (not is_running or live_failed) else []
-                cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus), *extra_args)
-                if cmd:
-                    err = await _run_virsh_modify(cmd)
+                    or "greater than max" in low or "max allowable" in low
+                    or "operation not supported" in low
+                    or "cannot set" in low):
+                if is_running:
+                    # Running: try LIVE via virsh, then CONFIG for persistence.
+                    # At least one must succeed.
+                    cmd_live = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus), "--live")
+                    err_live = await _run_virsh_modify(cmd_live) if cmd_live else "virsh unavailable"
+                    cmd_cfg = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus), "--config")
+                    err_cfg = await _run_virsh_modify(cmd_cfg) if cmd_cfg else "virsh unavailable"
+                    if err_live is None and err_cfg is None:
+                        messages.append(f"vCPUs set to {payload.vcpus} (via virsh)")
+                    elif err_live is None:
+                        messages.append(f"vCPUs set to {payload.vcpus} (via virsh live)")
+                        if err_cfg:
+                            messages.append(f"vCPUs persistent config pending: {err_cfg}")
+                    elif err_cfg is None:
+                        messages.append(f"vCPUs set to {payload.vcpus} (persistent via virsh; reboot to apply)")
+                        if err_live:
+                            # Live failed likely due to max cap; not fatal when config succeeded.
+                            pass
+                    else:
+                        errors.append(f"vCPUs: live: {err_live}; config: {err_cfg}")
+                else:
+                    cmd = _build_virsh_modify_command("setvcpus", vm_id, str(payload.vcpus), "--config")
+                    err = await _run_virsh_modify(cmd) if cmd else "virsh unavailable"
                     if err:
                         errors.append(f"vCPUs: {err}")
                     else:
                         messages.append(f"vCPUs set to {payload.vcpus} (via virsh)")
-                else:
-                    errors.append("vCPUs: permission denied and virsh unavailable")
             else:
                 errors.append(f"vCPUs: {msg}")
         except Exception as exc:
             errors.append(f"vCPUs: {exc}")
 
+        # Ensure virsh path covers CONFIG for running guests even when native
+        # LIVE succeeded but native CONFIG silently failed — already attempted
+        # above, so no further action needed.
+
     # ------------------------------------------------------------------
-    # Memory
+    # Memory (live balloon + power-off config, with max bump)
     # ------------------------------------------------------------------
     if payload.memory_mb is not None:
         mem_kib = payload.memory_mb * 1024
+        tgt = await _resolve_rw_domain()
 
-        # Step 1: increase max memory if needed
+        # Step 1: raise persistent max when needed (must happen before current).
+        # Use XML-derived maxMem; fallback to info[1] (the original code used
+        # info[2] which is *current* memory, so "higher than max" was never
+        # caught correctly).
         try:
-            conn, _ = await _ensure_libvirt_rw_conn()
-            tgt_domain = domain
-            if conn:
-                d, _ = await _resolve_domain(vm_id, conn=conn)
-                if d:
-                    tgt_domain = d
-            info = await _run_libvirt(tgt_domain.info, timeout=5.0)
-            current_max_mem = info[2]  # maxMem in KiB
-            if mem_kib > current_max_mem:
-                await _run_libvirt(
-                    lambda: tgt_domain.setMemoryFlags(
-                        mem_kib,
-                        libvirt.VIR_DOMAIN_AFFECT_CONFIG | libvirt.VIR_DOMAIN_AFFECT_MAXIMUM,
-                    ),
-                    timeout=10.0,
-                )
+            max_mem_val, _ = await _get_domain_max(tgt)
+            if max_mem_val is None:
+                info_tmp = await _run_libvirt(tgt.info, timeout=5.0)
+                max_mem_val = info_tmp[1]
+            if mem_kib > max_mem_val:
+                try:
+                    await _run_libvirt(
+                        lambda: tgt.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_CONFIG | MEM_MAX),
+                        timeout=10.0,
+                    )
+                except Exception as e:
+                    cmd = _build_virsh_modify_command("setmaxmem", vm_id, str(mem_kib), "--config")
+                    err = await _run_virsh_modify(cmd) if cmd else "virsh unavailable"
+                    if err:
+                        raise RuntimeError(f"Memory max (config) failed: {err}") from e
                 if is_running:
                     try:
                         await _run_libvirt(
-                            lambda: tgt_domain.setMemoryFlags(
-                                mem_kib,
-                                libvirt.VIR_DOMAIN_AFFECT_LIVE | libvirt.VIR_DOMAIN_AFFECT_MAXIMUM,
-                            ),
+                            lambda: tgt.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_LIVE | MEM_MAX),
                             timeout=10.0,
                         )
                     except Exception:
+                        # Live max increase often unsupported (requires guest
+                        # not using NUMA, and QEMU hotplug slots). Persisted
+                        # max above is sufficient for --config current.
                         pass
-        except Exception:
-            # Virsh fallback: setmaxmem --config for stopped, plain for running
-            try:
-                max_args = ["--config"]
-                cmd = _build_virsh_modify_command(
-                    "setmaxmem", vm_id, str(mem_kib), *max_args,
-                )
-                if cmd:
-                    err = await _run_virsh_modify(cmd)
-                    if err:
-                        errors.append(f"Memory max: {err}")
-                else:
-                    errors.append("Memory max: virsh fallback unavailable")
-            except Exception as exc:
-                errors.append(f"Memory max increase failed: {exc}")
+                    # Also attempt virsh live max for hosts where native failed
+                    # but virsh supports it.
+                    cmd_live = _build_virsh_modify_command("setmaxmem", vm_id, str(mem_kib), "--live")
+                    # Best-effort, ignore errors.
+                    if cmd_live:
+                        await _run_virsh_modify(cmd_live)
+        except Exception as exc:
+            msg = str(exc)
+            if "Memory max" not in msg:
+                cmd = _build_virsh_modify_command("setmaxmem", vm_id, str(mem_kib), "--config")
+                err = await _run_virsh_modify(cmd) if cmd else "virsh unavailable"
+                if err:
+                    errors.append(f"Memory max: {err}")
+            else:
+                errors.append(f"Memory max: {msg}")
 
-        # Step 2: set current memory
+        # Step 2: set current allocation (balloon).
         mem_live_failed = False
+        mem_live_succeeded = False
         try:
-            conn, _ = await _ensure_libvirt_rw_conn()
-            tgt_domain = domain
-            if conn:
-                d, _ = await _resolve_domain(vm_id, conn=conn)
-                if d:
-                    tgt_domain = d
+            tgt = await _resolve_rw_domain()
             if is_running:
                 try:
                     await _run_libvirt(
-                        lambda: tgt_domain.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_LIVE),
+                        lambda: tgt.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_LIVE),
                         timeout=10.0,
                     )
+                    mem_live_succeeded = True
                     messages.append(f"Memory set to {payload.memory_mb} MiB")
-                except Exception:
+                except Exception as e:
                     mem_live_failed = True
-                    raise
+                    low = str(e).lower()
+                    if "greater than max" not in low and "cannot set memory higher than max" not in low:
+                        raise
             if not is_running or mem_live_failed:
                 await _run_libvirt(
-                    lambda: tgt_domain.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_CONFIG),
+                    lambda: tgt.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_CONFIG),
                     timeout=10.0,
                 )
-                if mem_live_failed:
+                if mem_live_failed and not mem_live_succeeded:
                     messages.append(
-                        f"Memory set to {payload.memory_mb} MiB (persistent — will take effect after reboot)")
-                else:
+                        f"Memory set to {payload.memory_mb} MiB (persistent — will take effect after reboot; "
+                        f"live max is capped or balloon unavailable)"
+                    )
+                elif not is_running:
                     messages.append(f"Memory set to {payload.memory_mb} MiB")
+            if is_running and mem_live_succeeded:
+                # Persist for next boot as well.
+                try:
+                    await _run_libvirt(
+                        lambda: tgt.setMemoryFlags(mem_kib, libvirt.VIR_DOMAIN_AFFECT_CONFIG),
+                        timeout=10.0,
+                    )
+                except Exception:
+                    pass
         except libvirt.libvirtError as exc:
             msg = str(exc)
             low = msg.lower()
             if ("read only" in low or "denied" in low
-                    or "greater than max" in low or "max allowable" in low):
-                extra_args = ["--config"] if (not is_running or mem_live_failed) else []
-                cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), *extra_args)
-                if cmd:
-                    err = await _run_virsh_modify(cmd)
+                    or "greater than max" in low or "cannot set memory higher than max" in low
+                    or "max allowable" in low or "operation not supported" in low
+                    or "cannot set" in low):
+                if is_running:
+                    cmd_live = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), "--live")
+                    err_live = await _run_virsh_modify(cmd_live) if cmd_live else "virsh unavailable"
+                    cmd_cfg = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), "--config")
+                    err_cfg = await _run_virsh_modify(cmd_cfg) if cmd_cfg else "virsh unavailable"
+                    if err_live is None and err_cfg is None:
+                        messages.append(f"Memory set to {payload.memory_mb} MiB (via virsh)")
+                    elif err_live is None:
+                        messages.append(f"Memory set to {payload.memory_mb} MiB (via virsh live)")
+                    elif err_cfg is None:
+                        messages.append(f"Memory set to {payload.memory_mb} MiB (persistent via virsh; reboot to apply)")
+                    else:
+                        errors.append(f"Memory: live: {err_live}; config: {err_cfg}")
+                else:
+                    cmd = _build_virsh_modify_command("setmem", vm_id, str(mem_kib), "--config")
+                    err = await _run_virsh_modify(cmd) if cmd else "virsh unavailable"
                     if err:
                         errors.append(f"Memory: {err}")
                     else:
                         messages.append(f"Memory set to {payload.memory_mb} MiB (via virsh)")
-                else:
-                    errors.append("Memory: permission denied and virsh unavailable")
             else:
                 errors.append(f"Memory: {msg}")
         except Exception as exc:
@@ -1672,9 +1882,10 @@ def _build_virsh_modify_command(subcmd: str, vm_id: str, *args) -> List[str]:
     """Build a virsh command for domain modification via the fallback path.
 
     The argv shape must stay in sync with the sudoers policy installed by
-    systemd/install-service.sh (``virsh --quiet --no-pkttyagent --connect
-    <URI> <subcmd> <domain> …``); in particular ``--no-pkttyagent`` is part
-    of the whitelisted command, not an optional extra.
+    systemd/install-service.sh (``virsh --quiet [--no-pkttyagent] --connect
+    <URI> <subcmd> <domain> …``). ``--no-pkttyagent`` is included for
+    libvirt ≥11.4 and transparently stripped on retry when the host virsh
+    rejects it as ``unsupported option``; both variants are whitelisted.
     """
     base = [VIRSH_BIN, "--quiet", "--no-pkttyagent", "--connect", LIBVIRT_URI,
             subcmd, vm_id, *args]
@@ -1687,23 +1898,45 @@ def _build_virsh_modify_command(subcmd: str, vm_id: str, *args) -> List[str]:
 
 
 async def _run_virsh_modify(command: List[str]) -> Optional[str]:
-    """Run a virsh modify command and return error string or None on success."""
+    """Run a virsh modify command and return error string or None on success.
+
+    Transparently retries without ``--no-pkttyagent`` when the host virsh is
+    older than 11.4 and rejects that flag. Both forms are allowed by the
+    updated sudoers policy.
+    """
     if not command:
         return "sudo/virsh not available"
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *command, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        err = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
-        if proc.returncode != 0:
-            return err or f"virsh command failed (exit code {proc.returncode})"
-        return None
-    except asyncio.TimeoutError:
-        return "virsh command timed out"
-    except Exception as e:
-        return str(e)
+
+    async def _exec(cmd: List[str]) -> Optional[str]:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            err = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+            if proc.returncode != 0:
+                return err or f"virsh command failed (exit code {proc.returncode})"
+            return None
+        except asyncio.TimeoutError:
+            return "virsh command timed out"
+        except Exception as e:
+            return str(e)
+
+    err = await _exec(command)
+    if err and _is_pkttyagent_unsupported_error(err):
+        retry = _without_pkttyagent_argv(command)
+        if retry:
+            retry_err = await _exec(retry)
+            # If retry succeeds (None) return success; otherwise return
+            # the retry's error only if it is not the same pkttyagent complaint.
+            if retry_err is None:
+                return None
+            # Prefer the retry error when it is more informative than the
+            # original unsupported-option noise.
+            if not _is_pkttyagent_unsupported_error(retry_err):
+                return retry_err
+    return err
 
 
 
@@ -2602,7 +2835,14 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
     # with "unable to open a pseudo-terminal" under pipes.
     await websocket.send_json({"type": "serial"})
 
-    cmd = [VIRSH_BIN, "--quiet", "--no-pkttyagent", "--connect", LIBVIRT_URI, "console", "--", vm_id]
+    # Prefer --no-pkttyagent on hosts that support it (libvirt ≥11.4);
+    # older virsh rejects it. Try with the flag first when supported;
+    # virsh-help probing decides the default, but even when probing says
+    # supported we still handle an unsupported error by retrying below.
+    if _virsh_supports_no_pkttyagent():
+        cmd = [VIRSH_BIN, "--quiet", "--no-pkttyagent", "--connect", LIBVIRT_URI, "console", "--", vm_id]
+    else:
+        cmd = [VIRSH_BIN, "--quiet", "--connect", LIBVIRT_URI, "console", "--", vm_id]
     if os.geteuid() != 0:
         sudo = shutil.which("sudo")
         if sudo:
