@@ -30,6 +30,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 import psutil
 
@@ -61,6 +62,9 @@ MONITORX_AUTH_TOKEN = os.environ.get("MONITORX_AUTH_TOKEN", "").strip()
 AUTH_COOKIE_NAME = "monitorx_auth"
 AUTH_EXEMPT_PATHS = {"/api/health", "/api/auth/login", "/api/auth/logout"}
 MAX_DIAGNOSTIC_OUTPUT = 100_000
+# Optional hardware integrations must never hold up the first dashboard frame.
+# A later telemetry frame fills them in once available.
+OPTIONAL_COLLECTOR_TIMEOUT = max(float(os.environ.get("MONITORX_OPTIONAL_TIMEOUT", "2")), 0.5)
 
 # Global state tracking for rate calculations
 # Network/disk rates are derived from a previous sample; serialize snapshots.
@@ -321,6 +325,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        # Hashed/versioned static asset URLs are safe to keep locally. This
+        # removes repeated transfers and parsing on every dashboard visit.
+        if request.url.path.startswith("/static/"):
+            response.headers.setdefault("Cache-Control", "public, max-age=604800, immutable")
         return response
 
 
@@ -335,6 +343,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
@@ -1923,9 +1932,9 @@ async def collect_all_stats() -> SystemStats:
         # the same cadence as CPU/memory. This keeps a slow libvirt or hardware
         # sensor read from making the UI feel laggy.
         gpu, vms, thermal = await asyncio.gather(
-            _cached_optional("gpu", get_gpu_stats, 5.0),
-            _cached_optional("vms", get_vm_stats, 3.0),
-            _cached_optional("thermal", get_thermal_stats, 5.0),
+            _cached_optional("gpu", get_gpu_stats, 5.0, timeout=OPTIONAL_COLLECTOR_TIMEOUT),
+            _cached_optional("vms", get_vm_stats, 3.0, timeout=OPTIONAL_COLLECTOR_TIMEOUT),
+            _cached_optional("thermal", get_thermal_stats, 5.0, timeout=OPTIONAL_COLLECTOR_TIMEOUT),
         )
 
         # Persist the real fields used by the collectors. The old code looked

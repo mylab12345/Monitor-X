@@ -15,6 +15,10 @@ let fixCapabilities = null;
 let fixRunning = false;
 let currentFixPlan = [];
 let authPromptVisible = false;
+// WebSocket frames may arrive faster than the browser can paint. Coalesce DOM
+// work to one animation frame so controls stay responsive under load.
+let pendingDashboardData = null;
+let dashboardFramePending = false;
 
 // Keep one native fetch reference so protected deployments can surface a
 // friendly login prompt without changing every API call site.
@@ -258,8 +262,18 @@ function connectWebSocket() {
                 const ann = document.getElementById('sparkline-announce');
                 if (ann && statsData) ann.textContent = `CPU ${(statsData.cpu?.percent ?? '--')}%, Memory ${(statsData.memory?.percent ?? '--')}%`;
             }, 1000);
-            updateDashboard(statsData);
-            updateLastUpdate();
+            pendingDashboardData = statsData;
+            if (!dashboardFramePending) {
+                dashboardFramePending = true;
+                requestAnimationFrame(() => {
+                    dashboardFramePending = false;
+                    const frame = pendingDashboardData;
+                    pendingDashboardData = null;
+                    if (!frame) return;
+                    updateDashboard(frame);
+                    updateLastUpdate();
+                });
+            }
         } catch (e) { console.error('Error parsing WebSocket frame:', e); }
     };
     ws.onclose = () => {
@@ -323,21 +337,30 @@ function updateCpu(cpu) {
     document.getElementById('cpu-freq').textContent = (cpu.frequency_current / 1000).toFixed(2) + ' GHz';
 
     const barsContainer = document.getElementById('cpu-bars');
-    barsContainer.innerHTML = '';
-    if (cpu.percent_per_core) {
-        cpu.percent_per_core.forEach((pct, idx) => {
+    const perCore = cpu.percent_per_core || [];
+    // Core count changes rarely. Keep existing nodes and only mutate values,
+    // avoiding a full layout/repaint of every bar on each telemetry frame.
+    if (barsContainer.children.length !== perCore.length) {
+        const fragment = document.createDocumentFragment();
+        perCore.forEach(() => {
             const bar = document.createElement('div');
             bar.className = 'cpu-bar';
             const fill = document.createElement('div');
             fill.className = 'cpu-bar-fill';
-            fill.style.height = Math.min(pct, 100) + '%';
-            if (pct > 85) fill.classList.add('danger');
-            else if (pct > 65) fill.classList.add('warning');
             bar.appendChild(fill);
-            bar.title = `Core ${idx}: ${pct.toFixed(1)}%`;
-            barsContainer.appendChild(bar);
+            fragment.appendChild(bar);
         });
+        barsContainer.replaceChildren(fragment);
     }
+    perCore.forEach((pct, idx) => {
+        const bar = barsContainer.children[idx];
+        const fill = bar?.firstElementChild;
+        if (!bar || !fill) return;
+        fill.style.height = Math.min(pct, 100) + '%';
+        fill.classList.toggle('danger', pct > 85);
+        fill.classList.toggle('warning', pct > 65 && pct <= 85);
+        bar.title = `Core ${idx}: ${pct.toFixed(1)}%`;
+    });
 }
 
 function updateMemory(mem) {
