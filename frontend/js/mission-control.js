@@ -301,8 +301,11 @@
         });
     }
 
-    pollBottlenecks(); setInterval(pollBottlenecks, 15000);
-    pollServices(); setInterval(pollServices, 30000);
+    // These host-wide scans can be expensive on busy machines. They are not
+    // required for first paint, so let the WebSocket render the dashboard
+    // before starting background mission enrichment.
+    setTimeout(pollBottlenecks, 2500); setInterval(pollBottlenecks, 15000);
+    setTimeout(pollServices, 4000); setInterval(pollServices, 30000);
 
     /* ── DOY mission clock (UTC day-of-year, NASA ground-console format) ── */
     function pad(n, w) { w = w || 2; return String(n).padStart(w, '0'); }

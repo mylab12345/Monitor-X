@@ -32,14 +32,16 @@
                 if (bootStatus) bootStatus.textContent = bootSteps[step];
                 if (bootFill) bootFill.style.width = (8 + (step / (bootSteps.length - 1)) * 92) + '%';
             }
-        }, 320);
+        }, 90);
+        // The boot screen is decorative only. Keep it brief so it never delays
+        // navigation or controls while the live telemetry connection is ready.
         setTimeout(function () {
             clearInterval(bootTimer);
             if (bootFill) bootFill.style.width = '100%';
             if (bootStatus) bootStatus.textContent = bootSteps[bootSteps.length - 1];
             boot.classList.add('done');
-            setTimeout(function () { if (boot && boot.parentNode) boot.parentNode.removeChild(boot); }, 650);
-        }, 1700);
+            setTimeout(function () { if (boot && boot.parentNode) boot.parentNode.removeChild(boot); }, 180);
+        }, 460);
     }
 
     /* ── Mission Elapsed Time (MET) + UTC clock ─────────────────────────── */

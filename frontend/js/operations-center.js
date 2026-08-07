@@ -116,6 +116,8 @@
 
     const focus = localStorage.getItem('monitorx-focus') === 'true'; document.body.classList.toggle('focus-mode', focus); el('focus-mode-btn').setAttribute('aria-pressed', focus);
     el('focus-mode-btn').onclick = () => { const active = document.body.classList.toggle('focus-mode'); localStorage.setItem('monitorx-focus', active); el('focus-mode-btn').setAttribute('aria-pressed', active); };
-    load(); setInterval(load, 30000); window.addEventListener('resize', () => overview && draw(overview.history));
+    // History is secondary to live controls; defer its first network/database
+    // query until the dashboard has painted and the datalink can connect.
+    setTimeout(load, 1200); setInterval(load, 30000); window.addEventListener('resize', () => overview && draw(overview.history));
   });
 })();
