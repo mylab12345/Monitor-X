@@ -3091,6 +3091,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
     setupModalAccessibility();
 
+    // Layout Width Toggle (Fluid vs Capped Centered)
+    const layoutToggleBtn = document.getElementById('layout-toggle-btn');
+    if (layoutToggleBtn) {
+        const setFluid = (isFluid) => {
+            document.body.classList.toggle('layout-fluid', isFluid);
+            layoutToggleBtn.setAttribute('aria-pressed', isFluid);
+            layoutToggleBtn.title = isFluid ? "Switch to Centered Layout" : "Switch to Fluid Layout";
+            // Dispatch resize to trigger charts redraw
+            window.dispatchEvent(new Event('resize'));
+        };
+        
+        // Initial load from localStorage
+        const isFluidSaved = localStorage.getItem('monitorx-layout-fluid') === 'true';
+        setFluid(isFluidSaved);
+        
+        layoutToggleBtn.addEventListener('click', () => {
+            const currentFluid = document.body.classList.contains('layout-fluid');
+            const nextFluid = !currentFluid;
+            localStorage.setItem('monitorx-layout-fluid', nextFluid);
+            setFluid(nextFluid);
+        });
+    }
+
     // Startup initialization. The WebSocket sends the first snapshot; keep a
     // delayed REST fallback only for blocked/very slow WebSocket upgrades.
     connectWebSocket();

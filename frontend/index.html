@@ -101,6 +101,7 @@
                 <button type="button" class="btn-icon" id="report-export-btn" title="Export diagnostics report" aria-label="Export diagnostics report">📄</button>
                 <button type="button" class="btn-icon" onclick="document.body.classList.toggle('large-text')" title="Large text" aria-label="Toggle large text">Aa</button>
                 <button type="button" class="btn-icon" onclick="document.getElementById('charts-row').classList.toggle('collapsed')" title="Toggle charts" aria-label="Toggle charts">📊</button>
+                <button type="button" class="btn-icon" id="layout-toggle-btn" title="Toggle Layout Width" aria-label="Toggle layout width">🖥️</button>
             </div>
         </header>
 
@@ -142,184 +143,197 @@
                     </div>
                     <span class="context-status">LIVE TELEMETRY · 2 SECOND REFRESH</span>
                 </section>
-                <!-- Prioritized incidents, historical trend, and operator controls -->
-                <section class="operations-center" aria-label="Operations center">
-                    <div class="operations-top">
-                        <div><h2>◈ OPERATIONS CENTER</h2><div class="operations-summary" id="ops-summary">Loading incident intelligence…</div></div>
-                        <div class="ops-controls">
-                            <select id="ops-range" class="filter-select" aria-label="Historical time range"><option value="1h">Last hour</option><option value="6h">6 hours</option><option value="24h">24 hours</option><option value="7d">7 days</option></select>
-                            <button type="button" class="btn btn-sm btn-outline" id="ops-rule-btn" title="Manage alert rules and webhook notifications">⚙️ Alert rules</button>
-                            <button type="button" class="btn btn-sm btn-outline" id="focus-mode-btn" aria-pressed="false">Focus mode</button>
-                        </div>
-                    </div>
-                    <div id="ops-incidents" class="ops-incidents"></div>
-                    <canvas id="ops-history-chart" class="ops-chart" aria-label="CPU, memory, and disk historical trend"></canvas>
-                    <div id="ops-detail" class="ops-detail">History is retained locally for 30 days. Alerts are evaluated every live snapshot.</div>
-                </section>
-                <!-- Sparkline Trend Charts Banner -->
-                <div class="charts-row">
-                    <div class="chart-card">
-                        <div class="chart-header">
-                            <span><span class="dot-accent blue"></span> CPU Utilization (30s)</span>
-                            <span class="chart-value" id="cpu-chart-val">0%</span>
-                        </div>
-                        <canvas id="cpu-canvas" height="65"></canvas>
-                    </div>
-                    <div class="chart-card">
-                        <div class="chart-header">
-                            <span><span class="dot-accent green"></span> Memory Usage (30s)</span>
-                            <span class="chart-value" id="mem-chart-val">0%</span>
-                        </div>
-                        <canvas id="mem-canvas" height="65"></canvas>
-                    </div>
-                    <div class="chart-card">
-                        <div class="chart-header">
-                            <span><span class="dot-accent purple"></span> Network Bandwidth Rate</span>
-                            <span class="chart-value" id="net-chart-val">↓ 0 KB/s | ↑ 0 KB/s</span>
-                        </div>
-                        <canvas id="net-canvas" height="65"></canvas>
-                    </div>
-                </div>
+                
+                <!-- Modern 2-Column Responsive Dashboard Layout Grid -->
+                <div class="dashboard-grid-layout">
+                    
+                    <!-- Left (Main) Column: Operations Center & Resource Metrics Grid -->
+                    <div class="dashboard-main-col">
+                        <!-- Prioritized incidents, historical trend, and operator controls -->
+                        <section class="operations-center" aria-label="Operations center">
+                            <div class="operations-top">
+                                <div><h2>◈ OPERATIONS CENTER</h2><div class="operations-summary" id="ops-summary">Loading incident intelligence…</div></div>
+                                <div class="ops-controls">
+                                    <select id="ops-range" class="filter-select" aria-label="Historical time range"><option value="1h">Last hour</option><option value="6h">6 hours</option><option value="24h">24 hours</option><option value="7d">7 days</option></select>
+                                    <button type="button" class="btn btn-sm btn-outline" id="ops-rule-btn" title="Manage alert rules and webhook notifications">⚙️ Alert rules</button>
+                                    <button type="button" class="btn btn-sm btn-outline" id="focus-mode-btn" aria-pressed="false">Focus mode</button>
+                                </div>
+                            </div>
+                            <div id="ops-incidents" class="ops-incidents"></div>
+                            <canvas id="ops-history-chart" class="ops-chart" aria-label="CPU, memory, and disk historical trend"></canvas>
+                            <div id="ops-detail" class="ops-detail">History is retained locally for 30 days. Alerts are evaluated every live snapshot.</div>
+                        </section>
 
-                <!-- Primary Metrics Grid -->
-                <div class="metrics-grid">
-                    <!-- CPU Card -->
-                    <div class="metric-card" id="cpu-card">
-                        <div class="card-header">
-                            <h2>CPU Utilization</h2>
-                            <span class="metric-value" id="cpu-total">0%</span>
-                        </div>
-                        <div class="cpu-bars" id="cpu-bars"></div>
-                        <div class="card-footer-grid">
-                            <div>Logical Cores: <b id="cpu-cores">0</b></div>
-                            <div>Clock Frequency: <b id="cpu-freq">0 GHz</b></div>
-                            <div class="full-row">Load Average (1/5/15m): <b id="cpu-load">0, 0, 0</b></div>
+                        <!-- Primary Metrics Grid -->
+                        <div class="metrics-grid">
+                            <!-- CPU Card -->
+                            <div class="metric-card" id="cpu-card">
+                                <div class="card-header">
+                                    <h2>CPU Utilization</h2>
+                                    <span class="metric-value" id="cpu-total">0%</span>
+                                </div>
+                                <div class="cpu-bars" id="cpu-bars"></div>
+                                <div class="card-footer-grid">
+                                    <div>Logical Cores: <b id="cpu-cores">0</b></div>
+                                    <div>Clock Frequency: <b id="cpu-freq">0 GHz</b></div>
+                                    <div class="full-row">Load Average (1/5/15m): <b id="cpu-load">0, 0, 0</b></div>
+                                </div>
+                            </div>
+
+                            <!-- RAM Card -->
+                            <div class="metric-card" id="ram-card">
+                                <div class="card-header">
+                                    <h2>System Memory</h2>
+                                    <span class="metric-value" id="ram-percent">0%</span>
+                                </div>
+                                <div class="progress-bar">
+                                    <div class="progress-fill" id="ram-bar" style="width: 0%;"></div>
+                                </div>
+                                <div class="card-footer-grid">
+                                    <div>Used RAM: <b id="ram-used">0 MB</b></div>
+                                    <div>Available: <b id="ram-free">0 MB</b></div>
+                                    <div>Buffers/Cache: <b id="ram-cached">0 MB</b></div>
+                                    <div>Swap Used: <b id="ram-swap">0%</b></div>
+                                </div>
+                            </div>
+
+                            <!-- Disk Card -->
+                            <div class="metric-card" id="disk-card">
+                                <div class="card-header">
+                                    <h2>Storage Drives & I/O</h2>
+                                    <span class="metric-value" id="disk-percent">0%</span>
+                                </div>
+                                <div class="disk-list" id="disk-list"></div>
+                                <div class="card-footer-grid">
+                                    <div>Disk Read Speed: <b id="disk-read-speed">0 B/s</b></div>
+                                    <div>Disk Write Speed: <b id="disk-write-speed">0 B/s</b></div>
+                                </div>
+                            </div>
+
+                            <!-- Network Card -->
+                            <div class="metric-card" id="network-card">
+                                <div class="card-header">
+                                    <h2>Network Throughput</h2>
+                                    <div class="net-speed-badges">
+                                        <span class="badge rx-badge">↓ <b id="net-rx-speed">0 KB/s</b></span>
+                                        <span class="badge tx-badge">↑ <b id="net-tx-speed">0 KB/s</b></span>
+                                    </div>
+                                </div>
+                                <div class="net-list" id="net-list"></div>
+                                <div class="card-footer-grid">
+                                    <div>Active Inet Connections: <b id="net-conn">0</b></div>
+                                    <div>Rx/Tx Errors+Drops: <b id="net-errors">0</b></div>
+                                </div>
+                            </div>
+
+                            <!-- GPU Card -->
+                            <div class="metric-card" id="gpu-card">
+                                <div class="card-header">
+                                    <h2>GPU Accelerators</h2>
+                                    <span class="metric-value" id="gpu-total">N/A</span>
+                                </div>
+                                <div id="gpu-content">
+                                    <p class="no-data">No NVIDIA GPU hardware detected</p>
+                                </div>
+                            </div>
+
+                            <!-- Thermal / Sensors Card -->
+                            <div class="metric-card" id="thermal-card">
+                                <div class="card-header">
+                                    <h2>CPU &amp; System Sensors</h2>
+                                    <span class="metric-value" id="thermal-peak" style="font-size:1.3rem;">N/A</span>
+                                </div>
+                                <div id="thermal-content">
+                                    <p class="no-data">No temperature sensors exposed by this host.</p>
+                                </div>
+                                <div class="card-footer-grid">
+                                    <div>Thermal Zones: <b id="thermal-count">0</b></div>
+                                    <div>Fans: <b id="thermal-fans">0</b></div>
+                                </div>
+                            </div>
+
+                            <!-- System Info Card -->
+                            <section class="metric-card system-metadata-card" id="system-card" aria-labelledby="system-metadata-title">
+                                <div class="card-header">
+                                    <div>
+                                        <p class="card-eyebrow">Host identity</p>
+                                        <h2 id="system-metadata-title">System Metadata</h2>
+                                    </div>
+                                    <span class="metadata-live" aria-label="System metadata updates with live telemetry">Live</span>
+                                </div>
+                                <dl class="system-info" id="system-info" aria-live="polite" aria-busy="true">
+                                    <div class="system-info-placeholder"><dt>Loading host metadata</dt><dd>—</dd></div>
+                                </dl>
+                            </section>
                         </div>
                     </div>
-
-                    <!-- RAM Card -->
-                    <div class="metric-card" id="ram-card">
-                        <div class="card-header">
-                            <h2>System Memory</h2>
-                            <span class="metric-value" id="ram-percent">0%</span>
-                        </div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" id="ram-bar" style="width: 0%;"></div>
-                        </div>
-                        <div class="card-footer-grid">
-                            <div>Used RAM: <b id="ram-used">0 MB</b></div>
-                            <div>Available: <b id="ram-free">0 MB</b></div>
-                            <div>Buffers/Cache: <b id="ram-cached">0 MB</b></div>
-                            <div>Swap Used: <b id="ram-swap">0%</b></div>
-                        </div>
-                    </div>
-
-                    <!-- Disk Card -->
-                    <div class="metric-card" id="disk-card">
-                        <div class="card-header">
-                            <h2>Storage Drives & I/O</h2>
-                            <span class="metric-value" id="disk-percent">0%</span>
-                        </div>
-                        <div class="disk-list" id="disk-list"></div>
-                        <div class="card-footer-grid">
-                            <div>Disk Read Speed: <b id="disk-read-speed">0 B/s</b></div>
-                            <div>Disk Write Speed: <b id="disk-write-speed">0 B/s</b></div>
-                        </div>
-                    </div>
-
-                    <!-- Network Card -->
-                    <div class="metric-card" id="network-card">
-                        <div class="card-header">
-                            <h2>Network Throughput</h2>
-                            <div class="net-speed-badges">
-                                <span class="badge rx-badge">↓ <b id="net-rx-speed">0 KB/s</b></span>
-                                <span class="badge tx-badge">↑ <b id="net-tx-speed">0 KB/s</b></span>
+                    
+                    <!-- Right (Sidebar) Column: Sparkline Charts, Live Alerts, Top Process Consumers -->
+                    <div class="dashboard-side-col">
+                        <!-- Sparkline Trend Charts Banner -->
+                        <div class="charts-row" id="charts-row">
+                            <div class="chart-card">
+                                <div class="chart-header">
+                                    <span><span class="dot-accent blue"></span> CPU Utilization (30s)</span>
+                                    <span class="chart-value" id="cpu-chart-val">0%</span>
+                                </div>
+                                <canvas id="cpu-canvas" height="65"></canvas>
+                            </div>
+                            <div class="chart-card">
+                                <div class="chart-header">
+                                    <span><span class="dot-accent green"></span> Memory Usage (30s)</span>
+                                    <span class="chart-value" id="mem-chart-val">0%</span>
+                                </div>
+                                <canvas id="mem-canvas" height="65"></canvas>
+                            </div>
+                            <div class="chart-card">
+                                <div class="chart-header">
+                                    <span><span class="dot-accent purple"></span> Network Bandwidth Rate</span>
+                                    <span class="chart-value" id="net-chart-val">↓ 0 KB/s | ↑ 0 KB/s</span>
+                                </div>
+                                <canvas id="net-canvas" height="65"></canvas>
                             </div>
                         </div>
-                        <div class="net-list" id="net-list"></div>
-                        <div class="card-footer-grid">
-                            <div>Active Inet Connections: <b id="net-conn">0</b></div>
-                            <div>Rx/Tx Errors+Drops: <b id="net-errors">0</b></div>
-                        </div>
-                    </div>
 
-                    <!-- GPU Card -->
-                    <div class="metric-card" id="gpu-card">
-                        <div class="card-header">
-                            <h2>GPU Accelerators</h2>
-                            <span class="metric-value" id="gpu-total">N/A</span>
-                        </div>
-                        <div id="gpu-content">
-                            <p class="no-data">No NVIDIA GPU hardware detected</p>
-                        </div>
-                    </div>
-
-                    <!-- Thermal / Sensors Card -->
-                    <div class="metric-card" id="thermal-card">
-                        <div class="card-header">
-                            <h2>CPU &amp; System Sensors</h2>
-                            <span class="metric-value" id="thermal-peak" style="font-size:1.3rem;">N/A</span>
-                        </div>
-                        <div id="thermal-content">
-                            <p class="no-data">No temperature sensors exposed by this host.</p>
-                        </div>
-                        <div class="card-footer-grid">
-                            <div>Thermal Zones: <b id="thermal-count">0</b></div>
-                            <div>Fans: <b id="thermal-fans">0</b></div>
-                        </div>
-                    </div>
-
-                    <!-- System Info Card -->
-                    <section class="metric-card system-metadata-card" id="system-card" aria-labelledby="system-metadata-title">
-                        <div class="card-header">
-                            <div>
-                                <p class="card-eyebrow">Host identity</p>
-                                <h2 id="system-metadata-title">System Metadata</h2>
+                        <!-- OS Live Alerts Banner -->
+                        <div class="issues-panel">
+                            <div class="card-header">
+                                <h2>⚠️ Real-Time OS Diagnostics & Alerts</h2>
+                                <div class="issue-badges">
+                                    <span class="badge badge-danger" id="issues-count-critical">0 Critical</span>
+                                    <span class="badge badge-warning" id="issues-count-warning">0 Warning</span>
+                                    <button type="button" class="btn btn-sm btn-outline" id="clear-issues-btn" title="Dismiss all current alerts">✕ Clear Issues</button>
+                                </div>
                             </div>
-                            <span class="metadata-live" aria-label="System metadata updates with live telemetry">Live</span>
+                            <div class="issues-list" id="issues-list"></div>
                         </div>
-                        <dl class="system-info" id="system-info" aria-live="polite" aria-busy="true">
-                            <div class="system-info-placeholder"><dt>Loading host metadata</dt><dd>—</dd></div>
-                        </dl>
-                    </section>
-                </div>
 
-                <!-- OS Live Alerts Banner -->
-                <div class="issues-panel">
-                    <div class="card-header">
-                        <h2>⚠️ Real-Time OS Diagnostics & Alerts</h2>
-                        <div class="issue-badges">
-                            <span class="badge badge-danger" id="issues-count-critical">0 Critical</span>
-                            <span class="badge badge-warning" id="issues-count-warning">0 Warning</span>
-                            <button type="button" class="btn btn-sm btn-outline" id="clear-issues-btn" title="Dismiss all current alerts">✕ Clear Issues</button>
+                        <!-- Top Processes -->
+                        <div class="top-processes">
+                            <div class="card-header">
+                                <h2>🔥 Top Process Consumers</h2>
+                                <button type="button" class="btn btn-sm btn-outline" id="view-all-procs-btn">View All Processes →</button>
+                            </div>
+                            <div class="table-container">
+                                <table class="data-table compact">
+                                    <thead>
+                                        <tr>
+                                            <th>PID</th>
+                                            <th>Process Name</th>
+                                            <th>CPU %</th>
+                                            <th>RAM %</th>
+                                            <th>RSS Memory</th>
+                                            <th>Status</th>
+                                            <th>User</th>
+                                            <th>Threads</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="top-processes-body"></tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
-                    <div class="issues-list" id="issues-list"></div>
-                </div>
-
-                <!-- Top Processes -->
-                <div class="top-processes">
-                    <div class="card-header">
-                        <h2>🔥 Top Process Consumers</h2>
-                        <button type="button" class="btn btn-sm btn-outline" id="view-all-procs-btn">View All Processes →</button>
-                    </div>
-                    <div class="table-container">
-                        <table class="data-table compact">
-                            <thead>
-                                <tr>
-                                    <th>PID</th>
-                                    <th>Process Name</th>
-                                    <th>CPU %</th>
-                                    <th>RAM %</th>
-                                    <th>RSS Memory</th>
-                                    <th>Status</th>
-                                    <th>User</th>
-                                    <th>Threads</th>
-                                </tr>
-                            </thead>
-                            <tbody id="top-processes-body"></tbody>
-                        </table>
-                    </div>
+                    
                 </div>
             </div>
 

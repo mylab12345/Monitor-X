@@ -289,3 +289,95 @@ body.focus-mode .app-header {
         background: var(--surface-solid, rgba(15, 23, 42, .96));
     }
 }
+
+/* ==========================================================================
+   MonitorX Screen Fit & Layout Optimization (2026-08-09)
+   ========================================================================== */
+
+/* 1. Limit Maximum Width on Wide Screens to prevent stretching & flat charts */
+.main-content {
+    max-width: 1440px; /* Golden desktop dashboard width */
+    width: 100%;
+    margin: 0 auto;
+    padding: 24px clamp(14px, 2vw, 32px) 48px;
+    transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Fluid Layout Override when selected by the operator */
+body.layout-fluid .main-content {
+    max-width: none;
+}
+
+/* 2. Modern 2-Column Desktop Grid Layout for Wide Viewports */
+@media (min-width: 1200px) {
+    .dashboard-grid-layout {
+        display: grid;
+        grid-template-columns: 1.62fr 1fr; /* Golden ratio split (approx 62% left / 38% right) */
+        gap: 24px;
+        align-items: start;
+        width: 100%;
+    }
+
+    .dashboard-main-col {
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+        min-width: 0;
+    }
+
+    .dashboard-side-col {
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+        min-width: 0;
+    }
+
+    /* Stack Sparkline Charts vertically when placed in the side column */
+    .dashboard-side-col .charts-row {
+        grid-template-columns: 1fr;
+        gap: 16px;
+    }
+
+    /* Format metrics grid to a clean 2-column configuration inside main column */
+    .dashboard-main-col .metrics-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 18px;
+    }
+
+    /* Provide additional vertical space for historical charts to render rich details */
+    .dashboard-main-col .ops-chart {
+        height: 120px;
+    }
+}
+
+/* 3. Responsive Fallback and Order Enforcement for Mobile & Tablets */
+@media (max-width: 1199px) {
+    .dashboard-grid-layout {
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+    }
+
+    .dashboard-main-col,
+    .dashboard-side-col {
+        display: contents; /* Unpacks child elements directly into the flex container */
+    }
+
+    /* Enforce exact chronological vertical order on mobile viewports */
+    .operations-center { order: 1; }
+    .charts-row { order: 2; }
+    .metrics-grid { order: 3; }
+    .issues-panel { order: 4; }
+    .top-processes { order: 5; }
+}
+
+/* 4. Fine-Tuning Spacing & Densities for Better Vertical Fit */
+.metric-card {
+    padding: clamp(14px, 1.5vw, 20px);
+}
+.chart-card {
+    padding: clamp(12px, 1.2vw, 16px);
+}
+.operations-center {
+    padding: clamp(16px, 1.5vw, 20px);
+}
