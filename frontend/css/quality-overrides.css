@@ -111,6 +111,89 @@ body.focus-mode .app-header {
     box-shadow: 0 8px 26px rgba(0, 0, 0, .22);
 }
 
+/* System Metadata: a predictable definition-list layout that never forces its
+   metric grid column wider than the viewport. Values truncate gracefully and
+   remain available via the native title tooltip. */
+.system-metadata-card {
+    min-width: 0;
+    justify-content: flex-start;
+}
+
+.system-metadata-card .card-header {
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.card-eyebrow {
+    margin: 0 0 3px;
+    color: var(--text-dim, var(--text-muted));
+    font: 700 .65rem/1.2 'JetBrains Mono', monospace;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+}
+
+.metadata-live {
+    flex: 0 0 auto;
+    margin-top: 1px;
+    padding: 4px 8px;
+    border: 1px solid var(--success-glow);
+    border-radius: 999px;
+    background: var(--success-bg);
+    color: var(--success);
+    font: 700 .65rem/1 'JetBrains Mono', monospace;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+
+.system-info {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    font-size: .78rem;
+}
+
+.system-info-row,
+.system-info-placeholder {
+    display: grid;
+    grid-template-columns: minmax(76px, .8fr) minmax(0, 1.2fr);
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    min-height: 38px;
+    padding: 7px 9px;
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, .25);
+}
+
+.system-info dt {
+    min-width: 0;
+    color: var(--text-muted);
+    font-weight: 600;
+    line-height: 1.25;
+}
+
+.system-info dd {
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    color: var(--accent-blue);
+    font: 600 .75rem/1.25 'JetBrains Mono', monospace;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.system-info-placeholder {
+    grid-column: 1 / -1;
+}
+
+.system-info-placeholder dd {
+    color: var(--text-muted);
+}
+
 /* Do not force a 350px card onto a 375px phone. */
 @media (max-width: 768px) {
     .metrics-grid {
@@ -134,6 +217,16 @@ body.focus-mode .app-header {
 
     .toast {
         max-width: 100%;
+    }
+}
+
+@media (max-width: 560px) {
+    .system-info {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .system-info-row {
+        grid-template-columns: minmax(92px, .8fr) minmax(0, 1.2fr);
     }
 }
 
