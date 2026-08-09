@@ -364,6 +364,14 @@ POST /api/services/{name}/{action}  // start/stop/restart/reload/enable/disable
 
 **Files changed**: `backend/main.py`, `systemd/install-service.sh` (policy now also whitelists `console -- *`, `setvcpus *`, `setmem *`, `setmaxmem *`), `frontend/js/app.js`, `frontend/js/nexus-hud.js`, `README.md`, `.opencode/MEMORY.md`.
 
+### v2.6 (2026-08-09) — CARD-BASED SERVICES MANAGER + 13 THEMES + SCREEN-FIT POLISH
+**Added** (frontend only — no backend changes):
+- Systemd Services tab rewritten from a wide 6-column table into the KVM-style card manager: KPI counters (Total / Active / Failed / Inactive / Loaded), permission notice, search + state filter + sort bar, auto-refresh interval selector (Manual / 2s / 5s / 10s / 30s), sticky bulk-action toolbar (Start / Stop / Restart / Reload / Enable / Disable / Clear), and per-unit cards showing description, load/active/sub states, and the full action set (Start/Stop/Restart/Reload/Enable/Disable/📜 Logs) with the existing confirm modal for destructive actions. Graceful inline empty/error states when systemd is unreachable. State lives in `state.svc*`; delegated listeners + `svcPending` suppression mirror the VM tab patterns; `tests/smoke-services.js` (jsdom) covers rendering/filter/bulk/logs.
+- Three new NATURAL themes in `themes.css` + picker: **Lagoon** (turquoise reef), **Meadow** (spring green), **Canyon** (red rock), **Sakura** (cherry blossom) — 13 themes total. Theme menu gained max-height + internal scroll.
+- Dashboard sizing polish in `quality-overrides.css`: legacy panel margins nulled inside the 2-column grid (spacing was doubling), `min-width:0` + ellipsis guards on card footers and disk/net rows, nested `.top-processes > .table-container` panel stripped, compact chart-card padding, clamp()ed metric values, tighter context strip.
+
+**Files changed**: `frontend/index.html`, `frontend/js/app.js`, `frontend/js/nexus-hud.js` (removed dead #services-body tinting), `frontend/css/themes.css`, `frontend/css/quality-overrides.css`, `frontend/css/services.css` (NEW), `tests/smoke-services.js` (NEW), `README.md`, `.gitignore`, `.opencode/MEMORY.md`.
+
 ### v2.2 (Previous — 2026-07-29) — NASA MISSION-CONTROL THEME
 **Added**: Full flight-control / mission-control HUD re-skin of the existing dashboard. No backend or app.js changes — pure progressive enhancement.
 

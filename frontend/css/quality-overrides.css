@@ -381,3 +381,123 @@ body.layout-fluid .main-content {
 .operations-center {
     padding: clamp(16px, 1.5vw, 20px);
 }
+
+/* 5. Sizing polish — every dashboard option fits its panel, no clipping.
+
+   Grid/flex children are allowed to shrink below their content width so long
+   values truncate with ellipsis instead of forcing horizontal overflow. */
+.dashboard-main-col > *,
+.dashboard-side-col > *,
+.metric-card,
+.chart-card,
+.operations-center,
+.issues-panel,
+.top-processes,
+.table-container {
+    min-width: 0;
+}
+
+/* The legacy bottom margins on panels that are now flex children of the
+   2-column grid double the 24px grid gap — null them inside the grid so the
+   vertical rhythm stays tight and even. */
+.dashboard-main-col .operations-center,
+.dashboard-main-col .metrics-grid,
+.dashboard-side-col .charts-row,
+.dashboard-side-col .issues-panel,
+.dashboard-side-col .top-processes {
+    margin-bottom: 0;
+}
+
+/* Compact, truncating card footers (CPU/RAM/Disk/Network/System metadata). */
+.card-footer-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 12px;
+    margin-top: 10px;
+    font-size: 0.78rem;
+}
+.card-footer-grid div {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.card-footer-grid .full-row {
+    grid-column: 1 / -1;
+    white-space: normal;
+}
+.card-footer-grid b {
+    font-weight: 600;
+    font-size: 0.76rem;
+}
+
+/* Disk/network rows: label truncates, the live value always stays visible. */
+.disk-item,
+.net-item {
+    gap: 8px 12px;
+}
+.disk-item > span:first-child,
+.net-item > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.disk-item > span:last-child,
+.net-item > span:last-child {
+    flex: 0 0 auto;
+}
+.net-speed-badges {
+    flex: 0 0 auto;
+}
+
+/* Top-processes panel nests a .table-container — strip the inner panel so the
+   card reads as one surface instead of two stacked boxes. */
+.top-processes > .table-container {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+/* Keep sparkline cards compact in the side column: header + 60px canvas. */
+.dashboard-side-col .chart-card {
+    padding: 12px 14px;
+}
+.dashboard-side-col .chart-header {
+    margin-bottom: 6px;
+}
+
+/* Tighter context strip so the operations center starts higher on screen. */
+.dashboard-context {
+    margin: 2px 0 18px;
+}
+.dashboard-context h2 {
+    font-size: clamp(1.2rem, 1.8vw, 1.5rem);
+}
+
+/* Metric cards stay readable at any column width: values may not wrap. */
+.metric-value {
+    font-size: clamp(1.35rem, 2vw, 1.7rem);
+    white-space: nowrap;
+}
+.metric-card .card-header {
+    gap: 10px;
+    margin-bottom: 10px;
+}
+.metric-card .card-header h2 {
+    font-size: 0.76rem;
+}
+
+@media (max-width: 1199px) {
+    /* Outside the 2-column grid the legacy margins are the only spacing —
+       restore a single consistent gap. */
+    .dashboard-side-col .charts-row,
+    .dashboard-side-col .issues-panel,
+    .dashboard-side-col .top-processes {
+        margin-bottom: 24px;
+    }
+    .dashboard-main-col .metrics-grid {
+        margin-bottom: 24px;
+    }
+}

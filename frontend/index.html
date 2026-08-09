@@ -14,8 +14,9 @@
     <link rel="stylesheet" href="/static/css/nexus-hud.css">
     <link rel="stylesheet" href="/static/css/dashboard-refresh.css">
     <link rel="stylesheet" href="/static/css/fix-engine.css?v=20260805">
-    <link rel="stylesheet" href="/static/css/themes.css?v=20260807">
+    <link rel="stylesheet" href="/static/css/themes.css?v=20260809">
     <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260809">
+    <link rel="stylesheet" href="/static/css/services.css?v=20260809">
     <!-- xterm.js for VM Console -->
 </head>
 <body>
@@ -79,11 +80,23 @@
                         <button type="button" class="theme-option" data-theme="ocean" role="menuitemradio" aria-checked="false">
                             <span class="swatch" style="--sw-accent:#22d3ee;--sw-accent2:#38bdf8;--sw-bg:#05222f"></span>Ocean<span class="check">✓</span>
                         </button>
+                        <button type="button" class="theme-option" data-theme="lagoon" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#2dd4bf;--sw-accent2:#4ade80;--sw-bg:#03251e"></span>Lagoon<span class="check">✓</span>
+                        </button>
+                        <button type="button" class="theme-option" data-theme="meadow" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#a3e635;--sw-accent2:#4ade80;--sw-bg:#0d1f08"></span>Meadow<span class="check">✓</span>
+                        </button>
                         <button type="button" class="theme-option" data-theme="desert" role="menuitemradio" aria-checked="false">
                             <span class="swatch" style="--sw-accent:#fbbf24;--sw-accent2:#f59e0b;--sw-bg:#201407"></span>Desert<span class="check">✓</span>
                         </button>
+                        <button type="button" class="theme-option" data-theme="canyon" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#fb923c;--sw-accent2:#f43f5e;--sw-bg:#1f0d08"></span>Canyon<span class="check">✓</span>
+                        </button>
                         <button type="button" class="theme-option" data-theme="arctic" role="menuitemradio" aria-checked="false">
                             <span class="swatch" style="--sw-accent:#7dd3fc;--sw-accent2:#c7d2fe;--sw-bg:#0f1c2c"></span>Arctic<span class="check">✓</span>
+                        </button>
+                        <button type="button" class="theme-option" data-theme="sakura" role="menuitemradio" aria-checked="false">
+                            <span class="swatch" style="--sw-accent:#f9a8d4;--sw-accent2:#e879f9;--sw-bg:#1c0f18"></span>Sakura<span class="check">✓</span>
                         </button>
                     </div>
                 </div>
@@ -675,14 +688,35 @@
 
             <!-- TAB 5: SERVICES -->
             <div class="tab-content" id="tab-services">
-                <div class="vms-header">
-                    <h2>Systemd Services Management</h2>
-                    <button type="button" class="btn btn-secondary" id="refresh-services-btn">🔄 Refresh Services</button>
+                <div class="vms-header services-header">
+                    <h2>⚙️ Systemd Services Management</h2>
+                    <div class="vm-header-actions">
+                        <span class="badge" id="svc-count">0 Services</span>
+                        <select id="svc-refresh-select" class="filter-select svc-refresh-select" title="Auto-refresh interval">
+                            <option value="0">Manual</option>
+                            <option value="2" selected>Live · 2s</option>
+                            <option value="5">5s</option>
+                            <option value="10">10s</option>
+                            <option value="30">30s</option>
+                        </select>
+                        <button type="button" class="btn btn-secondary btn-sm" id="refresh-services-btn">↻ Refresh</button>
+                    </div>
                 </div>
+
+                <!-- Service KPI cards -->
+                <div class="svc-kpi-row" id="svc-kpi-row">
+                    <div class="svc-kpi"><span class="svc-kpi-label">Total Units</span><b id="svc-kpi-total">0</b></div>
+                    <div class="svc-kpi kpi-active"><span class="svc-kpi-label">Active</span><b id="svc-kpi-active">0</b></div>
+                    <div class="svc-kpi kpi-failed"><span class="svc-kpi-label">Failed</span><b id="svc-kpi-failed">0</b></div>
+                    <div class="svc-kpi kpi-inactive"><span class="svc-kpi-label">Inactive</span><b id="svc-kpi-inactive">0</b></div>
+                    <div class="svc-kpi kpi-loaded"><span class="svc-kpi-label">Loaded</span><b id="svc-kpi-loaded">0</b></div>
+                </div>
+
                 <div id="service-permission-notice" class="service-permission-notice" role="status">
                     Checking service-control permissions…
                 </div>
-                <div class="service-controls">
+
+                <div class="service-controls svc-controls-bar">
                     <input type="text" id="service-search" placeholder="🔍 Search service name or description..." class="search-input">
                     <select id="service-filter" class="filter-select">
                         <option value="all">All States</option>
@@ -690,21 +724,29 @@
                         <option value="stopped">Stopped / Inactive</option>
                         <option value="failed">Failed / Crashed</option>
                     </select>
+                    <select id="svc-sort" class="filter-select">
+                        <option value="name">Sort: Name</option>
+                        <option value="state">Sort: State</option>
+                        <option value="load">Sort: Load</option>
+                    </select>
                 </div>
-                <div class="table-container">
-                    <table class="data-table" id="services-table">
-                        <thead>
-                            <tr>
-                                <th>Service Name</th>
-                                <th>Load</th>
-                                <th>Active Status</th>
-                                <th>Sub State</th>
-                                <th>Description</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="services-body"></tbody>
-                    </table>
+
+                <!-- Sticky bulk-action toolbar (shown when ≥1 service is selected) -->
+                <div class="svc-bulk-bar" id="svc-bulk-bar" hidden>
+                    <span><b id="svc-selected-count">0</b> selected</span>
+                    <div class="svc-bulk-actions">
+                        <button type="button" class="btn btn-sm btn-success" id="svc-bulk-start" disabled>▶ Start</button>
+                        <button type="button" class="btn btn-sm btn-warning" id="svc-bulk-stop" disabled>⏹ Stop</button>
+                        <button type="button" class="btn btn-sm btn-primary" id="svc-bulk-restart" disabled>↻ Restart</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="svc-bulk-reload" disabled>↺ Reload</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="svc-bulk-enable" disabled>◉ Enable</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="svc-bulk-disable" disabled>○ Disable</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="svc-bulk-clear">✕ Clear</button>
+                    </div>
+                </div>
+
+                <div id="service-list">
+                    <p class="no-data">Loading systemd services…</p>
                 </div>
             </div>
         </main>

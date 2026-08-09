@@ -11,3 +11,7 @@ build/
 monitorx-operations.db
 monitorx-operations.db-shm
 monitorx-operations.db-wal
+
+# Node tooling (jsdom smoke tests)
+node_modules/
+package-lock.json

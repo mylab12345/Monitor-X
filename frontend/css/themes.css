@@ -698,6 +698,158 @@ body.theme-ocean .logs-window, body.theme-ocean .terminal-box { background: #021
 
 
 /* ────────────────────────────────────────────────────────────────────────────
+   8b. LAGOON  →  tropical shallow-water reef (natural theme)
+   Sunlit turquoise shallows over dark reef blue, with kelp-green life accents.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-lagoon {
+    --bg-base:        #02130f;
+    --bg-surface:     #03251e;
+    --bg-card:        rgba(6, 40, 32, 0.74);
+    --bg-card-hover:  rgba(9, 54, 43, 0.86);
+    --bg-header:      rgba(3, 20, 16, 0.94);
+    --bg-input:       rgba(5, 34, 27, 0.92);
+
+    --border-card:    rgba(45, 212, 191, 0.20);
+    --border-hover:   rgba(94, 234, 212, 0.60);
+
+    --text-main:      #d9fbf2;
+    --text-muted:     #7cc9b6;
+    --text-dim:       #47857a;
+
+    --accent-blue:    #2dd4bf;
+    --accent-indigo:  #4ade80;
+    --accent-purple:  #5eead4;
+    --accent-glow:    rgba(45, 212, 191, 0.26);
+
+    --success:        #4ade80;
+    --success-glow:   rgba(74, 222, 128, 0.28);
+    --success-bg:     rgba(74, 222, 128, 0.12);
+
+    --warning:        #fbbf24;
+    --warning-glow:   rgba(251, 191, 36, 0.28);
+    --warning-bg:     rgba(251, 191, 36, 0.12);
+
+    --danger:         #fb7185;
+    --danger-glow:    rgba(251, 113, 133, 0.28);
+    --danger-bg:      rgba(251, 113, 133, 0.12);
+
+    --nasa-line:      rgba(45, 212, 191, 0.75);
+    --nasa-amber:     #fbbf24;
+    --nasa-grid:      rgba(45, 212, 191, 0.06);
+    --nasa-star:      rgba(167, 243, 208, 0.50);
+
+    --nx-glow-cyan:   45, 212, 191;
+    --nx-glow-violet: 74, 222, 128;
+    --nx-glow-green:  74, 222, 128;
+    --nx-glow-amber:  251, 191, 36;
+    --nx-glow-red:    251, 113, 133;
+
+    --mx-surface:        rgba(6, 40, 32, .92);
+    --mx-surface-raised: rgba(9, 52, 42, .94);
+    --mx-line:           rgba(45, 212, 191, .14);
+    --mx-line-strong:    rgba(45, 212, 191, .32);
+    --mx-text-soft:      #8ccbb9;
+    --mx-cyan:           #4ddbca;
+    --mx-shadow:         0 16px 38px rgba(1, 12, 9, .28);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(45, 212, 191, 0.25);
+    --shadow-glow: 0 0 22px rgba(45, 212, 191, 0.28);
+}
+body.theme-lagoon {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(45, 212, 191, 0.09), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(74, 222, 128, 0.06), transparent 65%),
+        var(--bg-base);
+}
+body.theme-lagoon .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(45, 212, 191, 0.03) 0px, rgba(45, 212, 191, 0.03) 1px, transparent 2px, transparent 4px);
+}
+body.theme-lagoon .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(45, 212, 191, 0.05) 45%, rgba(45, 212, 191, 0.10) 50%, rgba(45, 212, 191, 0.05) 55%, transparent);
+}
+body.theme-lagoon .cpu-bar-fill { box-shadow: 0 0 8px rgba(45, 212, 191, 0.4); }
+body.theme-lagoon .logs-window, body.theme-lagoon .terminal-box { background: #021411; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   8c. MEADOW  →  spring meadow telemetry field (natural theme)
+   Dew-kissed greens with butter-yellow sun patches and soft grass shadows.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-meadow {
+    --bg-base:        #0a1206;
+    --bg-surface:     #0d1f08;
+    --bg-card:        rgba(18, 36, 12, 0.76);
+    --bg-card-hover:  rgba(26, 50, 17, 0.87);
+    --bg-header:      rgba(11, 22, 7, 0.94);
+    --bg-input:       rgba(14, 30, 9, 0.92);
+
+    --border-card:    rgba(163, 230, 53, 0.20);
+    --border-hover:   rgba(190, 242, 100, 0.60);
+
+    --text-main:      #eefbe2;
+    --text-muted:     #a3c98d;
+    --text-dim:       #688a55;
+
+    --accent-blue:    #a3e635;
+    --accent-indigo:  #4ade80;
+    --accent-purple:  #bef264;
+    --accent-glow:    rgba(163, 230, 53, 0.26);
+
+    --success:        #4ade80;
+    --success-glow:   rgba(74, 222, 128, 0.30);
+    --success-bg:     rgba(74, 222, 128, 0.12);
+
+    --warning:        #facc15;
+    --warning-glow:   rgba(250, 204, 21, 0.28);
+    --warning-bg:     rgba(250, 204, 21, 0.12);
+
+    --danger:         #f87171;
+    --danger-glow:    rgba(248, 113, 113, 0.28);
+    --danger-bg:      rgba(248, 113, 113, 0.12);
+
+    --nasa-line:      rgba(163, 230, 53, 0.75);
+    --nasa-amber:     #facc15;
+    --nasa-grid:      rgba(163, 230, 53, 0.06);
+    --nasa-star:      rgba(217, 249, 157, 0.45);
+
+    --nx-glow-cyan:   163, 230, 53;
+    --nx-glow-violet: 74, 222, 128;
+    --nx-glow-green:  74, 222, 128;
+    --nx-glow-amber:  250, 204, 21;
+    --nx-glow-red:    248, 113, 113;
+
+    --mx-surface:        rgba(18, 36, 12, .92);
+    --mx-surface-raised: rgba(23, 46, 16, .94);
+    --mx-line:           rgba(163, 230, 53, .14);
+    --mx-line-strong:    rgba(163, 230, 53, .32);
+    --mx-text-soft:      #adc99b;
+    --mx-cyan:           #b6e972;
+    --mx-shadow:         0 16px 38px rgba(4, 10, 2, .30);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(163, 230, 53, 0.25);
+    --shadow-glow: 0 0 22px rgba(163, 230, 53, 0.26);
+}
+body.theme-meadow {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(163, 230, 53, 0.08), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(74, 222, 128, 0.06), transparent 65%),
+        var(--bg-base);
+}
+body.theme-meadow .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(163, 230, 53, 0.028) 0px, rgba(163, 230, 53, 0.028) 1px, transparent 2px, transparent 4px);
+}
+body.theme-meadow .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(163, 230, 53, 0.045) 45%, rgba(163, 230, 53, 0.09) 50%, rgba(163, 230, 53, 0.045) 55%, transparent);
+}
+body.theme-meadow .cpu-bar-fill { box-shadow: 0 0 8px rgba(163, 230, 53, 0.4); }
+body.theme-meadow .logs-window, body.theme-meadow .terminal-box { background: #0a1306; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
    9. DESERT  →  dusk-dune ops camp (natural theme)
    Warm sand, golden-hour light, and ember-tinted night shadows.
    ──────────────────────────────────────────────────────────────────────────── */
@@ -771,6 +923,82 @@ body.theme-desert .nasa-scanline::after {
 }
 body.theme-desert .cpu-bar-fill { box-shadow: 0 0 8px rgba(251, 191, 36, 0.4); }
 body.theme-desert .logs-window, body.theme-desert .terminal-box { background: #140c05; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
+   9b. CANYON  →  red-rock canyon at golden hour (natural theme)
+   Terracotta walls, dust-lit amber light, and ember shadows of the mesa.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-canyon {
+    --bg-base:        #170a06;
+    --bg-surface:     #1f0d08;
+    --bg-card:        rgba(48, 22, 12, 0.76);
+    --bg-card-hover:  rgba(62, 29, 16, 0.87);
+    --bg-header:      rgba(25, 13, 7, 0.94);
+    --bg-input:       rgba(39, 19, 10, 0.92);
+
+    --border-card:    rgba(251, 146, 60, 0.20);
+    --border-hover:   rgba(253, 186, 116, 0.60);
+
+    --text-main:      #fdeee0;
+    --text-muted:     #cfab92;
+    --text-dim:       #8a6a56;
+
+    --accent-blue:    #fb923c;
+    --accent-indigo:  #f43f5e;
+    --accent-purple:  #fdba74;
+    --accent-glow:    rgba(251, 146, 60, 0.28);
+
+    --success:        #fbbf24;
+    --success-glow:   rgba(251, 191, 36, 0.28);
+    --success-bg:     rgba(251, 191, 36, 0.12);
+
+    --warning:        #f97316;
+    --warning-glow:   rgba(249, 115, 22, 0.30);
+    --warning-bg:     rgba(249, 115, 22, 0.12);
+
+    --danger:         #fb7185;
+    --danger-glow:    rgba(251, 113, 133, 0.30);
+    --danger-bg:      rgba(251, 113, 133, 0.12);
+
+    --nasa-line:      rgba(251, 146, 60, 0.75);
+    --nasa-amber:     #f97316;
+    --nasa-grid:      rgba(251, 146, 60, 0.05);
+    --nasa-star:      rgba(254, 215, 170, 0.45);
+
+    --nx-glow-cyan:   251, 146, 60;
+    --nx-glow-violet: 244, 63, 94;
+    --nx-glow-green:  251, 191, 36;
+    --nx-glow-amber:  249, 115, 22;
+    --nx-glow-red:    251, 113, 133;
+
+    --mx-surface:        rgba(48, 22, 12, .92);
+    --mx-surface-raised: rgba(60, 28, 15, .94);
+    --mx-line:           rgba(251, 146, 60, .14);
+    --mx-line-strong:    rgba(251, 146, 60, .32);
+    --mx-text-soft:      #d8b69d;
+    --mx-cyan:           #fd9d5c;
+    --mx-shadow:         0 16px 38px rgba(15, 6, 2, .30);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(251, 146, 60, 0.25);
+    --shadow-glow: 0 0 22px rgba(251, 146, 60, 0.28);
+}
+body.theme-canyon {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(251, 146, 60, 0.10), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(244, 63, 94, 0.07), transparent 65%),
+        var(--bg-base);
+}
+body.theme-canyon .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(251, 146, 60, 0.03) 0px, rgba(251, 146, 60, 0.03) 1px, transparent 2px, transparent 4px);
+}
+body.theme-canyon .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(251, 146, 60, 0.05) 45%, rgba(251, 146, 60, 0.10) 50%, rgba(251, 146, 60, 0.05) 55%, transparent);
+}
+body.theme-canyon .cpu-bar-fill { box-shadow: 0 0 8px rgba(251, 146, 60, 0.4); }
+body.theme-canyon .logs-window, body.theme-canyon .terminal-box { background: #170a05; }
 
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -850,12 +1078,90 @@ body.theme-arctic .logs-window, body.theme-arctic .terminal-box { background: #0
 
 
 /* ────────────────────────────────────────────────────────────────────────────
+   10b. SAKURA  →  cherry-blossom twilight garden (natural theme)
+   Plum-dark night garden under falling blossom petals, with soft rose light.
+   ──────────────────────────────────────────────────────────────────────────── */
+body.theme-sakura {
+    --bg-base:        #12080f;
+    --bg-surface:     #1c0f18;
+    --bg-card:        rgba(43, 22, 36, 0.76);
+    --bg-card-hover:  rgba(56, 29, 47, 0.87);
+    --bg-header:      rgba(21, 11, 17, 0.94);
+    --bg-input:       rgba(35, 18, 29, 0.92);
+
+    --border-card:    rgba(249, 168, 212, 0.20);
+    --border-hover:   rgba(253, 186, 226, 0.60);
+
+    --text-main:      #fdeef6;
+    --text-muted:     #d5a8bf;
+    --text-dim:       #8f6880;
+
+    --accent-blue:    #f9a8d4;
+    --accent-indigo:  #e879f9;
+    --accent-purple:  #f0abfc;
+    --accent-glow:    rgba(249, 168, 212, 0.28);
+
+    --success:        #86efac;
+    --success-glow:   rgba(134, 239, 172, 0.28);
+    --success-bg:     rgba(134, 239, 172, 0.12);
+
+    --warning:        #fcd34d;
+    --warning-glow:   rgba(252, 211, 77, 0.28);
+    --warning-bg:     rgba(252, 211, 77, 0.12);
+
+    --danger:         #fda4af;
+    --danger-glow:    rgba(253, 164, 175, 0.30);
+    --danger-bg:      rgba(253, 164, 175, 0.12);
+
+    --nasa-line:      rgba(249, 168, 212, 0.75);
+    --nasa-amber:     #fcd34d;
+    --nasa-grid:      rgba(249, 168, 212, 0.06);
+    --nasa-star:      rgba(253, 200, 228, 0.50);
+
+    --nx-glow-cyan:   249, 168, 212;
+    --nx-glow-violet: 232, 121, 249;
+    --nx-glow-green:  134, 239, 172;
+    --nx-glow-amber:  252, 211, 77;
+    --nx-glow-red:    253, 164, 175;
+
+    --mx-surface:        rgba(43, 22, 36, .92);
+    --mx-surface-raised: rgba(54, 28, 45, .94);
+    --mx-line:           rgba(249, 168, 212, .14);
+    --mx-line-strong:    rgba(249, 168, 212, .32);
+    --mx-text-soft:      #dbb6c8;
+    --mx-cyan:           #f4b8d8;
+    --mx-shadow:         0 16px 38px rgba(12, 4, 9, .30);
+
+    --shadow-card: 0 14px 38px -10px rgba(0, 0, 0, 0.7), 0 0 1px rgba(249, 168, 212, 0.25);
+    --shadow-glow: 0 0 22px rgba(249, 168, 212, 0.28);
+}
+body.theme-sakura {
+    background:
+        radial-gradient(1000px 520px at 12% -10%, rgba(249, 168, 212, 0.10), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(232, 121, 249, 0.07), transparent 65%),
+        var(--bg-base);
+}
+body.theme-sakura .nasa-scanline {
+    background: repeating-linear-gradient(to bottom,
+        rgba(249, 168, 212, 0.03) 0px, rgba(249, 168, 212, 0.03) 1px, transparent 2px, transparent 4px);
+}
+body.theme-sakura .nasa-scanline::after {
+    background: linear-gradient(to bottom, transparent,
+        rgba(249, 168, 212, 0.05) 45%, rgba(249, 168, 212, 0.10) 50%, rgba(249, 168, 212, 0.05) 55%, transparent);
+}
+body.theme-sakura .cpu-bar-fill { box-shadow: 0 0 8px rgba(249, 168, 212, 0.4); }
+body.theme-sakura .logs-window, body.theme-sakura .terminal-box { background: #140a10; }
+
+
+/* ────────────────────────────────────────────────────────────────────────────
    11. SHARED POLISH
    Sweep-in transition when switching themes for a buttery feel.
    ──────────────────────────────────────────────────────────────────────────── */
 body.theme-midnight, body.theme-aurora, body.theme-ember,
 body.theme-forest, body.theme-nebula, body.theme-graphite,
-body.theme-ocean, body.theme-desert, body.theme-arctic {
+body.theme-ocean, body.theme-lagoon, body.theme-meadow,
+body.theme-desert, body.theme-canyon, body.theme-arctic,
+body.theme-sakura {
     transition: background-color 0.4s ease, color 0.4s ease;
 }
 body.theme-midnight .metric-card, body.theme-midnight .chart-card,
@@ -865,9 +1171,22 @@ body.theme-forest .metric-card, body.theme-forest .chart-card,
 body.theme-nebula .metric-card, body.theme-nebula .chart-card,
 body.theme-graphite .metric-card, body.theme-graphite .chart-card,
 body.theme-ocean .metric-card, body.theme-ocean .chart-card,
+body.theme-lagoon .metric-card, body.theme-lagoon .chart-card,
+body.theme-meadow .metric-card, body.theme-meadow .chart-card,
 body.theme-desert .metric-card, body.theme-desert .chart-card,
-body.theme-arctic .metric-card, body.theme-arctic .chart-card {
+body.theme-canyon .metric-card, body.theme-canyon .chart-card,
+body.theme-arctic .metric-card, body.theme-arctic .chart-card,
+body.theme-sakura .metric-card, body.theme-sakura .chart-card {
     transition: transform .35s var(--nx-ease-out),
                 box-shadow .35s var(--nx-ease-out),
                 border-color .25s ease, background-color .4s ease;
+}
+
+/* With thirteen themes the menu can outgrow short viewports — keep it on
+   screen with an internal scroll rather than clipping behind the fold. */
+.theme-menu {
+    max-height: min(72vh, 560px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
 }
