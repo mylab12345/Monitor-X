@@ -2669,6 +2669,10 @@ function svcFilterSort(services) {
     return list;
 }
 
+function svcToken(value) {
+    return String(value ?? 'unknown').toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+}
+
 function renderServices(services) {
     const container = document.getElementById('service-list');
     if (!container) return;
@@ -2679,10 +2683,19 @@ function renderServices(services) {
     // Suppress re-rendering while an action is in flight (see renderVms).
     if (state.svcPending.size > 0) return;
 
-    document.getElementById('svc-count').textContent =
-        `${services.length} Service${services.length === 1 ? '' : 's'}`;
+    // Do not keep selections for units that disappeared between refreshes.
+    const knownNames = new Set(services.map(s => s.name));
+    state.svcSelected.forEach(name => {
+        if (!knownNames.has(name)) state.svcSelected.delete(name);
+    });
 
-    // KPI counts
+    const countEl = document.getElementById('svc-count');
+    if (countEl) {
+        countEl.textContent = `${services.length} Service${services.length === 1 ? '' : 's'}`;
+    }
+
+    // KPI counts stay available, but the stylesheet renders them as one-line
+    // chips instead of tall cards.
     const counts = { total: services.length, active: 0, failed: 0, inactive: 0, loaded: 0 };
     services.forEach(s => {
         const cls = svcClass(s);
@@ -2691,11 +2704,10 @@ function renderServices(services) {
         else counts.inactive++;
         if (s.load === 'loaded') counts.loaded++;
     });
-    document.getElementById('svc-kpi-total').textContent = counts.total;
-    document.getElementById('svc-kpi-active').textContent = counts.active;
-    document.getElementById('svc-kpi-failed').textContent = counts.failed;
-    document.getElementById('svc-kpi-inactive').textContent = counts.inactive;
-    document.getElementById('svc-kpi-loaded').textContent = counts.loaded;
+    ['total', 'active', 'failed', 'inactive', 'loaded'].forEach(key => {
+        const el = document.getElementById(`svc-kpi-${key}`);
+        if (el) el.textContent = counts[key];
+    });
 
     if (!services.length) {
         container.innerHTML = `
@@ -2704,57 +2716,97 @@ function renderServices(services) {
                 <h3>No systemd services found</h3>
                 <p>This host exposes no <code>.service</code> units through the systemd manager.</p>
             </div>`;
+        updateSvcBulkBar();
         return;
     }
 
     const visible = svcFilterSort(services);
     if (!visible.length) {
         container.innerHTML = `<div class="svc-empty-state"><div class="icon">🔍</div><h3>No matching services</h3><p>Adjust the search query or state filter to see more units.</p></div>`;
+        updateSvcBulkBar();
         return;
     }
 
     const canControl = serviceCapabilities?.can_control ?? false;
-    container.innerHTML = visible.map(s => {
+    const rows = visible.map(s => {
         const cls = svcClass(s);
-        const name = escapeHtml(s.name);
-        const selected = state.svcSelected.has(s.name) ? 'selected' : '';
+        const rawName = String(s.name || '');
+        const name = escapeHtml(rawName);
+        const description = escapeHtml(s.description || '—');
+        const load = String(s.load || 'unknown');
+        const startup = String(s.unit_file_state || 'runtime');
+        const selected = state.svcSelected.has(rawName) ? 'selected' : '';
+        const safeLoad = svcToken(load);
+        const safeStartup = svcToken(startup);
+        const stateLabel = svcStateLabel(s);
         return `
-            <article class="svc-card svc-${cls} ${selected}" data-svc-name="${name}">
-                <div class="svc-card-header">
-                    <label class="svc-checkbox-cell"><input type="checkbox" class="svc-checkbox" data-svc-select="${name}" ${selected ? 'checked' : ''}></label>
-                    <div><strong>${name}</strong><div class="svc-desc">${escapeHtml(s.description || '—')}</div></div>
-                    <span class="svc-state ${cls}">${svcStateLabel(s)}</span>
-                </div>
-                <div class="svc-meta-grid">
-                    <div class="svc-stat"><span>Load state</span><b class="svc-load-${escapeHtml(s.load)}">${escapeHtml(s.load)}</b></div>
-                    <div class="svc-stat"><span>Active state</span><b>${escapeHtml(s.active)}</b></div>
-                    <div class="svc-stat"><span>Sub state</span><b class="svc-sub-${escapeHtml(s.sub)}">${escapeHtml(s.sub)}</b></div>
-                    <div class="svc-stat"><span>Startup</span><b>${escapeHtml(s.unit_file_state || 'runtime')}</b></div>
-                </div>
-                ${renderSvcActions(s, canControl)}
-            </article>`;
+            <tr class="svc-card svc-row svc-${cls} ${selected}" data-svc-name="${escapeAttr(rawName)}">
+                <td class="svc-select-cell">
+                    <input type="checkbox" class="svc-checkbox" data-svc-select="${escapeAttr(rawName)}" ${selected ? 'checked' : ''}
+                        aria-label="Select ${escapeAttr(rawName)}" title="Select ${escapeAttr(rawName)}">
+                </td>
+                <td class="svc-service-cell">
+                    <span class="svc-service-name" title="${escapeAttr(rawName)}">${name}</span>
+                    <span class="svc-service-desc" title="${escapeAttr(String(s.description || '—'))}">${description}</span>
+                </td>
+                <td><span class="svc-state ${cls}" title="${escapeAttr(stateLabel)}">${escapeHtml(stateLabel)}</span></td>
+                <td><span class="svc-meta-value svc-load-${safeLoad}" title="Load state: ${escapeAttr(load)}">${escapeHtml(load)}</span></td>
+                <td><span class="svc-meta-value svc-start-${safeStartup}" title="Startup: ${escapeAttr(startup)}">${escapeHtml(startup)}</span></td>
+                <td class="svc-actions-cell">${renderSvcActions(s, canControl)}</td>
+            </tr>`;
     }).join('');
 
+    container.innerHTML = `
+        <div class="svc-table-shell">
+            <div class="svc-table-scroll">
+                <table class="svc-table" aria-label="Systemd services and controls">
+                    <thead>
+                        <tr>
+                            <th scope="col"><input type="checkbox" class="svc-select-all" data-svc-select-all aria-label="Select all visible services" title="Select all visible services"></th>
+                            <th scope="col">Service</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Load</th>
+                            <th scope="col">Startup</th>
+                            <th scope="col">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            <div class="svc-list-summary">
+                <span>Showing <strong>${visible.length}</strong> of <strong>${services.length}</strong> services</span>
+                <span>Select rows for bulk actions</span>
+            </div>
+        </div>`;
+
     initSvcDelegation(container);
+    updateSvcBulkBar();
+    updateSvcSelectAll();
+}
+
+function svcActionButton(action, icon, label, serviceName, title = label) {
+    const name = escapeAttr(serviceName);
+    const tone = { start: 'btn-success', stop: 'btn-warning', restart: 'btn-primary' }[action] || 'btn-outline';
+    return `<button type="button" class="btn btn-sm ${tone} svc-action-btn svc-action-${action}" data-svc-action="${action}" data-svc-name="${name}" title="${escapeAttr(title)}" aria-label="${escapeAttr(label)} ${name}"><span class="svc-action-icon" aria-hidden="true">${icon}</span><span class="svc-action-label">${label}</span></button>`;
 }
 
 function renderSvcActions(s, canControl) {
-    const name = escapeHtml(s.name);
+    const name = String(s.name || '');
     const active = s.active === 'active';
     const failed = svcClass(s) === 'failed';
     if (!canControl) {
         const reason = serviceCapabilities?.message
             || 'Service controls are not configured — run systemd/install-service.sh to enable.';
-        return `<div class="svc-actions"><span class="svc-controls-note">🔒 ${escapeHtml(reason)}</span></div>`;
+        return `<div class="svc-actions"><span class="svc-controls-note" title="${escapeAttr(reason)}">🔒 Controls unavailable</span></div>`;
     }
     let html = '';
-    if (!active) html += `<button type="button" class="btn btn-success" data-svc-action="start" data-svc-name="${name}" ${failed ? 'title="Service is failed — starting will attempt recovery"' : ''}>▶ Start</button>`;
-    if (active)  html += `<button type="button" class="btn btn-warning" data-svc-action="stop" data-svc-name="${name}">⏹ Stop</button>`;
-    html += `<button type="button" class="btn btn-primary" data-svc-action="restart" data-svc-name="${name}">↻ Restart</button>`;
-    html += `<button type="button" class="btn btn-outline" data-svc-action="reload" data-svc-name="${name}" title="Reload configuration without restarting">↺ Reload</button>`;
-    html += `<button type="button" class="btn btn-outline" data-svc-action="enable" data-svc-name="${name}" title="Enable at boot">◉ Enable</button>`;
-    html += `<button type="button" class="btn btn-outline" data-svc-action="disable" data-svc-name="${name}" title="Disable at boot">○ Disable</button>`;
-    html += `<button type="button" class="btn btn-outline" data-svc-logs="${name}" title="View journal logs">📜 Logs</button>`;
+    if (!active) html += svcActionButton('start', '▶', 'Start', name, failed ? 'Start service (failed units will attempt recovery)' : 'Start service');
+    if (active)  html += svcActionButton('stop', '⏹', 'Stop', name, 'Stop service');
+    html += svcActionButton('restart', '↻', 'Restart', name, 'Restart service');
+    html += svcActionButton('reload', '↺', 'Reload', name, 'Reload configuration without restarting');
+    html += svcActionButton('enable', '◉', 'Enable', name, 'Enable service at boot');
+    html += svcActionButton('disable', '○', 'Disable', name, 'Disable service at boot');
+    html += `<button type="button" class="btn btn-sm btn-outline svc-action-btn svc-action-logs" data-svc-logs="${escapeAttr(name)}" title="View journal logs" aria-label="View journal logs for ${escapeAttr(name)}"><span class="svc-action-icon" aria-hidden="true">📜</span><span class="svc-action-label">Logs</span></button>`;
     return `<div class="svc-actions">${html}</div>`;
 }
 
@@ -2781,11 +2833,23 @@ function initSvcDelegation(container) {
     });
 
     container.addEventListener('change', (e) => {
+        const selectAll = e.target.closest('[data-svc-select-all]');
+        if (selectAll && container.contains(selectAll)) {
+            const visible = svcFilterSort(servicesCache);
+            visible.forEach(service => {
+                if (selectAll.checked) state.svcSelected.add(service.name);
+                else state.svcSelected.delete(service.name);
+            });
+            renderServices(servicesCache);
+            return;
+        }
+
         const cb = e.target.closest('[data-svc-select]');
         if (!cb || !container.contains(cb)) return;
         if (cb.checked) state.svcSelected.add(cb.dataset.svcSelect);
         else state.svcSelected.delete(cb.dataset.svcSelect);
         updateSvcBulkBar();
+        updateSvcSelectAll();
         const card = cb.closest('.svc-card');
         if (card) card.classList.toggle('selected', cb.checked);
     });
@@ -2798,10 +2862,21 @@ function markSvcPending(name, pending) {
     if (card) card.classList.toggle('pending', pending);
 }
 
+function updateSvcSelectAll() {
+    const selectAll = document.querySelector('[data-svc-select-all]');
+    if (!selectAll) return;
+    const visible = svcFilterSort(servicesCache);
+    const selected = visible.filter(service => state.svcSelected.has(service.name)).length;
+    selectAll.disabled = visible.length === 0;
+    selectAll.checked = visible.length > 0 && selected === visible.length;
+    selectAll.indeterminate = selected > 0 && selected < visible.length;
+}
+
 function updateSvcBulkBar() {
     const bar = document.getElementById('svc-bulk-bar');
+    const count = document.getElementById('svc-selected-count');
     const n = state.svcSelected.size;
-    document.getElementById('svc-selected-count').textContent = n;
+    if (count) count.textContent = n;
     if (bar) bar.hidden = n === 0;
     ['start', 'stop', 'restart', 'reload', 'enable', 'disable'].forEach(a => {
         const btn = document.getElementById(`svc-bulk-${a}`);
@@ -2812,7 +2887,10 @@ function updateSvcBulkBar() {
 function clearSvcSelection() {
     state.svcSelected.clear();
     updateSvcBulkBar();
-    document.querySelectorAll('.svc-checkbox').forEach(cb => { cb.checked = false; });
+    document.querySelectorAll('[data-svc-select], [data-svc-select-all]').forEach(cb => {
+        cb.checked = false;
+        cb.indeterminate = false;
+    });
     document.querySelectorAll('.svc-card.selected').forEach(c => c.classList.remove('selected'));
 }
 
