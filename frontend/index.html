@@ -10,13 +10,12 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Orbitron:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/styles.css">
     <link rel="stylesheet" href="/static/css/modern-overrides.css">
-    <link rel="stylesheet" href="/static/css/nasa-theme.css">
+    <link rel="stylesheet" href="/static/css/nasa-theme.css?v=20260809">
     <link rel="stylesheet" href="/static/css/nexus-hud.css">
-    <link rel="stylesheet" href="/static/css/mission-control.css?v=20260805">
     <link rel="stylesheet" href="/static/css/dashboard-refresh.css">
     <link rel="stylesheet" href="/static/css/fix-engine.css?v=20260805">
     <link rel="stylesheet" href="/static/css/themes.css?v=20260807">
-    <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260806">
+    <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260809">
     <!-- xterm.js for VM Console -->
 </head>
 <body>
@@ -143,21 +142,6 @@
                     </div>
                     <span class="context-status">LIVE TELEMETRY · 2 SECOND REFRESH</span>
                 </section>
-                <!-- NASA Flight Control Loop — live GO/NO-GO subsystem poll -->
-                <section class="mission-board" id="mission-board" aria-label="Flight control loop — subsystem GO/NO-GO status">
-                    <div class="mission-board-head">
-                        <div class="mission-board-title">
-                            <h2>◈ FLIGHT CONTROL LOOP · GO/NO-GO POLL</h2>
-                            <span class="mission-board-sub" id="mission-board-sub">ACQUIRING TELEMETRY · 9 FLIGHT STATIONS</span>
-                        </div>
-                        <div class="mission-status-lamp" id="mission-status-lamp">
-                            <span class="ms-lamp" id="ms-lamp"></span>
-                            <span class="ms-text" id="ms-text">ACQUIRING TELEMETRY</span>
-                        </div>
-                    </div>
-                    <div class="mission-stations" id="mission-stations" role="list"></div>
-                </section>
-
                 <!-- Prioritized incidents, historical trend, and operator controls -->
                 <section class="operations-center" aria-label="Operations center">
                     <div class="operations-top">
@@ -898,10 +882,9 @@
     <!-- Toast Notifications -->
     <div class="toast-container" id="toast-container"></div>
 
-    <script src="/static/js/nasa-enhance.js?v=20260807-fast"></script>
-    <script src="/static/js/app.js?v=20260807-fast"></script>
+    <script src="/static/js/nasa-enhance.js?v=20260809"></script>
+    <script src="/static/js/app.js?v=20260809"></script>
     <script src="/static/js/nexus-hud.js?v=20260807"></script>
-    <script src="/static/js/mission-control.js?v=20260807-fast"></script>
     <script src="/static/js/operations-center.js?v=20260807-fast"></script>
     <div id="sparkline-announce" aria-live="polite" aria-atomic="true" style="position:absolute;left:-9999px;top:-9999px;"></div>
 </body>

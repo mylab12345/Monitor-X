@@ -11,7 +11,7 @@
 | Fact | Value |
 |------|-------|
 | **What** | Real-time Linux server monitoring dashboard (self-hosted, no auth) |
-| **Version** | v2.4 (NASA Mission-Control + GO/NO-GO Flight Control Loop) |
+| **Version** | v2.5 (NASA Mission-Control theme; GO/NO-GO Flight Control Loop removed) |
 | **Port** | 8080 (`0.0.0.0`) |
 | **Backend** | Python 3.12 + FastAPI + Uvicorn + WebSockets |
 | **Frontend** | Vanilla JS (no framework) + CSS Glassmorphism + HTML5 Canvas sparklines |
@@ -324,6 +324,14 @@ POST /api/services/{name}/{action}  // start/stop/restart/reload/enable/disable
 ---
 
 ## File Change Log
+
+### v2.5 (2026-08-09) — FLIGHT CONTROL LOOP REMOVED + COMPACT HOST IDENTITY
+**Removed**:
+- The GO/NO-GO Flight Control Loop board (`#mission-board`) from the top of the Dashboard tab, with `frontend/js/mission-control.js` and `frontend/css/mission-control.css` deleted outright. The header MET/UTC readout keeps the **DOY mission clock** — its tick moved into `nasa-enhance.js` and its styles into `nasa-theme.css`.
+**Changed**:
+- Host identity (System Metadata) card sized to content so it does not eat freed space: `align-self: start` (no stretching to taller grid neighbors) and compact rows (no 38px floor, tighter padding/gap) scoped to `.system-metadata-card` — the process-inspector modal keeps the roomier default `.system-info` list.
+- `quality-overrides.css` focus-mode rule no longer references `.mission-board`.
+**Tests**: `tests/test_contracts.py` drops the mission-control.js source reads; new contract asserts the board markup, asset links, and files stay removed, and that no frontend module besides `app.js` opens a raw `/ws` socket.
 
 ### v2.4 (2026-08-05) — NASA-LEVEL PASS: FLIGHT CONTROL LOOP + EFFECT RESTORATION
 **Added**:

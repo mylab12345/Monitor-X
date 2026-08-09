@@ -99,8 +99,7 @@ input[type="checkbox"]:focus-visible {
 /* Reduce decorative work in Focus mode while keeping operational content. */
 body.focus-mode .nasa-overlay,
 body.focus-mode .nx-stars,
-body.focus-mode .nasa-ticker,
-body.focus-mode .mission-board {
+body.focus-mode .nasa-ticker {
     opacity: 0;
     pointer-events: none;
     height: 0;
@@ -117,11 +116,14 @@ body.focus-mode .app-header {
 .system-metadata-card {
     min-width: 0;
     justify-content: flex-start;
+    /* Size to content only — never stretch to match a taller grid neighbor. */
+    align-self: start;
 }
 
 .system-metadata-card .card-header {
     align-items: flex-start;
     gap: 12px;
+    margin-bottom: 10px;
 }
 
 .card-eyebrow {
@@ -152,6 +154,18 @@ body.focus-mode .app-header {
     width: 100%;
     min-width: 0;
     font-size: .78rem;
+}
+
+/* Host identity rows stay compact: content height, no 38px floor. Scoped to
+   the metadata card so the process inspector modal keeps its roomier list. */
+.system-metadata-card .system-info {
+    gap: 6px;
+}
+
+.system-metadata-card .system-info-row,
+.system-metadata-card .system-info-placeholder {
+    min-height: 0;
+    padding: 5px 9px;
 }
 
 .system-info-row,
