@@ -16,7 +16,7 @@
     <link rel="stylesheet" href="/static/css/fix-engine.css?v=20260805">
     <link rel="stylesheet" href="/static/css/themes.css?v=20260809">
     <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260809">
-    <link rel="stylesheet" href="/static/css/services.css?v=20260809">
+    <link rel="stylesheet" href="/static/css/services.css?v=20260809-compact">
     <!-- xterm.js for VM Console -->
 </head>
 <body>
@@ -689,7 +689,10 @@
             <!-- TAB 5: SERVICES -->
             <div class="tab-content" id="tab-services">
                 <div class="vms-header services-header">
-                    <h2>⚙️ Systemd Services Management</h2>
+                    <div class="services-title-group">
+                        <h2>⚙️ Systemd Services</h2>
+                        <span class="services-density-label">Compact control view</span>
+                    </div>
                     <div class="vm-header-actions">
                         <span class="badge" id="svc-count">0 Services</span>
                         <select id="svc-refresh-select" class="filter-select svc-refresh-select" title="Auto-refresh interval">
@@ -703,9 +706,9 @@
                     </div>
                 </div>
 
-                <!-- Service KPI cards -->
-                <div class="svc-kpi-row" id="svc-kpi-row">
-                    <div class="svc-kpi"><span class="svc-kpi-label">Total Units</span><b id="svc-kpi-total">0</b></div>
+                <!-- Inline service summary: keeps the useful counts without five tall cards. -->
+                <div class="svc-kpi-row" id="svc-kpi-row" aria-label="Service summary">
+                    <div class="svc-kpi"><span class="svc-kpi-label">Total</span><b id="svc-kpi-total">0</b></div>
                     <div class="svc-kpi kpi-active"><span class="svc-kpi-label">Active</span><b id="svc-kpi-active">0</b></div>
                     <div class="svc-kpi kpi-failed"><span class="svc-kpi-label">Failed</span><b id="svc-kpi-failed">0</b></div>
                     <div class="svc-kpi kpi-inactive"><span class="svc-kpi-label">Inactive</span><b id="svc-kpi-inactive">0</b></div>
@@ -731,9 +734,9 @@
                     </select>
                 </div>
 
-                <!-- Sticky bulk-action toolbar (shown when ≥1 service is selected) -->
+                <!-- Bulk actions appear above the list as soon as rows are selected. -->
                 <div class="svc-bulk-bar" id="svc-bulk-bar" hidden>
-                    <span><b id="svc-selected-count">0</b> selected</span>
+                    <span><b id="svc-selected-count">0</b> selected · apply to selected services</span>
                     <div class="svc-bulk-actions">
                         <button type="button" class="btn btn-sm btn-success" id="svc-bulk-start" disabled>▶ Start</button>
                         <button type="button" class="btn btn-sm btn-warning" id="svc-bulk-stop" disabled>⏹ Stop</button>
@@ -939,7 +942,7 @@
     <div class="toast-container" id="toast-container"></div>
 
     <script src="/static/js/nasa-enhance.js?v=20260809"></script>
-    <script src="/static/js/app.js?v=20260809"></script>
+    <script src="/static/js/app.js?v=20260809-compact"></script>
     <script src="/static/js/nexus-hud.js?v=20260807"></script>
     <script src="/static/js/operations-center.js?v=20260807-fast"></script>
     <div id="sparkline-announce" aria-live="polite" aria-atomic="true" style="position:absolute;left:-9999px;top:-9999px;"></div>

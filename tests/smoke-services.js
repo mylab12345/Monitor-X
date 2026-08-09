@@ -68,8 +68,11 @@ const doc = window.document;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-    // Let startup init run (fetchServices etc.)
-    await sleep(300);
+    // Services are intentionally lazy-loaded when the tab is opened. Invoke
+    // the public loader directly so this DOM smoke test does not depend on
+    // DOMContentLoaded timing in jsdom.
+    await window.fetchServices();
+    await sleep(50);
 
     // KPIs populated
     const kpiTotal = doc.getElementById('svc-kpi-total');
@@ -80,9 +83,12 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     assert(doc.getElementById('svc-kpi-loaded').textContent === '5', `KPI loaded = ${doc.getElementById('svc-kpi-loaded').textContent} (want 5)`);
     assert(doc.getElementById('svc-count').textContent === '5 Services', `count = ${doc.getElementById('svc-count').textContent}`);
 
-    // Cards rendered
+    // Compact table rendered: one short row per service with controls beside it.
+    assert(doc.querySelector('.svc-table'), 'compact service table exists');
+    assert(doc.querySelector('[data-svc-select-all]'), 'select-all checkbox exists');
+    assert(doc.querySelector('.svc-list-summary'), 'service list summary exists');
     const cards = doc.querySelectorAll('.svc-card');
-    assert(cards.length === 5, `card count = ${cards.length} (want 5)`);
+    assert(cards.length === 5, `service row count = ${cards.length} (want 5)`);
     const sshCard = doc.querySelector('.svc-card[data-svc-name="ssh.service"]');
     assert(sshCard, 'ssh.service card exists');
     assert(sshCard.classList.contains('svc-active'), 'ssh card has svc-active class');
