@@ -283,7 +283,26 @@
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
-   5. RESPONSIVE TWEAKS
+   5. LOADING SPINNER
+   ──────────────────────────────────────────────────────────────────────────── */
+.svc-loading-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border-card);
+    border-top-color: var(--accent-blue);
+    border-radius: 50%;
+    animation: svc-spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+}
+
+@keyframes svc-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   6. RESPONSIVE TWEAKS
    ──────────────────────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
     .svc-kpi-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }

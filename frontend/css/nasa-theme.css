@@ -465,8 +465,8 @@ canvas { filter: drop-shadow(0 0 6px rgba(56, 198, 255, 0.25)); border-radius: 4
     display: flex;
     align-items: center;
     gap: 0;
-    margin: 0 0 20px;
-    height: 38px;
+    margin: 0 0 14px;
+    height: 32px;
     border: 1px solid rgba(86, 166, 222, 0.22);
     border-radius: var(--radius-md);
     background: linear-gradient(90deg, rgba(8, 16, 30, 0.9), rgba(6, 12, 22, 0.7));

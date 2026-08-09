@@ -296,11 +296,12 @@ body.focus-mode .app-header {
 
 /* 1. Limit Maximum Width on Wide Screens to prevent stretching & flat charts */
 .main-content {
-    max-width: 1440px; /* Golden desktop dashboard width */
+    max-width: 1600px;
     width: 100%;
     margin: 0 auto;
-    padding: 24px clamp(14px, 2vw, 32px) 48px;
+    padding: 18px clamp(14px, 2vw, 32px) 32px;
     transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    flex: 1; /* Fill remaining vertical space so footer sticks to bottom */
 }
 
 /* Fluid Layout Override when selected by the operator */
@@ -312,41 +313,67 @@ body.layout-fluid .main-content {
 @media (min-width: 1200px) {
     .dashboard-grid-layout {
         display: grid;
-        grid-template-columns: 1.62fr 1fr; /* Golden ratio split (approx 62% left / 38% right) */
-        gap: 24px;
+        grid-template-columns: 1fr 380px; /* Fixed sidebar width for consistency */
+        gap: 20px;
         align-items: start;
         width: 100%;
+        /* Fill remaining vertical space so no big empty area at bottom */
+        min-height: calc(100vh - 220px);
     }
 
     .dashboard-main-col {
         display: flex;
         flex-direction: column;
-        gap: 24px;
+        gap: 16px;
         min-width: 0;
     }
 
     .dashboard-side-col {
         display: flex;
         flex-direction: column;
-        gap: 24px;
+        gap: 14px;
         min-width: 0;
+        /* Stretch sidebar to fill available height so no big empty gap */
+        position: sticky;
+        top: 90px;
+        align-self: start;
+        max-height: calc(100vh - 110px);
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(148,163,184,0.2) transparent;
+    }
+
+    .dashboard-side-col::-webkit-scrollbar {
+        width: 5px;
+    }
+    .dashboard-side-col::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    .dashboard-side-col::-webkit-scrollbar-thumb {
+        background: rgba(148,163,184,0.2);
+        border-radius: 3px;
     }
 
     /* Stack Sparkline Charts vertically when placed in the side column */
     .dashboard-side-col .charts-row {
         grid-template-columns: 1fr;
-        gap: 16px;
+        gap: 10px;
     }
 
     /* Format metrics grid to a clean 2-column configuration inside main column */
     .dashboard-main-col .metrics-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 18px;
+        gap: 14px;
     }
 
     /* Provide additional vertical space for historical charts to render rich details */
     .dashboard-main-col .ops-chart {
-        height: 120px;
+        height: 140px;
+    }
+
+    /* Metric cards: fill their grid cells without excess padding */
+    .dashboard-main-col .metric-card {
+        padding: 12px 14px;
     }
 }
 
@@ -373,13 +400,13 @@ body.layout-fluid .main-content {
 
 /* 4. Fine-Tuning Spacing & Densities for Better Vertical Fit */
 .metric-card {
-    padding: clamp(14px, 1.5vw, 20px);
-}
-.chart-card {
     padding: clamp(12px, 1.2vw, 16px);
 }
+.chart-card {
+    padding: clamp(10px, 1vw, 14px);
+}
 .operations-center {
-    padding: clamp(16px, 1.5vw, 20px);
+    padding: clamp(14px, 1.3vw, 18px);
 }
 
 /* 5. Sizing polish — every dashboard option fits its panel, no clipping.
@@ -395,6 +422,57 @@ body.layout-fluid .main-content {
 .top-processes,
 .table-container {
     min-width: 0;
+}
+
+/* Operations center chart: ensure the canvas fills available width and has
+   enough height to be useful, not a tiny sliver. */
+.ops-chart {
+    width: 100%;
+    min-height: 100px;
+    max-height: 180px;
+    margin-top: 12px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.15);
+    border: 1px solid var(--border-card);
+}
+
+/* Operations center incidents: compact pills, not huge cards */
+.ops-incidents {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+/* Operations detail bar: smaller, less prominent */
+.ops-detail {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-card);
+}
+
+/* Operations top area: tighter spacing */
+.operations-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.operations-top h2 {
+    font-size: 0.82rem !important;
+    margin-bottom: 2px;
+}
+.operations-summary {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+.ops-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
 }
 
 /* The legacy bottom margins on panels that are now flex children of the
@@ -462,18 +540,47 @@ body.layout-fluid .main-content {
 
 /* Keep sparkline cards compact in the side column: header + 60px canvas. */
 .dashboard-side-col .chart-card {
-    padding: 12px 14px;
+    padding: 10px 12px;
 }
 .dashboard-side-col .chart-header {
-    margin-bottom: 6px;
+    margin-bottom: 4px;
+    font-size: 0.78rem;
+}
+
+/* Issues panel and top-processes in sidebar: reduce padding to fit more content */
+.dashboard-side-col .issues-panel {
+    padding: 14px 16px;
+}
+.dashboard-side-col .issues-list {
+    margin-top: 8px;
+    gap: 6px;
+}
+.dashboard-side-col .issue-item {
+    padding: 8px 12px;
+    font-size: 0.8rem;
+}
+.dashboard-side-col .top-processes {
+    padding: 14px 16px;
+}
+.dashboard-side-col .top-processes .data-table {
+    font-size: 0.76rem;
+}
+.dashboard-side-col .top-processes .compact th,
+.dashboard-side-col .top-processes .compact td {
+    padding: 5px 8px;
 }
 
 /* Tighter context strip so the operations center starts higher on screen. */
 .dashboard-context {
-    margin: 2px 0 18px;
+    margin: 0 0 14px;
+    padding: 0;
 }
 .dashboard-context h2 {
-    font-size: clamp(1.2rem, 1.8vw, 1.5rem);
+    font-size: clamp(1.15rem, 1.6vw, 1.4rem);
+}
+.dashboard-context p {
+    font-size: 0.82rem;
+    margin-top: 2px;
 }
 
 /* Metric cards stay readable at any column width: values may not wrap. */
