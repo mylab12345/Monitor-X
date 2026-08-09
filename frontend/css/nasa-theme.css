@@ -203,7 +203,18 @@ body {
     color: var(--accent-blue);
     letter-spacing: 0.06em;
 }
-.met-label, .utc-label {
+/* DOY ground-console clock (third readout line) */
+.doy-clock {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    font-family: var(--font-hud);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+}
+.met-label, .utc-label, .doy-label {
     font-size: 0.6rem;
     font-weight: 700;
     color: var(--text-dim);
@@ -211,6 +222,7 @@ body {
 }
 .utc-clock { color: var(--text-muted); }
 #met-clock, #utc-clock { font-variant-numeric: tabular-nums; text-shadow: 0 0 10px rgba(56, 198, 255, 0.35); }
+#doy-clock { font-variant-numeric: tabular-nums; }
 
 .status-indicator { font-family: var(--font-hud); letter-spacing: 0.05em; }
 .status-dot.connected { box-shadow: 0 0 12px var(--success), 0 0 4px var(--success); }
@@ -606,6 +618,7 @@ canvas { filter: drop-shadow(0 0 6px rgba(56, 198, 255, 0.25)); border-radius: 4
 @media (max-width: 768px) {
     .mission-readout { padding: 2px 8px; }
     .met-clock, .utc-clock { font-size: 0.72rem; }
+    .doy-clock { font-size: 0.64rem; }
     .nasa-ticker { height: 34px; }
     .nasa-ticker-tag { padding: 0 10px; font-size: 0.58rem; }
 }

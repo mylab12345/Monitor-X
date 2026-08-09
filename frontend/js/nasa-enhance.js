@@ -44,9 +44,10 @@
         }, 460);
     }
 
-    /* ── Mission Elapsed Time (MET) + UTC clock ─────────────────────────── */
+    /* ── Mission Elapsed Time (MET) + UTC clock + DOY ground-console clock ── */
     var metEl = document.getElementById('met-clock');
     var utcEl = document.getElementById('utc-clock');
+    var doyEl = document.getElementById('doy-clock');
     var metStart = Date.now();
 
     function tickClocks() {
@@ -56,9 +57,16 @@
             var m = Math.floor(s / 60); s %= 60;
             metEl.textContent = 'T+ ' + pad(h) + ':' + pad(m) + ':' + pad(s);
         }
+        var d = new Date();
         if (utcEl) {
-            var d = new Date();
             utcEl.textContent = pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
+        }
+        if (doyEl) {
+            // UTC day-of-year, NASA ground-console format: DDD/HH:MM:SS
+            var start = Date.UTC(d.getUTCFullYear(), 0, 1);
+            var doy = Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - start) / 86400000) + 1;
+            doyEl.textContent = String(doy).padStart(3, '0') + '/' +
+                pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
         }
     }
     tickClocks();

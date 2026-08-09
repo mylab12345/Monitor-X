@@ -35,12 +35,26 @@ class SourceContracts(unittest.TestCase):
     def test_secure_local_default_and_shared_telemetry_bus(self):
         backend = BACKEND.read_text()
         app = (FRONTEND / "js" / "app.js").read_text()
-        mission = (FRONTEND / "js" / "mission-control.js").read_text()
         self.assertIn('MONITORX_HOST", "127.0.0.1"', backend)
         self.assertIn("MONITORX_AUTH_TOKEN", backend)
         self.assertIn("monitorx:stats", app)
-        self.assertIn("monitorx:stats", mission)
-        self.assertNotIn("new WebSocket(proto + '://' + window.location.host + '/ws')", mission)
+        # Only app.js may own the shared /ws connection; no frontend module
+        # opens a second raw telemetry socket.
+        for script in (FRONTEND / "js").glob("*.js"):
+            if script.name == "app.js":
+                continue
+            self.assertNotIn(
+                "new WebSocket(proto + '://' + window.location.host + '/ws')",
+                script.read_text(),
+            )
+
+    def test_flight_control_loop_board_is_removed(self):
+        html = (FRONTEND / "index.html").read_text().lower()
+        self.assertNotIn("mission-board", html)
+        self.assertNotIn("mission-control.js", html)
+        self.assertNotIn("mission-control.css", html)
+        self.assertFalse((FRONTEND / "js" / "mission-control.js").exists())
+        self.assertFalse((FRONTEND / "css" / "mission-control.css").exists())
 
     def test_all_static_buttons_have_type(self):
         import re

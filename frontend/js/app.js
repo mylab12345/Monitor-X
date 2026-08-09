@@ -253,7 +253,7 @@ function connectWebSocket() {
     ws.onmessage = (event) => {
         try {
             statsData = JSON.parse(event.data);
-            // Mission Control and other progressive modules consume the same
+            // Shared telemetry bus: progressive modules consume the same
             // frame; no second WebSocket is opened by the browser.
             window.dispatchEvent(new CustomEvent('monitorx:stats', { detail: statsData }));
             // P1: aria-live announcement + throttle (update max 1/sec)
