@@ -2586,16 +2586,47 @@ async function fetchServiceCapabilities() {
     }
 }
 
+// Guard against concurrent fetchServices() calls that can pile up from
+// DOMContentLoaded init, tab switching, and the auto-refresh timer.
+let servicesFetchInProgress = false;
+let servicesLoadAttempted = false;
+
 async function fetchServices(refreshPermissions = false) {
+    // Prevent multiple concurrent fetches from stacking up
+    if (servicesFetchInProgress) return;
+    servicesFetchInProgress = true;
+    
+    // Show loading state only on the very first load (never re-show after error)
+    const container = document.getElementById('service-list');
+    if (container && !servicesLoadAttempted && servicesCache.length === 0) {
+        container.innerHTML = '<p class="no-data"><span class="svc-loading-spinner"></span> Loading systemd services…</p>';
+    }
+    servicesLoadAttempted = true;
+    
     try {
-        if (!serviceCapabilities || refreshPermissions) await fetchServiceCapabilities();
+        // Only fetch capabilities if not already loaded or explicitly refreshing
+        if (!serviceCapabilities || refreshPermissions) {
+            try {
+                await fetchServiceCapabilities();
+            } catch (capError) {
+                console.warn('Service capabilities check failed:', capError);
+                // Continue anyway - capabilities check failure shouldn't block service listing
+            }
+        }
+        
         const res = await fetch(`${API_BASE}/api/services`);
         if (!res.ok) throw new Error(await readApiError(res));
         servicesCache = await res.json();
         renderServices(servicesCache);
     } catch (e) {
-        showToast('Error fetching services: ' + e.message, 'error');
+        console.error('Error fetching services:', e);
+        // Only show toast on the first failure (auto-refresh keeps retrying silently)
+        if (servicesCache.length === 0) {
+            showToast('Error fetching services: ' + e.message, 'error');
+        }
         renderServicesUnavailable(e.message);
+    } finally {
+        servicesFetchInProgress = false;
     }
 }
 
@@ -3377,7 +3408,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => { if (!statsData) fetchStats(); }, 5000);
     fetchVmCapabilities();
     setVmAutoRefresh(document.getElementById('vm-refresh-select')?.value ?? 2);
-    fetchServiceCapabilities();
-    fetchServices();
-    setSvcAutoRefresh(document.getElementById('svc-refresh-select')?.value ?? 2);
+    // Defer services loading until user visits the tab (avoids blocking on
+    // systemctl subprocesses at page load, which can take 10+ seconds when
+    // systemd is slow or unavailable).
+    setSvcAutoRefresh(document.getElementById('svc-refresh-select')?.value ?? 10);
 });

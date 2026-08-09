@@ -55,7 +55,7 @@ body {
 
 /* Full-bleed layout: dashboard spans the entire terminal/system viewport width
    (no 1600px cap) so every panel is visible edge-to-edge at any screen size. */
-.main-content { max-width: none; width: 100%; margin: 0 auto; padding: 28px clamp(14px, 2vw, 32px) 48px; }
+.main-content { max-width: none; width: 100%; margin: 0 auto; padding: 18px clamp(14px, 2vw, 32px) 32px; }
 .dashboard-context { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin: 4px 0 24px; }
 .dashboard-context h2 { font-size: clamp(1.35rem, 2vw, 1.7rem); letter-spacing: -.04em; color: var(--text-main); }
 .dashboard-context p { margin-top: 5px; color: var(--mx-text-soft); font-size: .88rem; }
