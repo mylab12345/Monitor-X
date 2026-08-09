@@ -110,6 +110,15 @@ const state = {
     vmCapabilities: null,
     vmPending: new Set(),
     vmLastAction: new Map(),
+    // Systemd services state
+    svcSearch: '',
+    svcStateFilter: 'all',
+    svcSort: 'name',
+    svcSelected: new Set(),
+    svcRefreshMs: 2000,
+    svcAutoTimer: null,
+    svcPending: new Set(),
+    svcLastData: null,
     // Console state
     consoleTerminal: null,
     consoleWs: null,
@@ -2586,64 +2595,293 @@ async function fetchServices(refreshPermissions = false) {
         renderServices(servicesCache);
     } catch (e) {
         showToast('Error fetching services: ' + e.message, 'error');
+        renderServicesUnavailable(e.message);
     }
+}
+
+/* Classify a unit into one of the three UI buckets (active / failed / inactive). */
+function svcClass(s) {
+    if (s.active === 'failed' || s.sub === 'failed') return 'failed';
+    if (s.active === 'active') return 'active';
+    return 'inactive';
+}
+
+function svcStateLabel(s) {
+    const cls = svcClass(s);
+    const sub = s.sub === 'running' ? 'RUNNING' : String(s.sub || '').toUpperCase();
+    if (cls === 'failed') return `FAILED · ${sub}`;
+    if (cls === 'active') return `ACTIVE · ${sub}`;
+    return `INACTIVE · ${sub}`;
+}
+
+function svcFilterSort(services) {
+    const search = state.svcSearch.toLowerCase();
+    let list = services.filter(s => {
+        if (state.svcStateFilter === 'running' && s.active !== 'active') return false;
+        if (state.svcStateFilter === 'stopped' && s.active === 'active') return false;
+        if (state.svcStateFilter === 'failed' && s.active !== 'failed' && s.sub !== 'failed') return false;
+        if (!search) return true;
+        return (s.name || '').toLowerCase().includes(search)
+            || (s.description || '').toLowerCase().includes(search)
+            || (s.active || '').toLowerCase().includes(search)
+            || (s.sub || '').toLowerCase().includes(search);
+    });
+    list.sort((a, b) => {
+        if (state.svcSort === 'state') {
+            const rank = { failed: 0, active: 1, inactive: 2 };
+            return (rank[svcClass(a)] ?? 3) - (rank[svcClass(b)] ?? 3)
+                || (a.name || '').localeCompare(b.name || '');
+        }
+        if (state.svcSort === 'load') return (a.load || '').localeCompare(b.load || '');
+        return (a.name || '').localeCompare(b.name || '');
+    });
+    return list;
 }
 
 function renderServices(services) {
-    const tbody = document.getElementById('services-body');
-    if (!tbody) return;
-    tbody.innerHTML = '';
-    const filter = document.getElementById('service-filter').value;
-    const search = document.getElementById('service-search').value.toLowerCase();
-    let filtered = services;
-    if (filter === 'running') filtered = filtered.filter(s => s.active === 'active');
-    else if (filter === 'stopped') filtered = filtered.filter(s => s.active !== 'active');
-    else if (filter === 'failed') filtered = filtered.filter(s => s.active === 'failed' || s.sub === 'failed');
-    if (search) filtered = filtered.filter(s => s.name.toLowerCase().includes(search) || s.description.toLowerCase().includes(search));
+    const container = document.getElementById('service-list');
+    if (!container) return;
 
-    if (!filtered.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="no-data">No services match the current filter.</td></tr>';
+    // Cache latest inventory so filters/sorting re-render without a network call.
+    state.svcLastData = services;
+
+    // Suppress re-rendering while an action is in flight (see renderVms).
+    if (state.svcPending.size > 0) return;
+
+    document.getElementById('svc-count').textContent =
+        `${services.length} Service${services.length === 1 ? '' : 's'}`;
+
+    // KPI counts
+    const counts = { total: services.length, active: 0, failed: 0, inactive: 0, loaded: 0 };
+    services.forEach(s => {
+        const cls = svcClass(s);
+        if (cls === 'failed') counts.failed++;
+        else if (cls === 'active') counts.active++;
+        else counts.inactive++;
+        if (s.load === 'loaded') counts.loaded++;
+    });
+    document.getElementById('svc-kpi-total').textContent = counts.total;
+    document.getElementById('svc-kpi-active').textContent = counts.active;
+    document.getElementById('svc-kpi-failed').textContent = counts.failed;
+    document.getElementById('svc-kpi-inactive').textContent = counts.inactive;
+    document.getElementById('svc-kpi-loaded').textContent = counts.loaded;
+
+    if (!services.length) {
+        container.innerHTML = `
+            <div class="svc-empty-state">
+                <div class="icon">⚙️</div>
+                <h3>No systemd services found</h3>
+                <p>This host exposes no <code>.service</code> units through the systemd manager.</p>
+            </div>`;
         return;
     }
-    const disabled = serviceCapabilities?.can_control ? '' : 'disabled title="Service controls are not configured"';
-    filtered.forEach(s => {
-        const row = document.createElement('tr');
-        const escapedName = escapeHtml(s.name);
-        row.innerHTML = `
-            <td><b>${escapedName}</b></td><td>${escapeHtml(s.load)}</td>
-            <td><span class="badge ${s.active === 'active' ? 'badge-success' : s.active === 'failed' ? 'badge-danger' : 'badge-warning'}">${escapeHtml(s.active)}</span></td>
-            <td>${escapeHtml(s.sub)}</td><td style="font-size:0.8rem">${escapeHtml(s.description)}</td>
-            <td><div class="service-actions">
-                ${s.active !== 'active' ? `<button type="button" class="btn btn-sm btn-success" ${disabled} onclick="controlService('${escapedName}','start', this)">Start</button>` : ''}
-                ${s.active === 'active' ? `<button type="button" class="btn btn-sm btn-warning" ${disabled} onclick="controlService('${escapedName}','stop', this)">Stop</button>` : ''}
-                <button type="button" class="btn btn-sm btn-primary" ${disabled} onclick="controlService('${escapedName}','restart', this)">Restart</button>
-                <button type="button" class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','reload', this)">Reload</button>
-                <button type="button" class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','enable', this)">Enable</button>
-                <button type="button" class="btn btn-sm btn-outline" ${disabled} onclick="controlService('${escapedName}','disable', this)">Disable</button>
-                <button type="button" class="btn btn-sm btn-outline" onclick="openServiceLogs('${escapedName}')">📜 Logs</button>
-            </div></td>`;
-        tbody.appendChild(row);
+
+    const visible = svcFilterSort(services);
+    if (!visible.length) {
+        container.innerHTML = `<div class="svc-empty-state"><div class="icon">🔍</div><h3>No matching services</h3><p>Adjust the search query or state filter to see more units.</p></div>`;
+        return;
+    }
+
+    const canControl = serviceCapabilities?.can_control ?? false;
+    container.innerHTML = visible.map(s => {
+        const cls = svcClass(s);
+        const name = escapeHtml(s.name);
+        const selected = state.svcSelected.has(s.name) ? 'selected' : '';
+        return `
+            <article class="svc-card svc-${cls} ${selected}" data-svc-name="${name}">
+                <div class="svc-card-header">
+                    <label class="svc-checkbox-cell"><input type="checkbox" class="svc-checkbox" data-svc-select="${name}" ${selected ? 'checked' : ''}></label>
+                    <div><strong>${name}</strong><div class="svc-desc">${escapeHtml(s.description || '—')}</div></div>
+                    <span class="svc-state ${cls}">${svcStateLabel(s)}</span>
+                </div>
+                <div class="svc-meta-grid">
+                    <div class="svc-stat"><span>Load state</span><b class="svc-load-${escapeHtml(s.load)}">${escapeHtml(s.load)}</b></div>
+                    <div class="svc-stat"><span>Active state</span><b>${escapeHtml(s.active)}</b></div>
+                    <div class="svc-stat"><span>Sub state</span><b class="svc-sub-${escapeHtml(s.sub)}">${escapeHtml(s.sub)}</b></div>
+                    <div class="svc-stat"><span>Unit type</span><b>service</b></div>
+                </div>
+                ${renderSvcActions(s, canControl)}
+            </article>`;
+    }).join('');
+
+    initSvcDelegation(container);
+}
+
+function renderSvcActions(s, canControl) {
+    const name = escapeHtml(s.name);
+    const active = s.active === 'active';
+    const failed = svcClass(s) === 'failed';
+    if (!canControl) {
+        const reason = serviceCapabilities?.message
+            || 'Service controls are not configured — run systemd/install-service.sh to enable.';
+        return `<div class="svc-actions"><span class="svc-controls-note">🔒 ${escapeHtml(reason)}</span></div>`;
+    }
+    let html = '';
+    if (!active) html += `<button type="button" class="btn btn-success" data-svc-action="start" data-svc-name="${name}" ${failed ? 'title="Service is failed — starting will attempt recovery"' : ''}>▶ Start</button>`;
+    if (active)  html += `<button type="button" class="btn btn-warning" data-svc-action="stop" data-svc-name="${name}">⏹ Stop</button>`;
+    html += `<button type="button" class="btn btn-primary" data-svc-action="restart" data-svc-name="${name}">↻ Restart</button>`;
+    html += `<button type="button" class="btn btn-outline" data-svc-action="reload" data-svc-name="${name}" title="Reload configuration without restarting">↺ Reload</button>`;
+    html += `<button type="button" class="btn btn-outline" data-svc-action="enable" data-svc-name="${name}" title="Enable at boot">◉ Enable</button>`;
+    html += `<button type="button" class="btn btn-outline" data-svc-action="disable" data-svc-name="${name}" title="Disable at boot">○ Disable</button>`;
+    html += `<button type="button" class="btn btn-outline" data-svc-logs="${name}" title="View journal logs">📜 Logs</button>`;
+    return `<div class="svc-actions">${html}</div>`;
+}
+
+/* One delegated listener per container — survives every innerHTML rebuild. */
+function initSvcDelegation(container) {
+    if (!container || container.dataset.svcDelegated === '1') return;
+    container.dataset.svcDelegated = '1';
+
+    container.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-svc-action]');
+        if (btn && container.contains(btn)) {
+            e.preventDefault();
+            e.stopPropagation();
+            controlService(btn.dataset.svcName, btn.dataset.svcAction);
+            return;
+        }
+        const logBtn = e.target.closest('[data-svc-logs]');
+        if (logBtn && container.contains(logBtn)) {
+            e.preventDefault();
+            e.stopPropagation();
+            openServiceLogs(logBtn.dataset.svcLogs);
+            return;
+        }
+    });
+
+    container.addEventListener('change', (e) => {
+        const cb = e.target.closest('[data-svc-select]');
+        if (!cb || !container.contains(cb)) return;
+        if (cb.checked) state.svcSelected.add(cb.dataset.svcSelect);
+        else state.svcSelected.delete(cb.dataset.svcSelect);
+        updateSvcBulkBar();
+        const card = cb.closest('.svc-card');
+        if (card) card.classList.toggle('selected', cb.checked);
     });
 }
 
-async function controlService(name, action, button) {
+function markSvcPending(name, pending) {
+    if (pending) state.svcPending.add(name);
+    else state.svcPending.delete(name);
+    const card = document.querySelector(`.svc-card[data-svc-name="${cssEscape(name)}"]`);
+    if (card) card.classList.toggle('pending', pending);
+}
+
+function updateSvcBulkBar() {
+    const bar = document.getElementById('svc-bulk-bar');
+    const n = state.svcSelected.size;
+    document.getElementById('svc-selected-count').textContent = n;
+    if (bar) bar.hidden = n === 0;
+    ['start', 'stop', 'restart', 'reload', 'enable', 'disable'].forEach(a => {
+        const btn = document.getElementById(`svc-bulk-${a}`);
+        if (btn) btn.disabled = n === 0 || !(serviceCapabilities?.can_control ?? false);
+    });
+}
+
+function clearSvcSelection() {
+    state.svcSelected.clear();
+    updateSvcBulkBar();
+    document.querySelectorAll('.svc-checkbox').forEach(cb => { cb.checked = false; });
+    document.querySelectorAll('.svc-card.selected').forEach(c => c.classList.remove('selected'));
+}
+
+async function controlService(name, action, opts = {}) {
     if (!serviceCapabilities?.can_control) {
         showToast('Service controls are not authorized. Run systemd/install-service.sh.', 'error');
-        return;
+        return false;
     }
-    if (!confirm(`Are you sure you want to ${action.toUpperCase()} service ${name}?`)) return;
-    const originalLabel = button?.textContent;
-    if (button) { button.disabled = true; button.textContent = 'Working…'; }
+    const destructive = ['stop', 'restart', 'disable'];
+    if (!opts.skipConfirm && destructive.includes(action)) {
+        const confirmed = await confirmAction({
+            title: `⚠️ ${action.toUpperCase()} service`,
+            message: `You are about to ${action} the systemd unit.`,
+            target: `Target: ${name}`,
+            confirmLabel: `Yes, ${action.toUpperCase()}`,
+            confirmClass: action === 'restart' ? 'btn-warning' : 'btn-danger'
+        });
+        if (!confirmed) return false;
+    }
+    if (state.svcPending.has(name)) return false;
+    markSvcPending(name, true);
     try {
         const res = await fetch(`${API_BASE}/api/services/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
         if (!res.ok) throw new Error(await readApiError(res));
         const result = await res.json();
         showToast(result.message, 'success');
-        await fetchServices();
+        return true;
     } catch (e) {
         showToast(`Could not ${action} ${name}: ${e.message}`, 'error');
-        if (button) { button.disabled = false; button.textContent = originalLabel; }
+        return false;
+    } finally {
+        markSvcPending(name, false);
+        if (!opts.bulk) {
+            await fetchServices();
+            scheduleSvcSettleRefresh();
+        }
     }
+}
+
+/* systemd applies actions asynchronously; poll a few times so cards settle. */
+function scheduleSvcSettleRefresh() {
+    [1500, 4000, 8000].forEach(delay => setTimeout(() => {
+        if (state.currentTab === 'services' && state.svcPending.size === 0) fetchServices();
+    }, delay));
+}
+
+async function bulkSvcAction(action) {
+    if (state.svcSelected.size === 0) return;
+    const names = Array.from(state.svcSelected);
+    const destructive = ['stop', 'restart', 'disable'];
+    if (destructive.includes(action)) {
+        const confirmed = await confirmAction({
+            title: `⚠️ Bulk ${action.toUpperCase()}`,
+            message: `You are about to ${action} ${names.length} service(s).`,
+            target: `Targets: ${names.slice(0, 5).join(', ')}${names.length > 5 ? `, +${names.length - 5} more` : ''}`,
+            confirmLabel: `Yes, ${action.toUpperCase()} all`,
+            confirmClass: action === 'restart' ? 'btn-warning' : 'btn-danger'
+        });
+        if (!confirmed) return;
+    }
+    showToast(`Dispatching ${action} to ${names.length} service(s)…`, 'info');
+    let ok = 0, failed = 0;
+    for (const name of names) {
+        const success = await controlService(name, action, { skipConfirm: true, bulk: true });
+        if (success) ok++; else failed++;
+    }
+    showToast(`Bulk ${action}: ${ok} succeeded, ${failed} failed.`, failed ? 'error' : 'success');
+    clearSvcSelection();
+    fetchServices();
+}
+
+function setSvcAutoRefresh(intervalSeconds) {
+    const seconds = parseInt(intervalSeconds, 10);
+    state.svcRefreshMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+    if (state.svcAutoTimer) {
+        clearInterval(state.svcAutoTimer);
+        state.svcAutoTimer = null;
+    }
+    if (state.svcRefreshMs > 0) {
+        state.svcAutoTimer = setInterval(() => {
+            if (state.currentTab === 'services' && state.svcPending.size === 0) fetchServices();
+        }, state.svcRefreshMs);
+    }
+}
+
+/* Rendered when /api/services itself fails (systemd bus unavailable, etc.). */
+function renderServicesUnavailable(message) {
+    const container = document.getElementById('service-list');
+    if (!container) return;
+    document.getElementById('svc-count').textContent = '0 Services';
+    ['svc-kpi-total', 'svc-kpi-active', 'svc-kpi-failed', 'svc-kpi-inactive', 'svc-kpi-loaded']
+        .forEach(id => { const el = document.getElementById(id); if (el) el.textContent = '0'; });
+    container.innerHTML = `
+        <div class="svc-empty-state">
+            <div class="icon">⚠️</div>
+            <h3>Systemd services unavailable</h3>
+            <p>The systemd manager could not be reached on this host. This usually means the host has no
+            <code>systemd</code> running (e.g. a container), or <code>systemctl</code> is not installed.
+            Error: <code>${escapeHtml(message)}</code></p>
+        </div>`;
 }
 
 /* Open the journal log viewer for a systemd unit (reuses /api/troubleshoot/logs). */
@@ -2699,7 +2937,8 @@ async function exportReport(format) {
 }
 
 /* Event Listeners Initialization */
-const THEMES = ['midnight', 'aurora', 'ember', 'forest', 'nebula', 'graphite', 'ocean', 'desert', 'arctic'];
+const THEMES = ['midnight', 'aurora', 'ember', 'forest', 'nebula', 'graphite',
+                'ocean', 'lagoon', 'meadow', 'desert', 'canyon', 'arctic', 'sakura'];
 
 /* Normalise legacy localStorage values to the new theme names.
    Older builds stored 'dark' / 'light'; we map them onto the closest theme. */
@@ -3012,13 +3251,31 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Services Filters
-    document.getElementById('service-filter')?.addEventListener('change', () => renderServices(servicesCache));
-    document.getElementById('service-search')?.addEventListener('input', () => {
+    // Services Filters & bulk toolbar
+    document.getElementById('service-filter')?.addEventListener('change', (e) => {
+        state.svcStateFilter = e.target.value;
+        renderServices(servicesCache);
+    });
+    document.getElementById('service-search')?.addEventListener('input', (e) => {
+        state.svcSearch = e.target.value;
         clearTimeout(serviceSearchTimer);
         serviceSearchTimer = setTimeout(() => renderServices(servicesCache), 120);
     });
+    document.getElementById('svc-sort')?.addEventListener('change', (e) => {
+        state.svcSort = e.target.value;
+        renderServices(servicesCache);
+    });
+    document.getElementById('svc-refresh-select')?.addEventListener('change', (e) => {
+        setSvcAutoRefresh(e.target.value);
+    });
     document.getElementById('refresh-services-btn')?.addEventListener('click', () => fetchServices(true));
+    document.getElementById('svc-bulk-start')?.addEventListener('click', () => bulkSvcAction('start'));
+    document.getElementById('svc-bulk-stop')?.addEventListener('click', () => bulkSvcAction('stop'));
+    document.getElementById('svc-bulk-restart')?.addEventListener('click', () => bulkSvcAction('restart'));
+    document.getElementById('svc-bulk-reload')?.addEventListener('click', () => bulkSvcAction('reload'));
+    document.getElementById('svc-bulk-enable')?.addEventListener('click', () => bulkSvcAction('enable'));
+    document.getElementById('svc-bulk-disable')?.addEventListener('click', () => bulkSvcAction('disable'));
+    document.getElementById('svc-bulk-clear')?.addEventListener('click', clearSvcSelection);
 
     // Service journal viewer modal
     document.getElementById('service-logs-close')?.addEventListener('click', closeServiceLogs);
@@ -3120,4 +3377,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => { if (!statsData) fetchStats(); }, 5000);
     fetchVmCapabilities();
     setVmAutoRefresh(document.getElementById('vm-refresh-select')?.value ?? 2);
+    fetchServiceCapabilities();
+    fetchServices();
+    setSvcAutoRefresh(document.getElementById('svc-refresh-select')?.value ?? 2);
 });

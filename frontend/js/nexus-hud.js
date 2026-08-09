@@ -449,14 +449,8 @@
 
     /* ── Table row state tinting ─────────────────────────────────────────── */
     function tintRows() {
-        // Services table: color failed/active rows
-        document.querySelectorAll('#services-body tr').forEach(tr => {
-            const txt = tr.textContent.toLowerCase();
-            tr.classList.remove('nx-row-ok', 'nx-row-warn', 'nx-row-err');
-            if (txt.includes('failed')) tr.classList.add('nx-row-err');
-            else if (txt.includes('active (running)')) tr.classList.add('nx-row-ok');
-            else if (txt.includes('inactive') || txt.includes('dead')) tr.classList.add('nx-row-warn');
-        });
+        // Services cards are state-styled natively (svc-active / svc-failed /
+        // svc-inactive pills and KPI counters) — no table tinting needed.
         // Processes: red for zombie state, orange for sleeping-blocked/D/uninterruptible
         document.querySelectorAll('#all-processes-body tr, #top-processes-body tr').forEach(tr => {
             const txt = tr.textContent;
