@@ -286,12 +286,18 @@
                     </div>
 
                     <!-- System Info Card -->
-                    <div class="metric-card" id="system-card">
+                    <section class="metric-card system-metadata-card" id="system-card" aria-labelledby="system-metadata-title">
                         <div class="card-header">
-                            <h2>System Metadata</h2>
+                            <div>
+                                <p class="card-eyebrow">Host identity</p>
+                                <h2 id="system-metadata-title">System Metadata</h2>
+                            </div>
+                            <span class="metadata-live" aria-label="System metadata updates with live telemetry">Live</span>
                         </div>
-                        <div class="system-info" id="system-info"></div>
-                    </div>
+                        <dl class="system-info" id="system-info" aria-live="polite" aria-busy="true">
+                            <div class="system-info-placeholder"><dt>Loading host metadata</dt><dd>—</dd></div>
+                        </dl>
+                    </section>
                 </div>
 
                 <!-- OS Live Alerts Banner -->

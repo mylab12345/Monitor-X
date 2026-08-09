@@ -517,16 +517,25 @@ function updateGpu(gpus) {
 function updateSystem(sys) {
     if (!sys) return;
     const info = document.getElementById('system-info');
-    info.innerHTML = `
-        <span><span>Hostname:</span><b>${escapeHtml(sys.hostname)}</b></span>
-        <span><span>OS Platform:</span><b>${escapeHtml(sys.platform)} ${escapeHtml(sys.platform_release)}</b></span>
-        <span><span>Kernel Version:</span><b>${escapeHtml(sys.platform_version.substring(0, 20))}</b></span>
-        <span><span>Architecture:</span><b>${escapeHtml(sys.architecture)}</b></span>
-        <span><span>Uptime:</span><b>${escapeHtml(sys.uptime_str)}</b></span>
-        <span><span>Boot Time:</span><b>${escapeHtml(sys.boot_time)}</b></span>
-    `;
-    document.getElementById('hostname').textContent = sys.hostname;
-    document.getElementById('uptime').textContent = 'Uptime: ' + sys.uptime_str;
+    const value = (item) => escapeHtml(String(item ?? 'Unavailable'));
+    const kernel = String(sys.platform_version ?? 'Unavailable');
+    const metadata = [
+        ['Hostname', sys.hostname],
+        ['Operating system', [sys.platform, sys.platform_release].filter(Boolean).join(' ') || 'Unavailable'],
+        ['Kernel version', kernel.length > 42 ? `${kernel.slice(0, 42)}…` : kernel],
+        ['Architecture', sys.architecture],
+        ['Uptime', sys.uptime_str],
+        ['Boot time', sys.boot_time],
+    ];
+
+    info.innerHTML = metadata.map(([label, item]) => `
+        <div class="system-info-row">
+            <dt>${label}</dt>
+            <dd title="${escapeAttr(item ?? 'Unavailable')}">${value(item)}</dd>
+        </div>`).join('');
+    info.setAttribute('aria-busy', 'false');
+    document.getElementById('hostname').textContent = sys.hostname ?? '—';
+    document.getElementById('uptime').textContent = 'Uptime: ' + (sys.uptime_str ?? '—');
 }
 
 function updateTopProcesses(processes) {
