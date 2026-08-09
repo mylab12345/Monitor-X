@@ -3266,23 +3266,66 @@ async def service_capabilities():
             "message": "Controls need the MonitorX sudo policy. Run systemd/install-service.sh and restart MonitorX."}
 
 
+def _parse_service_units(output: bytes) -> Dict[str, Dict[str, str]]:
+    """Parse ``systemctl list-units``' whitespace-delimited service rows."""
+    units: Dict[str, Dict[str, str]] = {}
+    for line in output.decode(errors="replace").splitlines():
+        parts = line.split()
+        # NAME LOAD ACTIVE SUB DESCRIPTION
+        if len(parts) >= 4 and parts[0].endswith(".service"):
+            units[parts[0]] = {
+                "name": parts[0], "load": parts[1], "active": parts[2], "sub": parts[3],
+                "description": " ".join(parts[4:]),
+            }
+    return units
+
+
+def _parse_service_unit_files(output: bytes) -> Dict[str, str]:
+    """Extract unit names from ``systemctl list-unit-files`` output.
+
+    ``list-units --all`` is a *runtime* inventory: it does not include a
+    disabled service until something has caused systemd to load it.  Unit files
+    are the installed inventory, so merging this output is what makes stopped
+    and disabled services visible in the manager too.
+    """
+    names: Dict[str, str] = {}
+    for line in output.decode(errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].endswith(".service"):
+            names[parts[0]] = parts[1]
+    return names
+
+
 @app.get("/api/services")
 async def list_services():
-    """List systemd services. Read-only systemctl access needs no elevated policy."""
+    """List every installed systemd service plus its current runtime state.
+
+    A service that is stopped/disabled is commonly absent from ``list-units``.
+    We therefore merge the live list with ``list-unit-files`` and represent an
+    installed-but-not-loaded unit as inactive/dead.  Active units retain their
+    precise substate (running, waiting, listening, exited, and so on).
+    """
     try:
-        returncode, stdout, stderr = await _run_cmd(
-            [SYSTEMCTL_BIN, "list-units", "--type=service", "--no-pager", "--no-legend", "--all"],
-            timeout=15.0,
+        unit_result, file_result = await asyncio.gather(
+            _run_cmd([SYSTEMCTL_BIN, "list-units", "--type=service", "--no-pager", "--no-legend", "--plain", "--all"], timeout=15.0),
+            _run_cmd([SYSTEMCTL_BIN, "list-unit-files", "--type=service", "--no-pager", "--no-legend", "--plain"], timeout=15.0),
         )
-        if returncode:
-            raise HTTPException(status_code=503, detail=stderr.decode().strip() or "systemd is unavailable")
-        services = []
-        for line in stdout.decode().strip().split('\n'):
-            parts = line.split()
-            if len(parts) >= 4:
-                services.append({"name": parts[0], "load": parts[1], "active": parts[2], "sub": parts[3],
-                                 "description": " ".join(parts[4:]) if len(parts) > 4 else ""})
-        return services
+        unit_returncode, unit_stdout, unit_stderr = unit_result
+        file_returncode, file_stdout, _file_stderr = file_result
+        if unit_returncode:
+            raise HTTPException(status_code=503, detail=unit_stderr.decode().strip() or "systemd is unavailable")
+
+        services = _parse_service_units(unit_stdout)
+        # A unit-file listing is supplementary. Some constrained systemd
+        # installations deny it, but their runtime service list is still useful.
+        if file_returncode == 0:
+            for name, unit_file_state in _parse_service_unit_files(file_stdout).items():
+                service = services.setdefault(name, {
+                    "name": name, "load": "loaded", "active": "inactive", "sub": "dead",
+                    "description": "Installed service (not currently loaded)",
+                })
+                service["unit_file_state"] = unit_file_state
+        return [services[name] for name in sorted(services, key=str.casefold)]
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="systemctl listing timed out (systemd busy?)")
     except (FileNotFoundError, PermissionError):

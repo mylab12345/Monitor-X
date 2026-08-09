@@ -121,6 +121,8 @@ sudo systemctl restart monitorx
 
 The **Systemd Services** tab shows whether this policy is available, disables controls if it is not, and displays the exact API error rather than reporting a false success. Availability is verified by asking sudo to validate the exact `systemctl --no-ask-password <action> <unit>` argv MonitorX runs — not merely whether the account holds *some* sudo privilege — so the tab only reports "available" when the granted commands actually match.
 
+The service inventory merges the live systemd unit list with installed unit files. This means enabled, disabled, static, masked, running, waiting/sleeping, failed, and stopped services are shown; a unit that is installed but not currently loaded is displayed as **inactive / dead**. A Docker deployment cannot inspect host systemd without a deliberately configured host D-Bus integration, so run the native systemd installation when host service management is required.
+
 ### Useful Service Commands
 
 ```bash

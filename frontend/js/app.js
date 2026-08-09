@@ -2729,7 +2729,7 @@ function renderServices(services) {
                     <div class="svc-stat"><span>Load state</span><b class="svc-load-${escapeHtml(s.load)}">${escapeHtml(s.load)}</b></div>
                     <div class="svc-stat"><span>Active state</span><b>${escapeHtml(s.active)}</b></div>
                     <div class="svc-stat"><span>Sub state</span><b class="svc-sub-${escapeHtml(s.sub)}">${escapeHtml(s.sub)}</b></div>
-                    <div class="svc-stat"><span>Unit type</span><b>service</b></div>
+                    <div class="svc-stat"><span>Startup</span><b>${escapeHtml(s.unit_file_state || 'runtime')}</b></div>
                 </div>
                 ${renderSvcActions(s, canControl)}
             </article>`;
