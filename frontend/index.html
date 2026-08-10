@@ -460,6 +460,20 @@
                         </div>
                     </div>
 
+                    <div class="system-fix-toolbox" id="system-fix-toolbox">
+                        <div class="system-fix-head">
+                            <div>
+                                <h3>🧰 System-Wide Fix Options</h3>
+                                <p>Maintenance and repair actions for the entire host. These remain available even when the current scan is clean; unavailable actions are automatically greyed out.</p>
+                            </div>
+                            <button type="button" class="btn btn-primary glow-btn" id="system-cleanup-now-btn" onclick="remediateAction('system_cleanup', null, {silent:false, button:this})">⚡ Run Full System Cleanup</button>
+                        </div>
+                        <div class="system-fix-groups" id="system-fix-groups">
+                            <p class="no-data">Loading available system fixes…</p>
+                        </div>
+                        <div id="system-fix-result"></div>
+                    </div>
+
                     <div class="checks-grid" id="checks-grid-container">
                         <p class="loading-text">Click "Run Diagnostic Scan" to perform automated checks.</p>
                     </div>

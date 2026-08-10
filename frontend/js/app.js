@@ -193,10 +193,14 @@ function attrSel(value) {
 }
 
 function fixMeta(action) {
-    const meta = { label: action, level: 'info', sudo: false, description: '' };
+    const meta = { label: action, level: 'info', sudo: false, description: '', category: 'System' };
     if (fixCapabilities?.fix_actions && fixCapabilities.fix_actions[action]) {
-        meta.label = fixCapabilities.fix_actions[action].label || meta.label;
-        meta.level = fixCapabilities.fix_actions[action].level || meta.level;
+        const src = fixCapabilities.fix_actions[action];
+        meta.label = src.label || meta.label;
+        meta.level = src.level || meta.level;
+        meta.sudo = !!src.sudo;
+        meta.description = src.description || meta.description;
+        meta.category = src.category || meta.category;
     }
     return meta;
 }
@@ -204,6 +208,75 @@ function fixMeta(action) {
 function fixActionAvailable(action) {
     return !fixCapabilities || !fixCapabilities.available_actions ||
            fixCapabilities.available_actions[action] !== false;
+}
+
+/* System-wide repairs that are always exposed in the Troubleshoot Hub, not
+   only when a scan attaches a fix to a failing check. */
+const SYSTEM_FIX_TOOLBOX = [
+    'system_cleanup',
+    'trim_journal',
+    'vacuum_journal',
+    'clean_package_cache',
+    'autoremove_packages',
+    'clean_tmp',
+    'rotate_logs',
+    'clear_pagecache',
+    'clear_kernel_logs',
+    'flush_dns',
+    'renew_dhcp_lease',
+    'reset_network_manager',
+    'restart_failed_services',
+    'enable_ntp',
+    'reap_zombies'
+];
+
+function renderSystemFixToolbox() {
+    const groupsEl = document.getElementById('system-fix-groups');
+    const cleanupBtn = document.getElementById('system-cleanup-now-btn');
+    if (!groupsEl) return;
+
+    if (!fixCapabilities) {
+        groupsEl.innerHTML = '<p class="no-data">Checking host permissions and available tools…</p>';
+        if (cleanupBtn) cleanupBtn.disabled = true;
+        return;
+    }
+
+    if (cleanupBtn) {
+        cleanupBtn.disabled = !fixActionAvailable('system_cleanup') || fixRunning;
+        cleanupBtn.title = fixActionAvailable('system_cleanup')
+            ? 'Vacuum logs, clean temp/package cache, rotate logs, and drop caches'
+            : 'Full cleanup is unavailable in this environment';
+    }
+
+    const groups = {};
+    SYSTEM_FIX_TOOLBOX.forEach(action => {
+        if (action === 'system_cleanup') return;
+        const meta = fixMeta(action);
+        groups[meta.category] = groups[meta.category] || [];
+        groups[meta.category].push({ action, available: fixActionAvailable(action), ...meta });
+    });
+
+    const order = ['Storage', 'Memory', 'Network', 'Services', 'Kernel & Logs', 'Processes', 'CPU & Load', 'System'];
+    groupsEl.innerHTML = '';
+    order.filter(name => groups[name]).forEach(category => {
+        const section = document.createElement('div');
+        section.className = 'system-fix-group';
+        section.innerHTML = `<h4>${escapeHtml(category)}</h4><div class="system-fix-buttons"></div>`;
+        const row = section.querySelector('.system-fix-buttons');
+        groups[category].forEach(item => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = `btn-fix ${item.level || 'info'}${item.available ? '' : ' disabled'}`;
+            btn.disabled = !item.available || fixRunning;
+            btn.title = item.available
+                ? (item.description || item.label)
+                : 'Not available: missing tooling or elevated permissions';
+            btn.textContent = item.label;
+            btn.onclick = (event) => remediateAction(item.action, null, { silent: false, button: event.currentTarget });
+            row.appendChild(btn);
+        });
+        groupsEl.appendChild(section);
+    });
 }
 
 /* Modal accessibility: focus the dialog on open, keep Tab inside it, restore
@@ -1174,6 +1247,7 @@ function refreshFixEngine() {
 
     allBtn.disabled = count === 0 || fixRunning;
     reviewBtn.disabled = count === 0 || fixRunning;
+    renderSystemFixToolbox();
     allBtn.textContent = count > 0 ? `⚡ Fix All Issues (${count})` : '⚡ Fix All Issues';
     badge.textContent = fixRunning ? 'Fixing…' : (count === 0 ? '✅ No fixes needed' : `${count} fix${count > 1 ? 'es' : ''} available`);
     badge.className = 'fix-summary-badge ' + (fixRunning ? 'running' : (count === 0 ? 'ok' : 'warn'));
@@ -1195,7 +1269,7 @@ async function executeFix(action, target = null) {
 /* One-button fix for a single check card (called from inline onclick). */
 async function remediateAction(action, target = null, opts = {}) {
     if (fixRunning) return null;
-    const btn = document.querySelector(`.check-card button[data-action="${attrSel(action)}"][data-target="${attrSel(target || '')}"]`);
+    const btn = opts.button || document.querySelector(`.check-card button[data-action="${attrSel(action)}"][data-target="${attrSel(target || '')}"]`);
     const card = btn?.closest('.check-card');
     const resultBoxId = card ? `${card.id || 'check'}-result` : null;
 
@@ -1204,6 +1278,7 @@ async function remediateAction(action, target = null, opts = {}) {
         btn.classList.add('running');
         btn.dataset.originalLabel = btn.dataset.originalLabel || btn.textContent;
         btn.textContent = 'Running…';
+        renderSystemFixToolbox();
     }
     const removeResult = () => {
         if (resultBoxId) document.getElementById(resultBoxId)?.remove();
@@ -1244,11 +1319,15 @@ async function remediateAction(action, target = null, opts = {}) {
     } finally {
         if (btn) {
             btn.classList.remove('running');
-            // refreshAfterFix re-renders the checks; restore only if still detached.
-            if (!document.body.contains(btn)) return;
+            // refreshAfterFix re-renders the checks; restore only if still attached.
+            if (!document.body.contains(btn)) {
+                renderSystemFixToolbox();
+                return;
+            }
             btn.disabled = false;
             btn.textContent = btn.dataset.originalLabel || 'Fix';
         }
+        renderSystemFixToolbox();
     }
 }
 
@@ -1415,7 +1494,8 @@ async function loadFixCapabilities() {
         const res = await fetch(`${API_BASE}/api/troubleshoot/fix-capabilities`);
         if (!res.ok) return;
         fixCapabilities = await res.json();
-        // Re-render check cards so unavailable fixes grey out.
+        // Re-render check cards and system-wide fix buttons so unavailable actions grey out.
+        renderSystemFixToolbox();
         if (healthData && healthData.checks) renderHealthChecks(healthData.checks);
     } catch (e) {
         console.error('fix capabilities fetch failed:', e);

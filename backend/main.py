@@ -3488,6 +3488,10 @@ async def troubleshoot_health_check():
     swap_pct = mem["swap_percent"]
     avail_mb = mem["available"] / 1024 / 1024
     
+    memory_fixes = [
+        {"action": "clear_pagecache", "label": "⚡ Clear RAM Cache", "level": "warning", "sudo": True, "target": None},
+        {"action": "system_cleanup", "label": "🧹 Run System Cleanup", "level": "warning", "sudo": True, "target": None},
+    ]
     if mem_pct > 90.0 or avail_mb < 500:
         health_score -= 20
         checks.append({
@@ -3498,7 +3502,8 @@ async def troubleshoot_health_check():
             "value": f"{mem_pct}% RAM used ({avail_mb:.0f} MB free), {swap_pct}% Swap",
             "message": f"Memory critically low! Risk of OOM (Out Of Memory) process kills.",
             "remediation": "Clear clean page caches using the 'Clear RAM Cache' button. If usage remains high, identify top memory-consuming processes in the Processes tab and restart/terminate them, or allocate more swap space/physical RAM.",
-            "fix": {"action": "clear_pagecache", "label": "⚡ Clear RAM Cache", "level": "warning", "sudo": True, "target": None},
+            "fix": memory_fixes[0],
+            "fixes": memory_fixes,
         })
     elif mem_pct > 80.0 or swap_pct > 50.0:
         health_score -= 8
@@ -3509,8 +3514,9 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": f"{mem_pct}% RAM used, {swap_pct}% Swap used",
             "message": "Memory or swap usage is elevated.",
-            "remediation": "Drop system page caches using the 'Clear RAM Cache' button below, or adjust the swap space and swapiness ('sysctl vm.swappiness=10') to prioritize RAM usage.",
-            "fix": {"action": "clear_pagecache", "label": "⚡ Clear RAM Cache", "level": "warning", "sudo": True, "target": None},
+            "remediation": "Drop system page caches using the 'Clear RAM Cache' button below, or run a conservative system cleanup that also reclaims journal, temp, and package-cache space.",
+            "fix": memory_fixes[0],
+            "fixes": memory_fixes,
         })
     else:
         checks.append({
@@ -3552,10 +3558,15 @@ async def troubleshoot_health_check():
             "value": disk_detail,
             "message": "Root filesystem (/) space or inodes nearly full!",
             "remediation": "Vacuum systemd journal logs to free space immediately, or clean stale temp files. Run 'sudo apt-get clean' or 'sudo yum clean all' to clear package manager cache. Run 'du -sh /* | sort -h' to find large space-consuming folders.",
-            "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+            "fix": {"action": "system_cleanup", "label": "🧹 Run Full System Cleanup", "level": "critical", "sudo": True, "target": None},
             "fixes": [
-                {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+                {"action": "system_cleanup", "label": "🧹 Run Full System Cleanup", "level": "critical", "sudo": True, "target": None},
+                {"action": "trim_journal", "label": "📉 Compact Journal to 200 MB", "level": "warning", "sudo": True, "target": None},
+                {"action": "vacuum_journal", "label": "⚡ Vacuum Old Journal Logs", "level": "warning", "sudo": True, "target": None},
+                {"action": "clean_package_cache", "label": "📦 Clean Package Cache", "level": "warning", "sudo": True, "target": None},
                 {"action": "clean_tmp", "label": "🧹 Clean Stale Temp Files", "level": "warning", "sudo": True, "target": None},
+                {"action": "rotate_logs", "label": "🔄 Force Log Rotation", "level": "info", "sudo": True, "target": None},
+                {"action": "autoremove_packages", "label": "🗑️ Auto-Remove Orphan Packages", "level": "info", "sudo": True, "target": None},
             ],
         })
     elif disk_warning:
@@ -3567,11 +3578,15 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": disk_detail,
             "message": "Root filesystem (/) disk usage high (>80% space or inodes).",
-            "remediation": "Vacuum journal logs using the button below or archive old application log files. Consider setting up automatic log rotation under '/etc/logrotate.d/' to prevent partition bloat.",
-            "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+            "remediation": "Vacuum journal logs using the button below, force log rotation, or run the full system cleanup. Consider setting up automatic log rotation under '/etc/logrotate.d/' to prevent partition bloat.",
+            "fix": {"action": "system_cleanup", "label": "🧹 Run Full System Cleanup", "level": "warning", "sudo": True, "target": None},
             "fixes": [
-                {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+                {"action": "system_cleanup", "label": "🧹 Run Full System Cleanup", "level": "warning", "sudo": True, "target": None},
+                {"action": "trim_journal", "label": "📉 Compact Journal to 200 MB", "level": "warning", "sudo": True, "target": None},
+                {"action": "vacuum_journal", "label": "⚡ Vacuum Old Journal Logs", "level": "warning", "sudo": True, "target": None},
+                {"action": "clean_package_cache", "label": "📦 Clean Package Cache", "level": "warning", "sudo": True, "target": None},
                 {"action": "clean_tmp", "label": "🧹 Clean Stale Temp Files", "level": "warning", "sudo": True, "target": None},
+                {"action": "rotate_logs", "label": "🔄 Force Log Rotation", "level": "info", "sudo": True, "target": None},
             ],
         })
     else:
@@ -3732,16 +3747,21 @@ async def troubleshoot_health_check():
 
     if not ping_ok or not dns_ok:
         health_score -= 15
-        # DNS-only breakage is auto-fixable (flush the resolver cache); a
-        # total connectivity failure needs the network suite instead.
-        dns_fix = None
-        if ping_ok and not dns_ok:
-            dns_fix = {"action": "flush_dns", "label": "🌀 Flush DNS Cache", "level": "warning", "sudo": True, "target": None}
-        
+        # DNS-only breakage can be fixed by flushing the resolver cache;
+        # total connectivity failure gets additional DHCP/network repairs.
+        network_fixes = []
+        if dns_ok is False:
+            network_fixes.append({"action": "flush_dns", "label": "🌀 Flush DNS Cache", "level": "warning", "sudo": True, "target": None})
+        if ping_ok is False:
+            network_fixes.extend([
+                {"action": "renew_dhcp_lease", "label": "🔄 Renew DHCP Lease", "level": "warning", "sudo": True, "target": None},
+                {"action": "reset_network_manager", "label": "🔁 Restart Network Manager", "level": "critical", "sudo": True, "target": None},
+            ])
+
         if not ping_ok:
-            remediation = "Ping failed. Verify your network interface state using 'ip link' and physical/virtual network cables. Check local router settings, or restart the system's network service with 'sudo systemctl restart NetworkManager' or 'sudo systemctl restart systemd-networkd'."
+            remediation = "Ping failed. Renew DHCP leases, restart NetworkManager/systemd-networkd, then verify interface state with 'ip link'. Check physical/virtual cabling and the local router if failures persist."
         else:
-            remediation = "DNS failed but ping succeeded. Try flushing your local DNS resolver cache using the 'Flush DNS Cache' button below, or verify server settings in '/etc/resolv.conf'."
+            remediation = "DNS failed but ping succeeded. Flush the local DNS resolver cache using the button below, renew the DHCP lease, or verify name-server settings in '/etc/resolv.conf'."
 
         checks.append({
             "id": "net_connectivity",
@@ -3751,8 +3771,9 @@ async def troubleshoot_health_check():
             "value": f"Ping: {'OK' if ping_ok else 'FAIL'}, DNS: {'OK' if dns_ok else 'FAIL'}",
             "message": "Network ping test or DNS resolution failed.",
             "remediation": remediation,
-            "action": "run_net_diag" if not dns_fix else None,
-            "fix": dns_fix,
+            "action": "run_net_diag" if not network_fixes else None,
+            "fix": network_fixes[0] if network_fixes else None,
+            "fixes": network_fixes or None,
         })
     else:
         checks.append({
@@ -3793,8 +3814,13 @@ async def troubleshoot_health_check():
             "status": "critical",
             "value": f"Journal uses {journal_usage_human} on disk",
             "message": "The systemd journal is consuming significant disk space and may pressure the root partition.",
-            "remediation": "Vacuum systemd journal immediately using the 'Vacuum Journal Logs' button. To permanently restrict journal growth, set 'SystemMaxUse=500M' in '/etc/systemd/journald.conf' and restart the service via 'sudo systemctl restart systemd-journald'.",
-            "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+            "remediation": "Compact the systemd journal immediately using the size-based button, or run full system cleanup. To permanently restrict journal growth, set 'SystemMaxUse=500M' in '/etc/systemd/journald.conf' and restart the service via 'sudo systemctl restart systemd-journald'.",
+            "fix": {"action": "trim_journal", "label": "📉 Compact Journal to 200 MB", "level": "critical", "sudo": True, "target": None},
+            "fixes": [
+                {"action": "trim_journal", "label": "📉 Compact Journal to 200 MB", "level": "critical", "sudo": True, "target": None},
+                {"action": "vacuum_journal", "label": "⚡ Vacuum Old Journal Logs", "level": "warning", "sudo": True, "target": None},
+                {"action": "system_cleanup", "label": "🧹 Run Full System Cleanup", "level": "warning", "sudo": True, "target": None},
+            ],
         })
     elif journal_readable and journal_usage_gb >= 0.5:
         health_score -= 5
@@ -3805,8 +3831,12 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": f"Journal uses {journal_usage_human} on disk",
             "message": "The systemd journal is growing; consider vacuuming entries older than a few days.",
-            "remediation": "Consider vacuuming journal entries older than 2 days. Setting a hard limit on systemd-journal storage in '/etc/systemd/journald.conf' is highly recommended to protect server disk space.",
-            "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
+            "remediation": "Consider compacting the journal or vacuuming entries older than 2 days. Setting a hard limit on systemd-journal storage in '/etc/systemd/journald.conf' is highly recommended to protect server disk space.",
+            "fix": {"action": "trim_journal", "label": "📉 Compact Journal to 200 MB", "level": "warning", "sudo": True, "target": None},
+            "fixes": [
+                {"action": "trim_journal", "label": "📉 Compact Journal to 200 MB", "level": "warning", "sudo": True, "target": None},
+                {"action": "vacuum_journal", "label": "⚡ Vacuum Old Journal Logs", "level": "warning", "sudo": True, "target": None},
+            ],
         })
     else:
         checks.append({
@@ -4089,8 +4119,9 @@ async def troubleshoot_health_check():
             "status": "warning",
             "value": "Clock not synchronized",
             "message": "The system clock is not synchronized with an NTP source. Drift can break TLS validation, Kerberos/auth, and cross-host log correlation.",
-            "remediation": "Enable NTP with 'sudo timedatectl set-ntp true' and check the service via 'systemctl status systemd-timesyncd' (or chronyd). Verify with 'timedatectl'.",
-            "fix": None,
+            "remediation": "Enable NTP with the button below, then verify the service via 'systemctl status systemd-timesyncd' (or chronyd). Verify with 'timedatectl'.",
+            "fix": {"action": "enable_ntp", "label": "🕒 Enable NTP Sync", "level": "warning", "sudo": True, "target": None},
+            "fixes": [{"action": "enable_ntp", "label": "🕒 Enable NTP Sync", "level": "warning", "sudo": True, "target": None}],
         })
     elif ntp_synced:
         checks.append({
@@ -4579,6 +4610,62 @@ FIX_ACTION_META = {
         "sudo": True,
         "description": "Deletes regular files under /tmp and /var/tmp not modified for 7+ days (max depth 2). Frees disk space without touching active sessions.",
     },
+    "enable_ntp": {
+        "label": "Enable NTP time synchronization",
+        "category": "System",
+        "level": "warning",
+        "sudo": True,
+        "description": "Runs `timedatectl set-ntp true` so systemd-timesyncd/chronyd keeps the host clock synchronized. Prevents TLS, Kerberos, authentication, and log-correlation failures caused by clock drift.",
+    },
+    "clean_package_cache": {
+        "label": "Clean package manager cache",
+        "category": "Storage",
+        "level": "warning",
+        "sudo": True,
+        "description": "Runs the host package manager's safe cache cleanup (`apt-get clean`, `dnf clean all`, `yum clean all`, or `zypper clean`). Removes downloaded installer archives without uninstalling packages.",
+    },
+    "autoremove_packages": {
+        "label": "Auto-remove orphan packages",
+        "category": "Storage",
+        "level": "info",
+        "sudo": True,
+        "description": "Runs `apt-get autoremove --purge -y` (or the dnf/yum equivalent) to remove unused dependencies and old kernels. This is a system-wide cleanup action and is shown separately so it is never applied accidentally.",
+    },
+    "trim_journal": {
+        "label": "Compact journal to 200 MB",
+        "category": "Storage",
+        "level": "warning",
+        "sudo": True,
+        "description": "Runs `journalctl --vacuum-size=200M` when journal disk usage is large. Complements time-based vacuuming by immediately capping retained logs on space-constrained hosts.",
+    },
+    "rotate_logs": {
+        "label": "Force log rotation",
+        "category": "Storage",
+        "level": "info",
+        "sudo": True,
+        "description": "Runs `logrotate --force /etc/logrotate.conf` to rotate and compress oversized application logs. Useful when active logs, rather than the journal, are consuming root filesystem space.",
+    },
+    "reset_network_manager": {
+        "label": "Restart network manager",
+        "category": "Network",
+        "level": "critical",
+        "sudo": True,
+        "description": "Restarts NetworkManager (or systemd-networkd) to recover stale device state, stuck DHCP leases, and resolver problems after flushing DNS. Brief connectivity interruption is expected.",
+    },
+    "renew_dhcp_lease": {
+        "label": "Renew DHCP leases",
+        "category": "Network",
+        "level": "warning",
+        "sudo": True,
+        "description": "Uses NetworkManager or dhclient to renew IPv4 DHCP leases on active non-loopback interfaces. Helps recover expired addresses, bad DNS assignments, and stale default routes.",
+    },
+    "system_cleanup": {
+        "label": "Run full system cleanup",
+        "category": "System",
+        "level": "warning",
+        "sudo": True,
+        "description": "Runs a conservative whole-system cleanup in one action: vacuums journal logs, cleans stale temp files, cleans the package manager cache, forces log rotation, and drops clean RAM caches. It never uninstalls packages or restarts workloads.",
+    },
 }
 
 # Aliases accepted by the remediate endpoint for backwards compatibility.
@@ -4870,6 +4957,241 @@ async def _fix_clean_tmp(target: Optional[str] = None) -> Dict[str, Any]:
     return {"success": False, "message": stderr.decode(errors="replace").strip() or f"Cleanup exited with code {returncode}"}
 
 
+async def _sudo_cmd(base_cmd: List[str], timeout: float = 30.0) -> tuple:
+    """Run a command, prefixing non-interactive sudo when not root."""
+    cmd = list(base_cmd)
+    if os.geteuid() != 0:
+        sudo = shutil.which("sudo")
+        if not sudo:
+            return 127, b"", b"sudo is required but not installed."
+        cmd = [sudo, "-n", *cmd]
+    return await _run_cmd(cmd, timeout=timeout)
+
+
+async def _fix_enable_ntp(target: Optional[str] = None) -> Dict[str, Any]:
+    timedatectl = shutil.which("timedatectl")
+    if not timedatectl:
+        return {"success": False, "message": "timedatectl is not available on this host."}
+    try:
+        returncode, stdout, stderr = await _sudo_cmd([timedatectl, "set-ntp", "true"], timeout=20.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Enabling NTP timed out after 20s"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if returncode != 0:
+        return {"success": False, "message": stderr.decode(errors="replace").strip() or "Could not enable NTP synchronization."}
+
+    # Give timesyncd a moment and report sync state for operator confidence.
+    await asyncio.sleep(1.0)
+    try:
+        rc, out, _ = await _run_cmd([timedatectl, "show", "-p", "NTPSynchronized", "-p", "NTP"], timeout=8.0)
+        if rc == 0:
+            state = out.decode(errors="replace").strip().replace("\n", ", ")
+            return {"success": True, "message": f"NTP synchronization enabled ({state})."}
+    except Exception:
+        pass
+    return {"success": True, "message": "NTP synchronization enabled."}
+
+
+PACKAGE_CLEANERS = [
+    ("apt-get", ["apt-get", "clean"], "APT package cache cleaned."),
+    ("dnf", ["dnf", "clean", "all"], "DNF package cache cleaned."),
+    ("yum", ["yum", "clean", "all"], "YUM package cache cleaned."),
+    ("zypper", ["zypper", "--non-interactive", "clean"], "Zypper package cache cleaned."),
+]
+PACKAGE_AUTOREMOVE = [
+    ("apt-get", ["apt-get", "autoremove", "--purge", "-y"], "Unused APT dependencies removed."),
+    ("dnf", ["dnf", "autoremove", "-y"], "Unused DNF dependencies removed."),
+    ("yum", ["yum", "autoremove", "-y"], "Unused YUM dependencies removed."),
+]
+
+
+async def _run_first_available_package_cmd(candidates: List[tuple], timeout: float = 180.0) -> Dict[str, Any]:
+    for binary, args, success_message in candidates:
+        path = shutil.which(binary)
+        if not path:
+            continue
+        try:
+            returncode, stdout, stderr = await _sudo_cmd([path, *args[1:]], timeout=timeout)
+        except asyncio.TimeoutError:
+            return {"success": False, "message": f"{binary} operation timed out after {int(timeout)}s"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+        if returncode == 0:
+            detail = stdout.decode(errors="replace").strip()
+            return {"success": True, "message": success_message + (f" {detail}" if detail else "")}
+        return {"success": False, "message": stderr.decode(errors="replace").strip() or f"{binary} exited with code {returncode}"}
+    return {"success": False, "message": "No supported package manager found (apt-get, dnf, yum, or zypper required)."}
+
+
+async def _fix_clean_package_cache(target: Optional[str] = None) -> Dict[str, Any]:
+    return await _run_first_available_package_cmd(PACKAGE_CLEANERS, timeout=120.0)
+
+
+async def _fix_autoremove_packages(target: Optional[str] = None) -> Dict[str, Any]:
+    return await _run_first_available_package_cmd(PACKAGE_AUTOREMOVE, timeout=300.0)
+
+
+async def _fix_trim_journal(target: Optional[str] = None) -> Dict[str, Any]:
+    size = "200M"
+    if target and re.fullmatch(r"\d+[KMGT]?", target, re.IGNORECASE):
+        size = target.upper()
+    cmd = [JOURNALCTL_BIN, f"--vacuum-size={size}"]
+    try:
+        returncode, stdout, stderr = await _sudo_cmd(cmd, timeout=90.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Journal compaction timed out after 90s"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if returncode == 0:
+        return {"success": True, "message": f"Systemd journal compacted to {size}.", "detail": stdout.decode(errors="replace").strip()}
+    return {"success": False, "message": stderr.decode(errors="replace").strip() or f"Journal vacuum exited with code {returncode}"}
+
+
+async def _fix_rotate_logs(target: Optional[str] = None) -> Dict[str, Any]:
+    logrotate = shutil.which("logrotate")
+    if not logrotate:
+        return {"success": False, "message": "logrotate is not installed on this host."}
+    conf = target if target and target.startswith("/") and ".." not in target and os.path.isfile(target) else "/etc/logrotate.conf"
+    try:
+        returncode, stdout, stderr = await _sudo_cmd([logrotate, "--force", conf], timeout=90.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Log rotation timed out after 90s"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if returncode == 0:
+        return {"success": True, "message": f"Log rotation forced using {conf}."}
+    return {"success": False, "message": stderr.decode(errors="replace").strip() or f"logrotate exited with code {returncode}"}
+
+
+async def _active_non_loopback_interfaces() -> List[str]:
+    """Return active, non-loopback interface names for network remediation."""
+    interfaces = []
+    try:
+        for name, stats in psutil.net_if_stats().items():
+            if name != "lo" and getattr(stats, "isup", False):
+                interfaces.append(name)
+    except Exception:
+        pass
+    return interfaces
+
+
+async def _network_manager_unit() -> Optional[str]:
+    """Identify the network manager service available on this host."""
+    for unit in ("NetworkManager.service", "systemd-networkd.service"):
+        path = SYSTEMCTL_BIN
+        try:
+            rc, _, _ = await _sudo_cmd([path, "list-unit-files", unit, "--no-pager"], timeout=8.0)
+            # list-unit-files returns 0 when the unit file exists on systemd.
+            if rc == 0:
+                return unit
+        except Exception:
+            continue
+    # Non-systemd hosts (containers) usually lack either service; leave unset.
+    return None
+
+
+async def _fix_reset_network_manager(target: Optional[str] = None) -> Dict[str, Any]:
+    unit = target if target and SERVICE_NAME_PATTERN.fullmatch(target) else await _network_manager_unit()
+    if not unit:
+        return {"success": False, "message": "NetworkManager/systemd-networkd is not available on this host."}
+
+    # Prefer the existing service-control sudo policy; fall back to a direct
+    # restart because the default MonitorX policy only permits service probes.
+    result, error = await run_service_action("restart", unit)
+    if not error:
+        return {"success": True, "message": f"Network service {unit} restarted. Brief connectivity interruption is normal."}
+
+    try:
+        returncode, _, stderr = await _sudo_cmd(
+            [SYSTEMCTL_BIN, "--no-ask-password", "restart", unit], timeout=30.0
+        )
+    except asyncio.TimeoutError:
+        return {"success": False, "message": f"Restarting {unit} timed out after 30s."}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if returncode == 0:
+        return {"success": True, "message": f"Network service {unit} restarted. Brief connectivity interruption is normal."}
+    detail = stderr.decode(errors="replace").strip() or error
+    return {"success": False, "message": f"Could not restart {unit}: {detail}"}
+
+
+async def _fix_renew_dhcp_lease(target: Optional[str] = None) -> Dict[str, Any]:
+    interfaces = [target] if target else await _active_non_loopback_interfaces()
+    if not interfaces:
+        return {"success": False, "message": "No active non-loopback interface found for DHCP renewal."}
+
+    nmcli = shutil.which("nmcli")
+    renewed, failures = [], []
+    if nmcli:
+        for iface in interfaces:
+            try:
+                rc, out, err = await _sudo_cmd([nmcli, "device", "reapply", iface], timeout=20.0)
+                if rc == 0:
+                    renewed.append(iface)
+                    continue
+                # Fall back to a fresh DHCP lease when reapply is unsupported.
+                rc, out, err = await _sudo_cmd(
+                    [nmcli, "connection", "up", "ifname", iface], timeout=30.0
+                )
+                if rc == 0:
+                    renewed.append(iface)
+                else:
+                    failures.append(f"{iface}: {err.decode(errors='replace').strip() or out.decode(errors='replace').strip()}")
+            except Exception as e:
+                failures.append(f"{iface}: {e}")
+    else:
+        for iface in interfaces:
+            for lease_tool, args in (("dhclient", ["-r", iface]), ("dhclient", [iface])):
+                path = shutil.which(lease_tool)
+                if not path:
+                    continue
+                try:
+                    await _sudo_cmd([path, *args[1:]], timeout=25.0)
+                except Exception:
+                    pass
+            renewed.append(iface)
+
+    if renewed and not failures:
+        return {"success": True, "message": f"Renewed DHCP lease(s) on: {', '.join(renewed)}."}
+    if renewed:
+        return {"success": True, "message": f"Renewed {', '.join(renewed)}; failed: {'; '.join(failures)}"}
+    return {"success": False, "message": "Could not renew DHCP leases. " + "; ".join(failures[:3])}
+
+
+async def _fix_system_cleanup(target: Optional[str] = None) -> Dict[str, Any]:
+    """Conservative whole-system cleanup sequence.
+
+    Intentionally excludes package autoremove and service restarts because those
+    can alter workload capacity or remove kernels; they remain separate,
+    deliberately selected fixes.
+    """
+    steps = [
+        ("vacuum_journal", _fix_vacuum_journal, None),
+        ("clean_tmp", _fix_clean_tmp, None),
+        ("clean_package_cache", _fix_clean_package_cache, None),
+        ("rotate_logs", _fix_rotate_logs, None),
+        ("clear_pagecache", _fix_clear_pagecache, None),
+    ]
+    results = []
+    success_count = 0
+    for name, executor, step_target in steps:
+        result = await executor(step_target)
+        ok = bool(result.get("success"))
+        success_count += int(ok)
+        results.append({
+            "action": name,
+            "success": ok,
+            "message": result.get("message") or ("completed" if ok else "failed"),
+        })
+
+    return {
+        "success": success_count > 0,
+        "message": f"Full system cleanup completed: {success_count}/{len(steps)} steps succeeded.",
+        "results": results,
+    }
+
+
 FIX_EXECUTORS = {
     "clear_pagecache": _fix_clear_pagecache,
     "vacuum_journal": _fix_vacuum_journal,
@@ -4883,6 +5205,14 @@ FIX_EXECUTORS = {
     "reap_zombies": _fix_reap_zombies,
     "flush_dns": _fix_flush_dns,
     "clean_tmp": _fix_clean_tmp,
+    "enable_ntp": _fix_enable_ntp,
+    "clean_package_cache": _fix_clean_package_cache,
+    "autoremove_packages": _fix_autoremove_packages,
+    "trim_journal": _fix_trim_journal,
+    "rotate_logs": _fix_rotate_logs,
+    "reset_network_manager": _fix_reset_network_manager,
+    "renew_dhcp_lease": _fix_renew_dhcp_lease,
+    "system_cleanup": _fix_system_cleanup,
 }
 
 
@@ -5014,10 +5344,20 @@ async def troubleshoot_fix_capabilities():
         "systemd_resolve": have("systemd-resolve"),
         "nscd": have("nscd"),
         "find": have("find"),
+        "timedatectl": have("timedatectl"),
+        "logrotate": have("logrotate"),
+        "apt_get": have("apt-get"),
+        "dnf": have("dnf"),
+        "yum": have("yum"),
+        "zypper": have("zypper"),
+        "nmcli": have("nmcli"),
+        "dhclient": have("dhclient"),
         "sudo": bool(sudo),
     }
     elevated = is_root or has_sudo
     service_policy = await _service_sudo_allowed()
+    package_manager_available = bins["apt_get"] or bins["dnf"] or bins["yum"] or bins["zypper"]
+    dhcp_available = bins["nmcli"] or bins["dhclient"]
 
     available = {
         "clear_pagecache": elevated and bins["sysctl"],
@@ -5032,6 +5372,14 @@ async def troubleshoot_fix_capabilities():
         "reap_zombies": True,
         "flush_dns": (bins["resolvectl"] or bins["systemd_resolve"] or bins["nscd"]),
         "clean_tmp": elevated and bins["find"],
+        "enable_ntp": elevated and bins["timedatectl"],
+        "clean_package_cache": elevated and package_manager_available,
+        "autoremove_packages": elevated and package_manager_available,
+        "trim_journal": elevated and bins["journalctl"],
+        "rotate_logs": elevated and bins["logrotate"],
+        "reset_network_manager": service_policy and bins["systemctl"],
+        "renew_dhcp_lease": elevated and dhcp_available,
+        "system_cleanup": elevated and (bins["journalctl"] or bins["find"] or package_manager_available or bins["logrotate"] or bins["sysctl"]),
     }
     return {
         "is_root": is_root,
@@ -5039,7 +5387,16 @@ async def troubleshoot_fix_capabilities():
         "sudo": has_sudo,
         "bins": bins,
         "available_actions": available,
-        "fix_actions": {k: {"label": v["label"], "level": v["level"]} for k, v in FIX_ACTION_META.items()},
+        "fix_actions": {
+            k: {
+                "label": v["label"],
+                "level": v["level"],
+                "category": v.get("category", "System"),
+                "sudo": v.get("sudo", False),
+                "description": v.get("description", ""),
+            }
+            for k, v in FIX_ACTION_META.items()
+        },
     }
 
 
