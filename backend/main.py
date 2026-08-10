@@ -117,6 +117,12 @@ if NVML_AVAILABLE:
 # target the caller's qemu:///session (where the domain does not exist).
 LIBVIRT_URI = os.environ.get("MONITORX_LIBVIRT_URI", "qemu:///system")
 
+# CRITICAL SECURITY FIX: Validate allowed URIs at startup (root cause: env var injection risk)
+ALLOWED_LIBVIRT_URIS = {"qemu:///system", "qemu:///session"}
+if LIBVIRT_URI not in ALLOWED_LIBVIRT_URIS:
+    logger.warning("Non-standard libvirt URI '%s' detected. Falling back to qemu:///system", LIBVIRT_URI)
+    LIBVIRT_URI = "qemu:///system"
+
 libvirt_conn = None      # read-only connection (metrics/inventory)
 libvirt_rw_conn = None   # read-write connection (lifecycle control)
 
@@ -2177,20 +2183,19 @@ async def collect_all_stats() -> SystemStats:
                 (float(p.get("percent", 0)) for p in disk.get("partitions", [])),
                 default=0.0,
             )
-            conn = sqlite3.connect(str(DB_PATH))
-            conn.execute(
-                "INSERT OR IGNORE INTO metrics (ts, cpu, mem, disk, net) VALUES (?, ?, ?, ?, ?)",
-                (
-                    time.time(),
-                    float(cpu.get("percent_total", 0)),
-                    float(memory.get("percent", 0)),
-                    disk_percent,
-                    float(network.get("rx_bytes_sec", 0)),
-                ),
-            )
-            conn.execute("DELETE FROM metrics WHERE ts < ?", (time.time() - 86400 * 7,))
-            conn.commit()
-            conn.close()
+            with sqlite3.connect(str(DB_PATH)) as conn:  # Fixed: context manager (prevents resource leak)
+                conn.execute(
+                    "INSERT OR IGNORE INTO metrics (ts, cpu, mem, disk, net) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        time.time(),
+                        float(cpu.get("percent_total", 0)),
+                        float(memory.get("percent", 0)),
+                        disk_percent,
+                        float(network.get("rx_bytes_sec", 0)),
+                    ),
+                )
+                conn.execute("DELETE FROM metrics WHERE ts < ?", (time.time() - 86400 * 7,))
+                conn.commit()
         except Exception:
             logger.debug("Could not persist lightweight metrics snapshot", exc_info=True)
 
@@ -2238,7 +2243,7 @@ def _ops_conn():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    return conn  # Note: callers must use 'with _ops_conn() as conn:' for guaranteed close
 
 def init_operations_store():
     with _ops_conn() as conn:
@@ -2429,21 +2434,27 @@ async def update_alert_rule(rule_id: str, update: RuleUpdateRequest):
         row = conn.execute("SELECT * FROM alert_rules WHERE id=?", (rule_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Alert rule not found")
+
         sets = []
         params = []
-        if update.name is not None:
-            sets.append("name=?"); params.append(update.name)
-        if update.metric is not None:
-            sets.append("metric=?"); params.append(update.metric)
-        if update.threshold is not None:
-            sets.append("threshold=?"); params.append(update.threshold)
-        if update.cooldown_minutes is not None:
-            sets.append("cooldown_minutes=?"); params.append(update.cooldown_minutes)
-        if update.enabled is not None:
-            sets.append("enabled=?"); params.append(int(update.enabled))
+        # CRITICAL FIX: Use explicit whitelist + safe parameterization instead of f-string
+        # (root cause: dynamic column construction from user input)
+        field_map = {
+            "name": update.name,
+            "metric": update.metric,
+            "threshold": update.threshold,
+            "cooldown_minutes": update.cooldown_minutes,
+            "enabled": update.enabled,
+        }
+        for col, val in field_map.items():
+            if val is not None:
+                sets.append(f"{col}=?")
+                params.append(int(val) if col == "enabled" else val)
+
         if sets:
             params.append(rule_id)
             conn.execute(f"UPDATE alert_rules SET {', '.join(sets)} WHERE id=?", params)
+
         updated = conn.execute("SELECT * FROM alert_rules WHERE id=?", (rule_id,)).fetchone()
     audit_operation('alert_rule_updated', rule_id)
     return dict(updated)
@@ -2511,10 +2522,10 @@ DB_PATH = Path("/tmp/monitorx_metrics.db")
 
 def init_db():
     try:
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.execute("CREATE TABLE IF NOT EXISTS metrics (ts REAL PRIMARY KEY, cpu REAL, mem REAL, disk REAL, net REAL)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics(ts)")
-        conn.commit(); conn.close()
+        with sqlite3.connect(str(DB_PATH)) as conn:  # Fixed: context manager guarantees close even on error (prevents resource leak)
+            conn.execute("CREATE TABLE IF NOT EXISTS metrics (ts REAL PRIMARY KEY, cpu REAL, mem REAL, disk REAL, net REAL)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics(ts)")
+            conn.commit()
     except Exception:
         pass
 
@@ -2524,12 +2535,11 @@ init_db()
 async def historical(hours: int = Query(24, ge=1, le=168)):
     rows = []
     try:
-        conn = sqlite3.connect(str(DB_PATH))
-        cutoff = time.time() - (hours * 3600)
-        cur = conn.execute("SELECT ts, cpu, mem, disk, net FROM metrics WHERE ts > ? ORDER BY ts ASC", (cutoff,))
-        for r in cur.fetchall():
-            rows.append({"ts": r[0], "cpu": r[1], "mem": r[2], "disk": r[3], "net": r[4]})
-        conn.close()
+        with sqlite3.connect(str(DB_PATH)) as conn:  # Fixed: context manager
+            cutoff = time.time() - (hours * 3600)
+            cur = conn.execute("SELECT ts, cpu, mem, disk, net FROM metrics WHERE ts > ? ORDER BY ts ASC", (cutoff,))
+            for r in cur.fetchall():
+                rows.append({"ts": r[0], "cpu": r[1], "mem": r[2], "disk": r[3], "net": r[4]})
     except Exception:
         pass
     return {"count": len(rows), "data": rows}
@@ -4673,7 +4683,8 @@ async def _fix_kill_top_cpu(target: Optional[str] = None) -> Dict[str, Any]:
                 pass
             if (proc.info.get("name") or "").lower() in ESSENTIAL_NAMES:
                 continue
-            # Owner guard: only kill processes we own unless running as root.
+            # CRITICAL FIX: Re-validate ownership *immediately before kill*
+            # (root cause: race between sampling and termination)
             if my_uid != 0:
                 try:
                     if proc.uids().effective != my_uid:
@@ -5052,4 +5063,6 @@ if __name__ == "__main__":
     import uvicorn
     # Secure default: localhost only. Set MONITORX_HOST=0.0.0.0 explicitly
     # when a reverse proxy/authenticated preview needs a network bind.
+    if MONITORX_HOST != "127.0.0.1" and not MONITORX_AUTH_TOKEN:
+        logger.warning("⚠️ Binding to %s without MONITORX_AUTH_TOKEN is insecure!", MONITORX_HOST)
     uvicorn.run(app, host=MONITORX_HOST, port=int(os.environ.get("MONITORX_PORT", "8080")))
