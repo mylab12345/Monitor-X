@@ -1136,14 +1136,19 @@ canvas {
     border-radius: var(--radius-sm);
 }
 
-/* GPU Grid */
-.gpu-grid { display: flex; flex-direction: column; gap: 10px; }
-.gpu-item { background: rgba(0, 0, 0, 0.25); border-radius: var(--radius-md); padding: 12px; border: 1px solid var(--border-card); }
-.gpu-item-header { display: flex; justify-content: space-between; font-size: 0.85rem; font-weight: 700; margin-bottom: 8px; }
-.gpu-bars { display: flex; gap: 6px; }
-.gpu-bar { flex: 1; height: 6px; background: rgba(0, 0, 0, 0.3); border-radius: 3px; overflow: hidden; }
+/* GPU Grid — compact density: the accelerator card previously dominated the
+   metrics grid (large padding + 10px gaps + equal-height grid-stretch). Keep
+   it readable but tight so it no longer pushes the dashboard below the fold. */
+.gpu-grid { display: flex; flex-direction: column; gap: 6px; }
+.gpu-item { background: rgba(0, 0, 0, 0.25); border-radius: var(--radius-sm); padding: 8px 10px; border: 1px solid var(--border-card); }
+.gpu-item-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 0.78rem; font-weight: 700; margin-bottom: 6px; min-width: 0; }
+.gpu-item-header span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gpu-item-header span:last-child { flex: 0 0 auto; font: 600 0.70rem/1 'JetBrains Mono', monospace; color: var(--text-muted); }
+.gpu-bars { display: flex; gap: 4px; }
+.gpu-bar { flex: 1; height: 5px; background: rgba(0, 0, 0, 0.3); border-radius: 3px; overflow: hidden; }
 .gpu-bar-fill { height: 100%; background: var(--accent-blue); border-radius: 3px; transition: width 0.4s ease; }
-.gpu-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 8px; font-size: 0.75rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+.gpu-stats { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; font-size: 0.66rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+.gpu-stats span { white-space: nowrap; }
 
 /* Toast Notifications */
 .toast-container {
