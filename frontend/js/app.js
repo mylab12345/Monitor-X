@@ -133,6 +133,12 @@ const state = {
     processesFull: null,
     processListLoading: false,
     processListLastFetch: 0,
+    // Selection survives table re-renders (rebuilt on every telemetry tick
+    // would otherwise wipe checked rows), and the last rendered signature
+    // lets us skip no-op DOM rebuilds entirely.
+    procSelected: new Set(),
+    procTableSig: '',
+    topProcSig: '',
 };
 
 /* Format Helpers */
@@ -147,6 +153,15 @@ function formatBytes(bytes) {
 function formatSpeed(bytesPerSec) {
     if (!bytesPerSec || bytesPerSec === 0) return '0 B/s';
     return formatBytes(bytesPerSec) + '/s';
+}
+
+/* Compact large counters (inodes): 12,345,678 -> "12.3M" */
+function formatCount(n) {
+    n = Number(n) || 0;
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
 }
 
 function showToast(message, type = 'info') {
@@ -326,7 +341,9 @@ function updateDashboard(data) {
     if (state.currentTab === 'dashboard') guard('charts', () => updateCharts(data));
 
     if (state.currentTab === 'processes') {
-        guard('process-table', filterProcesses);
+        // Telemetry tick: re-render only when the process data actually
+        // changed (checked inside filterProcesses via its signature).
+        guard('process-table', () => filterProcesses(false));
         fetchProcessList();
     }
 
@@ -387,22 +404,55 @@ function updateMemory(mem) {
     document.getElementById('ram-swap').textContent = mem.swap_percent + '%';
 }
 
+/* Storage card: tracks ONLY the root filesystem (/). Space and inode usage
+   each get a bar plus used/free/total figures. The DOM block is rebuilt only
+   when the rendered values actually change, so a steady telemetry stream does
+   not thrash layout every frame. */
 function updateDisk(disk) {
     if (!disk) return;
     const list = document.getElementById('disk-list');
-    list.innerHTML = '';
-    (disk.partitions || []).forEach(p => {
-        const item = document.createElement('div');
-        item.className = 'disk-item';
-        item.innerHTML = `
-            <span><b>${escapeHtml(p.mountpoint)}</b> (${escapeHtml(p.fstype)})</span>
-            <span><b>${p.percent.toFixed(1)}%</b> (${formatBytes(p.used)} / ${formatBytes(p.total)})</span>
-        `;
-        list.appendChild(item);
-    });
-    
-    const rootPart = disk.partitions?.[0];
-    document.getElementById('disk-percent').textContent = rootPart ? `${rootPart.percent.toFixed(1)}%` : '0%';
+    const root = disk.root || (disk.partitions || [])[0];
+
+    if (!root) {
+        list.dataset.sig = '';
+        list.innerHTML = '<p class="no-data">Root filesystem (/) stats unavailable.</p>';
+    } else {
+        const spacePct = Math.min(Math.max(Number(root.percent) || 0, 0), 100);
+        const inodePct = Math.min(Math.max(Number(root.inode_percent) || 0, 0), 100);
+        const tone = (pct) => pct > 90 ? 'var(--danger)' : pct > 80 ? 'var(--warning)' : 'var(--accent-blue)';
+        const deviceLabel = [root.device, root.fstype].filter(Boolean).join(' · ') || '/';
+
+        // Cheap change signature: skip the whole rebuild when nothing moved.
+        const sig = [spacePct, inodePct, root.used, root.free, root.total,
+                     root.inode_used, root.inode_free, root.inode_total, deviceLabel].join('|');
+        if (list.dataset.sig !== sig) {
+            list.dataset.sig = sig;
+            list.innerHTML = `
+                <div class="root-disk">
+                    <div class="root-disk-label">
+                        <span>💾 Space — <b>${escapeHtml(deviceLabel)}</b></span>
+                        <b>${spacePct.toFixed(1)}% used</b>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill" style="width:${spacePct}%;background:${tone(spacePct)};"></div></div>
+                    <div class="root-disk-grid">
+                        <div>Used: <b>${formatBytes(root.used)}</b></div>
+                        <div>Free: <b>${formatBytes(root.free)}</b></div>
+                        <div>Total: <b>${formatBytes(root.total)}</b></div>
+                    </div>
+                    <div class="root-disk-label">
+                        <span>🧮 Inodes — <b>/</b></span>
+                        <b>${inodePct.toFixed(1)}% used</b>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill" style="width:${inodePct}%;background:${tone(inodePct)};"></div></div>
+                    <div class="root-disk-grid">
+                        <div>Used: <b>${formatCount(root.inode_used)}</b></div>
+                        <div>Free: <b>${formatCount(root.inode_free)}</b></div>
+                        <div>Total: <b>${formatCount(root.inode_total)}</b></div>
+                    </div>
+                </div>`;
+        }
+        document.getElementById('disk-percent').textContent = `${spacePct.toFixed(1)}%`;
+    }
     document.getElementById('disk-read-speed').textContent = formatSpeed(disk.read_bytes_sec);
     document.getElementById('disk-write-speed').textContent = formatSpeed(disk.write_bytes_sec);
 }
@@ -558,8 +608,13 @@ function updateSystem(sys) {
 function updateTopProcesses(processes) {
     const tbody = document.getElementById('top-processes-body');
     if (!tbody) return;
+    const top = (processes || []).slice(0, 10);
+    // Skip the rebuild when the visible rows are identical to last frame.
+    const sig = top.map(p => `${p.pid}:${p.cpu_percent}:${p.memory_percent}:${p.memory_mb}:${p.status}:${p.threads}`).join('|');
+    if (sig === state.topProcSig) return;
+    state.topProcSig = sig;
     tbody.innerHTML = '';
-    (processes || []).slice(0, 10).forEach(p => {
+    top.forEach(p => {
         const row = document.createElement('tr');
         row.style.cursor = 'pointer';
         row.innerHTML = `
@@ -617,22 +672,38 @@ function checkOSIssues(data) {
         });
     }
 
-    if (data.disk && data.disk.partitions) {
-        data.disk.partitions.forEach(p => {
-            if (p.percent > 90) {
-                addIssue('critical', `Partition ${p.mountpoint} is nearly full: ${p.percent.toFixed(1)}%`, {
+    if (data.disk) {
+        const root = data.disk.root || (data.disk.partitions || [])[0];
+        if (root) {
+            const spacePct = Number(root.percent) || 0;
+            const inodePct = Number(root.inode_percent) || 0;
+            if (spacePct > 90) {
+                addIssue('critical', `Root filesystem / is nearly full: ${spacePct.toFixed(1)}% used (${formatBytes(root.free)} free)`, {
                     label: 'Fix Now: Vacuum Logs',
                     kind: 'remediate',
                     action: 'vacuum_journal'
                 });
-            } else if (p.percent > 80) {
-                addIssue('warning', `Partition ${p.mountpoint} storage high: ${p.percent.toFixed(1)}%`, {
+            } else if (spacePct > 80) {
+                addIssue('warning', `Root filesystem / storage high: ${spacePct.toFixed(1)}% used (${formatBytes(root.free)} free)`, {
                     label: 'Vacuum Logs',
                     kind: 'remediate',
                     action: 'vacuum_journal'
                 });
             }
-        });
+            if (inodePct > 90) {
+                addIssue('critical', `Root filesystem / inodes nearly exhausted: ${inodePct.toFixed(1)}% used (${formatCount(root.inode_free)} free)`, {
+                    label: 'Fix Now: Clean Temp Files',
+                    kind: 'remediate',
+                    action: 'clean_tmp'
+                });
+            } else if (inodePct > 80) {
+                addIssue('warning', `Root filesystem / inode usage high: ${inodePct.toFixed(1)}% used (${formatCount(root.inode_free)} free)`, {
+                    label: 'Clean Temp Files',
+                    kind: 'remediate',
+                    action: 'clean_tmp'
+                });
+            }
+        }
     }
 
     if (data.processes) {
@@ -903,6 +974,8 @@ async function killSelectedProcesses(pids) {
                 refused.length === results.length ? 'error' : 'warning'
             );
         }
+        // Terminated PIDs must not linger in the persistent selection.
+        pids.forEach(pid => state.procSelected.delete(pid));
         fetchStats();
     } catch (e) {
         showToast('Bulk kill failed: ' + e.message, 'error');
@@ -1761,7 +1834,12 @@ async function fetchProcessList(force = false) {
     }
 }
 
-function filterProcesses() {
+/* Rebuild the full process table. Called with force=true for user-driven
+   changes (search, sort, fresh fetch) and force=false on telemetry ticks:
+   then the expensive DOM rebuild (up to 500 rows) only happens when the
+   visible data actually changed, so the table no longer flickers or resets
+   scroll/selection every 2 seconds. */
+function filterProcesses(force = true) {
     const tbody = document.getElementById('all-processes-body');
     const source = state.processesFull || statsData?.processes;
     if (!tbody || !source) return;
@@ -1779,11 +1857,21 @@ function filterProcesses() {
     else if (filter === 'pid') procs.sort((a, b) => a.pid - b.pid);
     else if (filter === 'name') procs.sort((a, b) => a.name.localeCompare(b.name));
 
+    // Signature of exactly what would be painted; identical => skip DOM work.
+    const sig = (source === state.processesFull ? 'F' : 'W')
+        + procs.map(p => `${p.pid},${p.cpu_percent},${p.memory_percent},${p.memory_mb},${p.status},${p.threads},${p.create_time}`).join(';');
+    if (!force && sig === state.procTableSig) return;
+    state.procTableSig = sig;
+
+    // Forget selections for PIDs that vanished from the dataset entirely.
+    const visiblePids = new Set(source.map(p => p.pid));
+    state.procSelected.forEach(pid => { if (!visiblePids.has(pid)) state.procSelected.delete(pid); });
+
     tbody.innerHTML = '';
     procs.forEach(p => {
         const row = document.createElement('tr');
         row.innerHTML = `
-            <td><input type="checkbox" class="proc-check" value="${p.pid}"></td>
+            <td><input type="checkbox" class="proc-check" value="${p.pid}" ${state.procSelected.has(p.pid) ? 'checked' : ''}></td>
             <td><b>${p.pid}</b></td>
             <td>${escapeHtml(p.name)}</td>
             <td><b class="${p.cpu_percent > 50 ? 'text-danger' : ''}">${p.cpu_percent}%</b></td>
@@ -1800,6 +1888,18 @@ function filterProcesses() {
         `;
         tbody.appendChild(row);
     });
+    syncProcSelectAll();
+}
+
+/* Keep the header "select all" checkbox consistent with the current row
+   selection (checked rows survive re-renders via state.procSelected). */
+function syncProcSelectAll() {
+    const selectAll = document.getElementById('select-all-proc');
+    if (!selectAll) return;
+    const boxes = document.querySelectorAll('#all-processes-body .proc-check');
+    const checked = document.querySelectorAll('#all-processes-body .proc-check:checked');
+    selectAll.checked = boxes.length > 0 && boxes.length === checked.length;
+    selectAll.indeterminate = checked.length > 0 && checked.length < boxes.length;
 }
 
 /* VMs */
@@ -3230,13 +3330,31 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.getElementById('select-all-proc')?.addEventListener('change', (e) => {
-        document.querySelectorAll('.proc-check').forEach(c => c.checked = e.target.checked);
+        const boxes = document.querySelectorAll('#all-processes-body .proc-check');
+        boxes.forEach(c => {
+            c.checked = e.target.checked;
+            const pid = parseInt(c.value);
+            if (e.target.checked) state.procSelected.add(pid);
+            else state.procSelected.delete(pid);
+        });
+        syncProcSelectAll();
+    });
+
+    // Row checkboxes update the persistent selection set (delegated: rows are
+    // rebuilt on data changes, so listeners must live on the container).
+    document.getElementById('all-processes-body')?.addEventListener('change', (e) => {
+        const box = e.target.closest('.proc-check');
+        if (!box) return;
+        const pid = parseInt(box.value);
+        if (box.checked) state.procSelected.add(pid);
+        else state.procSelected.delete(pid);
+        syncProcSelectAll();
     });
 
     document.getElementById('kill-selected')?.addEventListener('click', () => {
-        const checked = document.querySelectorAll('.proc-check:checked');
-        if (checked.length === 0) { showToast('No processes selected', 'warning'); return; }
-        killSelectedProcesses(Array.from(checked).map(c => parseInt(c.value)));
+        const pids = Array.from(state.procSelected);
+        if (pids.length === 0) { showToast('No processes selected', 'warning'); return; }
+        killSelectedProcesses(pids);
     });
 
     // Log Inspector Controls

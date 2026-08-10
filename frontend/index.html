@@ -15,7 +15,7 @@
     <link rel="stylesheet" href="/static/css/dashboard-refresh.css">
     <link rel="stylesheet" href="/static/css/fix-engine.css?v=20260805">
     <link rel="stylesheet" href="/static/css/themes.css?v=20260809">
-    <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260810">
+    <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260810-root">
     <link rel="stylesheet" href="/static/css/services.css?v=20260809-compact">
     <!-- xterm.js for VM Console -->
 </head>
@@ -228,10 +228,10 @@
                                 </div>
                             </div>
 
-                            <!-- Disk Card -->
+                            <!-- Disk Card: root filesystem (/) only -->
                             <div class="metric-card" id="disk-card">
                                 <div class="card-header">
-                                    <h2>Storage Drives & I/O</h2>
+                                    <h2>Root Storage · /</h2>
                                     <span class="metric-value" id="disk-percent">0%</span>
                                 </div>
                                 <div class="disk-list" id="disk-list"></div>
@@ -949,7 +949,7 @@
     <div class="toast-container" id="toast-container"></div>
 
     <script src="/static/js/nasa-enhance.js?v=20260809"></script>
-    <script src="/static/js/app.js?v=20260809-compact"></script>
+    <script src="/static/js/app.js?v=20260810-root"></script>
     <script src="/static/js/nexus-hud.js?v=20260807"></script>
     <script src="/static/js/operations-center.js?v=20260807-fast"></script>
     <div id="sparkline-announce" aria-live="polite" aria-atomic="true" style="position:absolute;left:-9999px;top:-9999px;"></div>

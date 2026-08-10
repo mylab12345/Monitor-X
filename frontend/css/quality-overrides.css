@@ -618,6 +618,107 @@ body.layout-fluid .main-content {
 .dashboard-context h2 {
     font-size: clamp(1.15rem, 1.6vw, 1.4rem);
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Root Filesystem (/) storage card — space + inode usage blocks.
+   ──────────────────────────────────────────────────────────────────────────── */
+.root-disk {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 8px 0 2px;
+}
+.root-disk .progress-bar {
+    margin: 0;
+    height: 9px;
+}
+.root-disk-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    min-width: 0;
+}
+.root-disk-label > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.root-disk-label > b {
+    flex: 0 0 auto;
+    color: var(--text-main);
+    font-size: 0.78rem;
+}
+.root-disk-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2px 10px;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    padding-bottom: 4px;
+}
+.root-disk-grid div {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.root-disk-grid b {
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Processes tab — dense, internally scrolling table with a sticky header so
+   the page never stretches into a long scroll as the process count grows.
+   ──────────────────────────────────────────────────────────────────────────── */
+#tab-processes .process-controls {
+    gap: 8px;
+    margin-bottom: 10px;
+}
+#tab-processes .process-controls .search-input,
+#tab-processes .process-controls .filter-select {
+    padding: 7px 12px;
+    font-size: 0.8rem;
+}
+#tab-processes .process-controls .btn {
+    padding: 7px 14px;
+    font-size: 0.8rem;
+}
+#tab-processes .table-container {
+    padding: 8px 10px;
+    /* The table scrolls inside the card instead of growing the page, and the
+       sticky header keeps column titles visible at any scroll depth. */
+    max-height: calc(100vh - 235px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+#tab-processes .data-table {
+    font-size: 0.78rem;
+}
+#tab-processes .data-table th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 7px 10px;
+    background: var(--bg-surface);
+    box-shadow: 0 1px 0 var(--border-card);
+}
+#tab-processes .data-table td {
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border-card);
+}
+#tab-processes .data-table .badge {
+    padding: 2px 8px;
+    font-size: 0.66rem;
+}
+#tab-processes .data-table .btn-sm {
+    padding: 3px 8px;
+    font-size: 0.68rem;
+}
 .dashboard-context p {
     font-size: 0.82rem;
     margin-top: 2px;
