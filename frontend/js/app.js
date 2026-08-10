@@ -491,11 +491,19 @@ function updateThermal(thermal) {
 
 function updateGpu(gpus) {
     const content = document.getElementById('gpu-content');
+    const driverEl = document.getElementById('gpu-driver-status');
+    const countEl = document.getElementById('gpu-count-val');
+    const totalEl = document.getElementById('gpu-total');
     if (!gpus || gpus.length === 0) {
-        content.innerHTML = '<p class="no-data">No NVIDIA GPU detected or NVML disabled</p>';
-        document.getElementById('gpu-total').textContent = 'N/A';
+        if (content) content.innerHTML = '<p class="no-data">No NVIDIA GPU detected or NVML disabled</p>';
+        if (totalEl) totalEl.textContent = 'N/A';
+        if (driverEl) driverEl.textContent = 'Inactive';
+        if (countEl) countEl.textContent = '0';
         return;
     }
+
+    if (driverEl) driverEl.textContent = 'Active';
+    if (countEl) countEl.textContent = String(gpus.length);
 
     let html = '<div class="gpu-grid">';
     gpus.forEach(gpu => {

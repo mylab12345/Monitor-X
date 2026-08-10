@@ -55,8 +55,8 @@ body {
 
 /* Full-bleed layout: dashboard spans the entire terminal/system viewport width
    (no 1600px cap) so every panel is visible edge-to-edge at any screen size. */
-.main-content { max-width: none; width: 100%; margin: 0 auto; padding: 18px clamp(14px, 2vw, 32px) 32px; }
-.dashboard-context { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin: 4px 0 24px; }
+.main-content { max-width: none; width: 100%; margin: 0 auto; padding: 10px clamp(12px, 1.8vw, 24px) 16px; }
+.dashboard-context { display: flex; justify-content: space-between; align-items: end; gap: 12px; margin: 0 0 10px; }
 .dashboard-context h2 { font-size: clamp(1.35rem, 2vw, 1.7rem); letter-spacing: -.04em; color: var(--text-main); }
 .dashboard-context p { margin-top: 5px; color: var(--mx-text-soft); font-size: .88rem; }
 .dashboard-context .context-status { display: inline-flex; align-items: center; gap: 8px; color: var(--mx-text-soft); font: 600 .72rem 'JetBrains Mono', monospace; white-space: nowrap; }
@@ -119,7 +119,7 @@ body.light-theme .search-input, body.light-theme .filter-select { background: rg
 @media (max-width: 700px) {
     .app-header { min-height: 0; }
     .tab-nav { top: 118px; }
-    .main-content { padding: 20px 14px 36px; }
-    .dashboard-context { align-items: flex-start; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+    .main-content { padding: 12px 10px 20px; }
+    .dashboard-context { align-items: flex-start; flex-direction: column; gap: 6px; margin-bottom: 10px; }
     .dashboard-context .context-status { font-size: .68rem; }
 }
