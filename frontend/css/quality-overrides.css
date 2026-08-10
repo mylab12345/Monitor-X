@@ -608,3 +608,83 @@ body.layout-fluid .main-content {
         margin-bottom: 24px;
     }
 }
+
+/* ========================================================================== */
+/*  GPU Accelerators — compact footprint (fix for “took very much space”)      */
+/*  The accelerator card previously used large padding/gaps and stretched to   */
+/*  the row height via the grid’s `stretch` default, so even the “No GPU”     */
+/*  empty state produced a tall blank card that pushed the dashboard below    */
+/*  the fold.  Size it to content, cap the GPU list, and make the empty      */
+/*  state + each GPU row tight.                                               */
+/* ========================================================================== */
+#gpu-card {
+    align-self: start;              /* don’t stretch to tall neighbor */
+    justify-content: flex-start;    /* no extra space-between distribution */
+    min-width: 0;
+}
+#gpu-card .card-header {
+    margin-bottom: 8px;
+}
+#gpu-card .card-header h2 {
+    font-size: 0.72rem;
+}
+#gpu-card #gpu-total {
+    font-size: clamp(1.1rem, 1.6vw, 1.35rem);
+}
+
+/* Empty / no-GPU state: small centered pill instead of a tall blank card */
+#gpu-card #gpu-content .no-data {
+    margin: 2px 0;
+    padding: 10px 10px;
+    border: 1px dashed var(--border-card);
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.16);
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    line-height: 1.4;
+    text-align: center;
+}
+
+/* Real GPU list: tight gaps, capped height with thin scroll when many GPUs */
+#gpu-card .gpu-grid {
+    gap: 6px;
+    max-height: 196px;              /* ~2 dense GPU rows, then scroll */
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148,163,184,.25) transparent;
+    padding-right: 2px;             /* breathing room for scrollbar */
+}
+#gpu-card .gpu-grid::-webkit-scrollbar { width: 5px; height: 5px; }
+#gpu-card .gpu-grid::-webkit-scrollbar-thumb {
+    background: rgba(148,163,184,.22);
+    border-radius: 3px;
+}
+#gpu-card .gpu-grid::-webkit-scrollbar-track { background: transparent; }
+
+#gpu-card .gpu-item {
+    padding: 7px 9px;               /* tighter than the old 12px */
+}
+#gpu-card .gpu-item-header {
+    margin-bottom: 5px;
+}
+#gpu-card .gpu-bars {
+    gap: 4px;
+}
+#gpu-card .gpu-bar {
+    height: 4px;
+}
+#gpu-card .gpu-stats {
+    margin-top: 5px;
+    font-size: 0.63rem;
+    gap: 3px 8px;
+}
+
+/* On narrow viewports the 2-column metrics grid collapses to 1 column — give
+   the capped list a touch less height so it never dominates the viewport. */
+@media (max-width: 768px) {
+    #gpu-card .gpu-grid { max-height: 168px; }
+}
+@media (max-width: 480px) {
+    #gpu-card .gpu-grid { max-height: 156px; }
+}
