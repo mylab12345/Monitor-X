@@ -15,7 +15,7 @@
     <link rel="stylesheet" href="/static/css/dashboard-refresh.css">
     <link rel="stylesheet" href="/static/css/fix-engine.css?v=20260805">
     <link rel="stylesheet" href="/static/css/themes.css?v=20260809">
-    <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260809">
+    <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260810">
     <link rel="stylesheet" href="/static/css/services.css?v=20260809-compact">
     <!-- xterm.js for VM Console -->
 </head>
@@ -177,6 +177,24 @@
                             <div id="ops-detail" class="ops-detail">History is retained locally for 30 days. Alerts are evaluated every live snapshot.</div>
                         </section>
 
+                        <!-- Thermal / System Sensors: a slim full-width HORIZONTAL strip.
+                             Sensor chips flow left → right in the middle, the peak reading
+                             sits by the title and the zone/fan counters pin to the far
+                             right — one compact band instead of a tall half-width card. -->
+                        <div class="metric-card thermal-strip" id="thermal-card" aria-label="CPU and system temperature sensors">
+                            <div class="card-header">
+                                <h2>CPU &amp; System Sensors</h2>
+                                <span class="metric-value" id="thermal-peak">N/A</span>
+                            </div>
+                            <div id="thermal-content">
+                                <p class="no-data">No temperature sensors exposed by this host.</p>
+                            </div>
+                            <div class="card-footer-grid">
+                                <div>Thermal Zones: <b id="thermal-count">0</b></div>
+                                <div>Fans: <b id="thermal-fans">0</b></div>
+                            </div>
+                        </div>
+
                         <!-- Primary Metrics Grid -->
                         <div class="metrics-grid">
                             <!-- CPU Card -->
@@ -251,21 +269,6 @@
                                 <div class="card-footer-grid" id="gpu-footer">
                                     <div>NVML Driver: <b id="gpu-driver-status">Inactive</b></div>
                                     <div>GPU Count: <b id="gpu-count-val">0</b></div>
-                                </div>
-                            </div>
-
-                            <!-- Thermal / Sensors Card -->
-                            <div class="metric-card" id="thermal-card">
-                                <div class="card-header">
-                                    <h2>CPU &amp; System Sensors</h2>
-                                    <span class="metric-value" id="thermal-peak" style="font-size:1.3rem;">N/A</span>
-                                </div>
-                                <div id="thermal-content">
-                                    <p class="no-data">No temperature sensors exposed by this host.</p>
-                                </div>
-                                <div class="card-footer-grid">
-                                    <div>Thermal Zones: <b id="thermal-count">0</b></div>
-                                    <div>Fans: <b id="thermal-fans">0</b></div>
                                 </div>
                             </div>
 

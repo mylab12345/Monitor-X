@@ -400,6 +400,7 @@ body.layout-fluid .main-content {
     /* Enforce exact chronological vertical order on mobile viewports */
     .operations-center { order: 1; }
     .charts-row { order: 2; }
+    .thermal-strip { order: 3; } /* ties with .metrics-grid → renders directly above it by DOM order */
     .metrics-grid { order: 3; }
     .issues-panel { order: 4; }
     .top-processes { order: 5; }
@@ -423,9 +424,12 @@ body.layout-fluid .main-content {
     padding: 10px 14px;
 }
 
+/* System Metadata flows as a normal grid cell. With the CPU & System Sensors
+   card lifted into the horizontal strip, exactly six metric cards remain and
+   pack into perfect 2-card rows (CPU|RAM, Disk|Network, GPU|System Metadata)
+   — no half-empty row and no wasted cell anywhere in the metrics grid. */
 #system-card,
 .system-metadata-card {
-    grid-column: 1 / -1 !important; /* Always span full width so there is NEVER an empty cell/gap in the metrics grid */
     width: 100%;
     min-width: 0;
     align-self: stretch;
@@ -723,4 +727,116 @@ body.layout-fluid .main-content {
 }
 @media (max-width: 480px) {
     #gpu-card .gpu-grid { max-height: 156px; }
+}
+
+/* ========================================================================== */
+/*  CPU & System Sensors — horizontal telemetry strip (2026-08-10)            */
+/*  The sensors panel leaves the 2-column metrics grid and becomes a slim,    */
+/*  full-width band between the Operations Center and the resource cards:     */
+/*  title + peak reading on the left, live sensor chips flowing left→right    */
+/*  in the middle, and the zone/fan counters pinned to the far right.         */
+/*  Small/empty states collapse to a single quiet line — they never get a     */
+/*  tall block of space. (Selectors use #thermal-card to outrank the          */
+/*  .dashboard-main-col .metric-card desktop rules, same pattern as #gpu-card.) */
+/* ========================================================================== */
+#thermal-card {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: center;
+    align-content: center;
+    gap: 4px 16px;
+    padding: 8px 14px;
+}
+
+/* Title + peak reading anchor the left edge of the band on one line. */
+#thermal-card .card-header {
+    flex: 0 0 auto;
+    gap: 10px;
+    margin: 0;
+}
+#thermal-card .card-header h2 {
+    white-space: nowrap;
+}
+#thermal-card .metric-value {
+    font-size: 1.05rem; /* compact inline badge, not a hero number */
+}
+
+/* Sensor chips claim the middle of the band and flow horizontally. */
+#thermal-card #thermal-content {
+    flex: 1 1 320px;            /* wraps under the title only on narrow widths */
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    max-height: 84px;           /* ~2 chip rows max, then a thin scroll — never a wall */
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148,163,184,.25) transparent;
+}
+#thermal-card #thermal-content::-webkit-scrollbar { width: 5px; }
+#thermal-card #thermal-content::-webkit-scrollbar-thumb {
+    background: rgba(148,163,184,.22);
+    border-radius: 3px;
+}
+#thermal-card #thermal-content::-webkit-scrollbar-track { background: transparent; }
+
+/* Each sensor is a compact horizontal chip instead of a full-row stack item. */
+#thermal-card .thermal-list {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    min-width: 0;
+}
+#thermal-card .thermal-item {
+    flex: 0 1 auto;
+    gap: 8px;
+    padding: 3px 10px;
+    font-size: 0.76rem;
+    min-width: 0;
+}
+#thermal-card .thermal-item > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#thermal-card .thermal-item > span:first-child { max-width: 200px; }
+#thermal-card .thermal-item > span:last-child { flex: 0 0 auto; }
+
+/* Fans, battery and empty-state text ride the same line — no dedicated rows. */
+#thermal-card .thermal-fans,
+#thermal-card .thermal-battery {
+    flex: 0 1 auto;
+    margin: 0;
+    font-size: 0.74rem;
+}
+#thermal-card .thermal-fans { gap: 10px; }
+#thermal-card .thermal-battery { white-space: nowrap; }
+#thermal-card #thermal-content .no-data {
+    margin: 0;
+    padding: 2px 0;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+}
+
+/* Zone / fan counters pin to the right edge of the band. */
+#thermal-card .card-footer-grid {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 14px;
+    margin: 0;
+    font-size: 0.74rem;
+}
+#thermal-card .card-footer-grid div { white-space: nowrap; }
+
+/* Phones: keep the band tidy — counters drop to their own full-width line. */
+@media (max-width: 640px) {
+    #thermal-card { gap: 6px 10px; }
+    #thermal-card #thermal-content { flex-basis: 100%; order: 3; }
+    #thermal-card .card-footer-grid { order: 4; }
 }
