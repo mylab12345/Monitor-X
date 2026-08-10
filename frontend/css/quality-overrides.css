@@ -299,7 +299,7 @@ body.focus-mode .app-header {
     max-width: 1600px;
     width: 100%;
     margin: 0 auto;
-    padding: 18px clamp(14px, 2vw, 32px) 32px;
+    padding: 10px clamp(12px, 1.8vw, 24px) 16px;
     transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     flex: 1; /* Fill remaining vertical space so footer sticks to bottom */
 }
@@ -314,30 +314,32 @@ body.layout-fluid .main-content {
     .dashboard-grid-layout {
         display: grid;
         grid-template-columns: 1fr 380px; /* Fixed sidebar width for consistency */
-        gap: 20px;
-        align-items: start;
+        gap: 12px;
+        align-items: stretch;
         width: 100%;
         /* Fill remaining vertical space so no big empty area at bottom */
-        min-height: calc(100vh - 220px);
+        min-height: calc(100vh - 200px);
     }
 
     .dashboard-main-col {
         display: flex;
         flex-direction: column;
-        gap: 16px;
+        gap: 10px;
         min-width: 0;
+        height: 100%;
     }
 
     .dashboard-side-col {
         display: flex;
         flex-direction: column;
-        gap: 14px;
+        gap: 10px;
         min-width: 0;
+        height: 100%;
         /* Stretch sidebar to fill available height so no big empty gap */
         position: sticky;
-        top: 90px;
-        align-self: start;
-        max-height: calc(100vh - 110px);
+        top: 80px;
+        align-self: stretch;
+        max-height: calc(100vh - 90px);
         overflow-y: auto;
         scrollbar-width: thin;
         scrollbar-color: rgba(148,163,184,0.2) transparent;
@@ -357,23 +359,28 @@ body.layout-fluid .main-content {
     /* Stack Sparkline Charts vertically when placed in the side column */
     .dashboard-side-col .charts-row {
         grid-template-columns: 1fr;
-        gap: 10px;
+        gap: 8px;
     }
 
     /* Format metrics grid to a clean 2-column configuration inside main column */
     .dashboard-main-col .metrics-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 14px;
+        gap: 10px;
+        align-items: stretch;
     }
 
     /* Provide additional vertical space for historical charts to render rich details */
     .dashboard-main-col .ops-chart {
-        height: 140px;
+        height: 115px;
     }
 
-    /* Metric cards: fill their grid cells without excess padding */
+    /* Metric cards: fill their grid cells without excess padding or internal gaps */
     .dashboard-main-col .metric-card {
-        padding: 12px 14px;
+        padding: 10px 14px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        align-self: stretch;
     }
 }
 
@@ -382,7 +389,7 @@ body.layout-fluid .main-content {
     .dashboard-grid-layout {
         display: flex;
         flex-direction: column;
-        gap: 24px;
+        gap: 14px;
     }
 
     .dashboard-main-col,
@@ -398,15 +405,30 @@ body.layout-fluid .main-content {
     .top-processes { order: 5; }
 }
 
-/* 4. Fine-Tuning Spacing & Densities for Better Vertical Fit */
+/* 4. Fine-Tuning Spacing & Densities for Better Vertical Fit without Any Gap */
 .metric-card {
-    padding: clamp(12px, 1.2vw, 16px);
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-self: stretch;
 }
 .chart-card {
-    padding: clamp(10px, 1vw, 14px);
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
 }
 .operations-center {
-    padding: clamp(14px, 1.3vw, 18px);
+    padding: 10px 14px;
+}
+
+#system-card,
+.system-metadata-card {
+    grid-column: 1 / -1 !important; /* Always span full width so there is NEVER an empty cell/gap in the metrics grid */
+    width: 100%;
+    min-width: 0;
+    align-self: stretch;
 }
 
 /* 5. Sizing polish — every dashboard option fits its panel, no clipping.
@@ -538,18 +560,25 @@ body.layout-fluid .main-content {
     box-shadow: none;
 }
 
-/* Keep sparkline cards compact in the side column: header + 60px canvas. */
+/* Keep sparkline cards compact in the side column without any gap. */
 .dashboard-side-col .chart-card {
-    padding: 10px 12px;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
 }
 .dashboard-side-col .chart-header {
     margin-bottom: 4px;
     font-size: 0.78rem;
 }
+.dashboard-side-col .chart-card canvas {
+    max-height: 55px;
+    width: 100% !important;
+}
 
 /* Issues panel and top-processes in sidebar: reduce padding to fit more content */
 .dashboard-side-col .issues-panel {
-    padding: 14px 16px;
+    padding: 10px 14px;
 }
 .dashboard-side-col .issues-list {
     margin-top: 8px;
@@ -560,7 +589,14 @@ body.layout-fluid .main-content {
     font-size: 0.8rem;
 }
 .dashboard-side-col .top-processes {
-    padding: 14px 16px;
+    padding: 10px 14px;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+.dashboard-side-col .top-processes .table-container {
+    flex: 1 1 auto;
 }
 .dashboard-side-col .top-processes .data-table {
     font-size: 0.76rem;
@@ -570,9 +606,9 @@ body.layout-fluid .main-content {
     padding: 5px 8px;
 }
 
-/* Tighter context strip so the operations center starts higher on screen. */
+/* Tighter context strip so the operations center starts higher on screen without any gap. */
 .dashboard-context {
-    margin: 0 0 14px;
+    margin: 0 0 10px !important;
     padding: 0;
 }
 .dashboard-context h2 {
@@ -602,10 +638,10 @@ body.layout-fluid .main-content {
     .dashboard-side-col .charts-row,
     .dashboard-side-col .issues-panel,
     .dashboard-side-col .top-processes {
-        margin-bottom: 24px;
+        margin-bottom: 14px;
     }
     .dashboard-main-col .metrics-grid {
-        margin-bottom: 24px;
+        margin-bottom: 14px;
     }
 }
 
@@ -618,8 +654,8 @@ body.layout-fluid .main-content {
 /*  state + each GPU row tight.                                               */
 /* ========================================================================== */
 #gpu-card {
-    align-self: start;              /* don’t stretch to tall neighbor */
-    justify-content: flex-start;    /* no extra space-between distribution */
+    align-self: stretch;            /* match neighbor row height perfectly with zero gap */
+    justify-content: space-between; /* distribute content cleanly */
     min-width: 0;
 }
 #gpu-card .card-header {
