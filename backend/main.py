@@ -571,36 +571,61 @@ async def get_memory_stats() -> Dict[str, Any]:
 
 
 async def get_disk_stats() -> Dict[str, Any]:
-    """Get disk statistics and transfer rate"""
-    global last_disk_io, last_disk_time
-    
-    partitions = psutil.disk_partitions()
-    disks = []
-    
-    for partition in partitions:
-        try:
-            usage = psutil.disk_usage(partition.mountpoint)
-            inode_percent = 0.0
-            try:
-                st = os.statvfs(partition.mountpoint)
-                if st.f_files > 0:
-                    inode_percent = round(((st.f_files - st.f_ffree) / st.f_files) * 100, 1)
-            except Exception:
-                pass
+    """Get disk statistics for the root filesystem (/) and transfer rates.
 
-            disks.append({
-                "device": partition.device,
-                "mountpoint": partition.mountpoint,
-                "fstype": partition.fstype,
-                "total": usage.total,
-                "used": usage.used,
-                "free": usage.free,
-                "percent": (usage.used / usage.total * 100) if usage.total > 0 else 0,
-                "inode_percent": inode_percent
-            })
-        except (PermissionError, FileNotFoundError):
-            continue
-    
+    Storage capacity and inode monitoring intentionally cover ONLY the root
+    filesystem — space used/free/total and inodes used/free/total for "/".
+    No other mount is tracked anywhere in the dashboard. ``partitions`` keeps
+    its historical list shape (holding just the root entry) so existing
+    consumers that iterate it keep working unchanged.
+    """
+    global last_disk_io, last_disk_time
+
+    root: Dict[str, Any] = {
+        "device": "",
+        "mountpoint": "/",
+        "fstype": "",
+        "total": 0,
+        "used": 0,
+        "free": 0,
+        "percent": 0.0,
+        "inode_total": 0,
+        "inode_used": 0,
+        "inode_free": 0,
+        "inode_percent": 0.0,
+    }
+
+    try:
+        usage = psutil.disk_usage("/")
+        root.update({
+            "total": usage.total,
+            "used": usage.used,
+            "free": usage.free,
+            "percent": round((usage.used / usage.total * 100) if usage.total > 0 else 0, 1),
+        })
+    except (PermissionError, FileNotFoundError, OSError):
+        pass
+
+    # Label-only: which device/fstype backs "/" (not extra monitoring).
+    try:
+        for partition in psutil.disk_partitions():
+            if partition.mountpoint == "/":
+                root["device"] = partition.device
+                root["fstype"] = partition.fstype
+                break
+    except Exception:
+        pass
+
+    try:
+        st = os.statvfs("/")
+        if st.f_files > 0:
+            root["inode_total"] = st.f_files
+            root["inode_free"] = st.f_ffree
+            root["inode_used"] = st.f_files - st.f_ffree
+            root["inode_percent"] = round((root["inode_used"] / st.f_files) * 100, 1)
+    except (PermissionError, FileNotFoundError, OSError):
+        pass
+
     now = time.time()
     disk_io = psutil.disk_io_counters()
     
@@ -616,7 +641,8 @@ async def get_disk_stats() -> Dict[str, Any]:
     last_disk_time = now
 
     return {
-        "partitions": disks,
+        "root": root,
+        "partitions": [root],
         "io_read_bytes": disk_io.read_bytes if disk_io else 0,
         "io_write_bytes": disk_io.write_bytes if disk_io else 0,
         "io_read_count": disk_io.read_count if disk_io else 0,
@@ -2155,9 +2181,37 @@ async def _cached_optional(name: str, factory, ttl: float, timeout: float = 20.0
     return value
 
 
-async def collect_all_stats() -> SystemStats:
-    """Collect core telemetry quickly and cache slower optional subsystems."""
+# The most recent telemetry snapshot. psutil's cpu_percent(interval=None)
+# measures *between calls*, so every extra collection (REST refresh, a second
+# browser tab, a WebSocket reconnect) used to reset the sampling window and
+# produce jittery ~0% CPU readings. All readers now share one snapshot that
+# only the broadcast loop refreshes at a steady cadence — smoother CPU curves
+# and a faster /api/stats, which answers from cache instead of running a
+# full duplicate collection behind the stats lock.
+_stats_snapshot: Optional["SystemStats"] = None
+_stats_snapshot_time = 0.0
+# Slightly shorter than STATS_INTERVAL so the broadcast loop always refreshes
+# on its due tick while REST reads inside the same tick hit the cache.
+_STATS_SNAPSHOT_TTL = STATS_INTERVAL * 0.9
+
+
+async def collect_all_stats(force: bool = False) -> SystemStats:
+    """Collect core telemetry quickly and cache slower optional subsystems.
+
+    Returns the shared snapshot when it is still fresh; callers can pass
+    ``force=True`` to demand a brand-new collection.
+    """
+    global _stats_snapshot, _stats_snapshot_time
+    now = time.monotonic()
+    if (not force and _stats_snapshot is not None
+            and now - _stats_snapshot_time < _STATS_SNAPSHOT_TTL):
+        return _stats_snapshot
     async with stats_lock:
+        # Another task may have refreshed the snapshot while we waited.
+        now = time.monotonic()
+        if (not force and _stats_snapshot is not None
+                and now - _stats_snapshot_time < _STATS_SNAPSHOT_TTL):
+            return _stats_snapshot
         cpu, memory, disk, network, processes, system = await asyncio.gather(
             get_cpu_stats(),
             get_memory_stats(),
@@ -2199,7 +2253,7 @@ async def collect_all_stats() -> SystemStats:
         except Exception:
             logger.debug("Could not persist lightweight metrics snapshot", exc_info=True)
 
-        return SystemStats(
+        _stats_snapshot = SystemStats(
             timestamp=datetime.now().isoformat(),
             cpu=cpu,
             memory=memory,
@@ -2211,18 +2265,27 @@ async def collect_all_stats() -> SystemStats:
             vms=vms,
             thermal=thermal,
         )
+        _stats_snapshot_time = time.monotonic()
+        return _stats_snapshot
 
 
 async def broadcast_stats():
-    """Background task to broadcast stats to all connected clients"""
+    """Broadcast stats to all clients at a steady cadence.
+
+    The sleep accounts for the time collection/persistence/fan-out already
+    took, so frames leave at a constant STATS_INTERVAL rhythm instead of
+    drifting to "interval + work time" (which made the UI feel uneven).
+    """
     while True:
+        started = time.monotonic()
         try:
             stats = await collect_all_stats()
             await asyncio.to_thread(persist_snapshot_and_evaluate_alerts, stats)
             await manager.broadcast(stats.model_dump())
         except Exception as e:
             logger.error(f"Error broadcasting stats: {e}")
-        await asyncio.sleep(STATS_INTERVAL)
+        elapsed = time.monotonic() - started
+        await asyncio.sleep(max(0.1, STATS_INTERVAL - elapsed))
 
 
 # =============================================================================
@@ -3461,19 +3524,23 @@ async def troubleshoot_health_check():
             "fix": None,
         })
 
-    # 3. Disk Space & Inodes
+    # 3. Disk Space & Inodes — root filesystem (/) only. The dashboard's
+    # storage monitoring intentionally covers no other mount.
     disk = await get_disk_stats()
-    disk_critical = False
-    disk_warning = False
-    disk_details = []
-    
-    for p in disk["partitions"]:
-        if p["percent"] > 90.0 or p["inode_percent"] > 90.0:
-            disk_critical = True
-            disk_details.append(f"{p['mountpoint']} ({p['percent']:.1f}% space, {p['inode_percent']}% inodes)")
-        elif p["percent"] > 80.0 or p["inode_percent"] > 80.0:
-            disk_warning = True
-            disk_details.append(f"{p['mountpoint']} ({p['percent']:.1f}% space)")
+    root_disk = disk.get("root") or (disk["partitions"][0] if disk.get("partitions") else {})
+    disk_pct = float(root_disk.get("percent", 0) or 0)
+    inode_pct = float(root_disk.get("inode_percent", 0) or 0)
+    free_gb = root_disk.get("free", 0) / 1024 ** 3
+    used_gb = root_disk.get("used", 0) / 1024 ** 3
+    total_gb = root_disk.get("total", 0) / 1024 ** 3
+    inodes_used = int(root_disk.get("inode_used", 0) or 0)
+    inodes_free = int(root_disk.get("inode_free", 0) or 0)
+    disk_critical = disk_pct > 90.0 or inode_pct > 90.0
+    disk_warning = not disk_critical and (disk_pct > 80.0 or inode_pct > 80.0)
+    disk_detail = (
+        f"/ space {disk_pct:.1f}% used ({used_gb:.1f}G of {total_gb:.1f}G, {free_gb:.1f}G free), "
+        f"inodes {inode_pct:.1f}% used ({inodes_used:,} used, {inodes_free:,} free)"
+    )
 
     if disk_critical:
         health_score -= 20
@@ -3482,8 +3549,8 @@ async def troubleshoot_health_check():
             "category": "Storage",
             "name": "Disk Space & Inodes",
             "status": "critical",
-            "value": ", ".join(disk_details) or "High usage",
-            "message": "Disk space or inodes nearly full on partition(s)!",
+            "value": disk_detail,
+            "message": "Root filesystem (/) space or inodes nearly full!",
             "remediation": "Vacuum systemd journal logs to free space immediately, or clean stale temp files. Run 'sudo apt-get clean' or 'sudo yum clean all' to clear package manager cache. Run 'du -sh /* | sort -h' to find large space-consuming folders.",
             "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
             "fixes": [
@@ -3498,8 +3565,8 @@ async def troubleshoot_health_check():
             "category": "Storage",
             "name": "Disk Space & Inodes",
             "status": "warning",
-            "value": ", ".join(disk_details),
-            "message": "Disk usage high (>80%) on partition(s).",
+            "value": disk_detail,
+            "message": "Root filesystem (/) disk usage high (>80% space or inodes).",
             "remediation": "Vacuum journal logs using the button below or archive old application log files. Consider setting up automatic log rotation under '/etc/logrotate.d/' to prevent partition bloat.",
             "fix": {"action": "vacuum_journal", "label": "⚡ Vacuum Journal Logs", "level": "warning", "sudo": True, "target": None},
             "fixes": [
@@ -3513,8 +3580,8 @@ async def troubleshoot_health_check():
             "category": "Storage",
             "name": "Disk Space & Inodes",
             "status": "ok",
-            "value": f"All {len(disk['partitions'])} partition(s) healthy",
-            "message": "Sufficient storage and inode availability.",
+            "value": disk_detail,
+            "message": "Root filesystem (/) has sufficient storage and inode availability.",
             "remediation": None,
             "fix": None,
         })
