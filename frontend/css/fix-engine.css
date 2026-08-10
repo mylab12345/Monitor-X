@@ -433,3 +433,76 @@
     .fix-history-item { flex-wrap: wrap; }
     .fix-history-detail { flex-basis: 100%; white-space: normal; }
 }
+
+/* System-wide Fix Toolbox */
+.system-fix-toolbox {
+    margin: 18px 0;
+    padding: 18px;
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-lg);
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(15, 23, 42, 0.68));
+    box-shadow: var(--shadow-md);
+}
+
+.system-fix-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 14px;
+}
+
+.system-fix-head h3 {
+    margin: 0 0 5px;
+    font-size: 1.05rem;
+}
+
+.system-fix-head p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.84rem;
+    line-height: 1.45;
+}
+
+.system-fix-groups {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+}
+
+.system-fix-group {
+    padding: 12px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.system-fix-group h4 {
+    margin: 0 0 10px;
+    color: var(--text-secondary);
+    font-size: 0.76rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.system-fix-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.system-fix-buttons .btn-fix {
+    flex: 1 1 100%;
+    justify-content: center;
+}
+
+.system-fix-buttons .btn-fix.disabled,
+.system-fix-buttons .btn-fix:disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
+}
+
+@media (max-width: 768px) {
+    .system-fix-head { flex-direction: column; }
+    .system-fix-groups { grid-template-columns: 1fr; }
+}
