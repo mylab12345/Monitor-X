@@ -17,6 +17,7 @@
     <link rel="stylesheet" href="/static/css/themes.css?v=20260809">
     <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260810-root">
     <link rel="stylesheet" href="/static/css/services.css?v=20260809-compact">
+    <link rel="stylesheet" href="/static/css/layout-fit.css?v=20260810">
     <!-- xterm.js for VM Console -->
 </head>
 <body>
@@ -524,7 +525,7 @@
                             <h3>🔌 TCP Port Connectivity Tester</h3>
                             <div class="tool-form-grid">
                                 <input type="text" id="port-host-input" placeholder="Host (e.g. 127.0.0.1)" value="127.0.0.1" class="search-input">
-                                <input type="number" id="port-num-input" placeholder="Port" value="8080" class="search-input" style="width: 100px;">
+                                <input type="number" id="port-num-input" placeholder="Port" value="8080" class="search-input" aria-label="TCP port number">
                                 <button type="button" class="btn btn-primary" id="run-port-btn">Test Port</button>
                             </div>
                             <div class="port-results" id="port-results-box">
