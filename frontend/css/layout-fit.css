@@ -1,0 +1,141 @@
+/*
+   MonitorX layout fit pass
+   Keeps diagnostic tools and every tab usable from narrow laptop screens to
+   phones. This file intentionally loads last so it can correct earlier theme
+   and density rules without changing the visual language of the dashboard.
+*/
+
+/* A grid/flex item's automatic content width must never widen its tab. */
+.tab-content,
+.sub-tab-content,
+.troubleshoot-grid,
+.troubleshoot-card,
+.tool-form,
+.tool-form-grid,
+.log-controls-bar,
+.process-controls,
+.service-controls,
+.svc-controls-bar,
+.table-container {
+    min-width: 0;
+}
+
+/* Network tools share a consistent, compact card rhythm. */
+.troubleshoot-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+    gap: clamp(12px, 1.4vw, 18px);
+}
+
+.troubleshoot-card {
+    padding: clamp(16px, 1.6vw, 20px);
+}
+
+.troubleshoot-card h3 {
+    line-height: 1.35;
+    margin-bottom: 12px;
+}
+
+.tool-form,
+.tool-form-grid {
+    align-items: stretch;
+}
+
+.tool-form > .search-input {
+    min-width: 0;
+}
+
+/* TCP checker: host remains the priority field, while the port and action have
+   stable, screen-fit columns. The previous generic 220px input minimum made
+   this one row overflow a standard 360px diagnostic card. */
+.tool-form-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) clamp(72px, 20%, 96px) max-content;
+    gap: 10px;
+}
+
+.tool-form-grid .search-input {
+    width: 100%;
+    min-width: 0;
+}
+
+#port-num-input {
+    min-width: 0;
+}
+
+.tool-form-grid .btn {
+    min-width: max-content;
+    white-space: nowrap;
+}
+
+.ping-results,
+.port-results,
+.dns-results {
+    min-height: 76px;
+    overflow-wrap: anywhere;
+}
+
+/* Wide dashboard columns should track their content, rather than artificially
+   stretching a shorter column into an empty panel-sized gap. */
+@media (min-width: 1200px) {
+    .dashboard-grid-layout {
+        min-height: 0;
+        align-items: start;
+    }
+
+    .dashboard-main-col,
+    .dashboard-side-col {
+        height: auto;
+    }
+
+    .dashboard-side-col {
+        align-self: start;
+    }
+}
+
+/* Tables and toolbar controls remain readable rather than pushing the page
+   wider than the viewport in Processes, Services, VMs, and Troubleshoot. */
+.table-container {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+}
+
+.log-controls-bar,
+.process-controls,
+.service-controls,
+.svc-controls-bar {
+    row-gap: 10px;
+}
+
+@media (max-width: 560px) {
+    .main-content {
+        padding-inline: 12px;
+    }
+
+    .troubleshoot-grid {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+    }
+
+    /* Leave the host on its own row before placing the compact port/action
+       pair below it. This preserves both input labels on small phones. */
+    .tool-form-grid {
+        grid-template-columns: minmax(0, 1fr) max-content;
+    }
+
+    .tool-form-grid #port-host-input {
+        grid-column: 1 / -1;
+    }
+
+    .tool-form-grid .btn {
+        padding-inline: 14px;
+    }
+
+    .tool-form,
+    .log-controls-bar,
+    .process-controls,
+    .service-controls,
+    .svc-controls-bar {
+        flex-wrap: wrap;
+    }
+}
