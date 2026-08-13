@@ -55,7 +55,7 @@ export MONITORX_CONNECTIONS_TTL=10
 
 ## Themes
 
-MonitorX ships with **nine complete visual themes**, switchable from the **🎨 Theme** button in the top-right corner (or press `t` to cycle through them). Each theme re-skins every element — backgrounds, surfaces, text, accent colours, status colours, HUD overlays and glows — so the whole tool takes on a different character instantly. Your choice is saved and restored across visits.
+MonitorX ships with **thirteen complete visual themes**, switchable from the **🎨 Theme** button in the top-right corner (or press `t` to cycle through them). Each theme re-skins every element — backgrounds, surfaces, text, accent colours, status colours, HUD overlays and glows — so the whole tool takes on a different character instantly. Your choice is saved and restored across visits.
 
 | Theme      | Look                                              |
 |------------|---------------------------------------------------|
@@ -173,7 +173,7 @@ MonitorX/
 ├── frontend/
 │   ├── index.html            # Dashboard HTML structure
 │   ├── css/styles.css        # Modern Glassmorphic CSS Theme
-│   ├── css/themes.css        # Multi-theme system (9 themes + picker styles)
+│   ├── css/themes.css        # Multi-theme system (13 themes + picker styles)
 │   └── js/app.js             # Real-time WebSocket logic, Canvas charts & theme switcher
 ├── systemd/
 │   ├── monitorx.service      # Systemd service unit template

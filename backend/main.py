@@ -7,11 +7,13 @@ import collections
 import concurrent.futures
 import glob
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import platform
 import re
+import secrets
 import signal
 import socket
 import sqlite3
@@ -19,8 +21,8 @@ import shutil
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
-from contextlib import asynccontextmanager
-from datetime import datetime
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional
@@ -28,7 +30,6 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
@@ -62,6 +63,9 @@ MONITORX_AUTH_TOKEN = os.environ.get("MONITORX_AUTH_TOKEN", "").strip()
 AUTH_COOKIE_NAME = "monitorx_auth"
 AUTH_EXEMPT_PATHS = {"/api/health", "/api/auth/login", "/api/auth/logout"}
 MAX_DIAGNOSTIC_OUTPUT = 100_000
+# Browser sessions are short-lived random ids mapped to an expiry, never the
+# shared secret itself. See _issue_session/_session_valid below.
+SESSION_TTL_SECONDS = max(int(os.environ.get("MONITORX_SESSION_TTL", str(12 * 3600))), 60)
 # Optional hardware integrations must never hold up the first dashboard frame.
 # A later telemetry frame fills them in once available.
 OPTIONAL_COLLECTOR_TIMEOUT = max(float(os.environ.get("MONITORX_OPTIONAL_TIMEOUT", "2")), 0.5)
@@ -278,13 +282,124 @@ async def lifespan(app: FastAPI):
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 
+# ==============================================================================
+# LOCAL STATE DIRECTORY
+#
+# Metrics history and the kill/diagnostic audit trail used to live at fixed
+# paths under /tmp (mode 0644, in a world-writable sticky directory). That
+# leaked host telemetry to every local user and — worse for the audit log —
+# let an unprivileged user pre-create or symlink the path before MonitorX
+# started, redirecting appends to a file of their choosing.
+#
+# State now defaults to the repo/install directory and is created 0700, with
+# every file written 0600 and O_NOFOLLOW to defeat symlink swaps.
+# ==============================================================================
+STATE_DIR = Path(os.environ.get("MONITORX_STATE_DIR", str(BASE_DIR))).expanduser()
 
-def _request_token(request: Request) -> str:
-    """Read the optional bearer token or HttpOnly auth cookie."""
+
+def _ensure_state_dir() -> Path:
+    """Create (once) and return the private state directory."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if STATE_DIR != BASE_DIR:
+            # Only tighten a directory we own; never chmod the repo root.
+            os.chmod(STATE_DIR, 0o700)
+    except OSError as exc:
+        logger.warning("Could not prepare state directory %s: %s", STATE_DIR, exc)
+    return STATE_DIR
+
+
+def _secure_open_append(path: Path):
+    """Open ``path`` for append with 0600, refusing to follow a symlink.
+
+    O_NOFOLLOW makes the open fail outright if an attacker planted a symlink
+    at this path, instead of silently writing through it.
+    """
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    return os.fdopen(fd, "a")
+
+
+def _harden_file_mode(path: Path) -> None:
+    """Best-effort chmod 0600 on a state file we just created."""
+    try:
+        if path.exists() and not path.is_symlink():
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+# ==============================================================================
+# BROWSER SESSIONS
+#
+# The login cookie used to contain MONITORX_AUTH_TOKEN verbatim. That is the
+# long-lived shared secret for the whole deployment: anything that could read
+# one browser's cookie jar (a backup, an XSS bypass of HttpOnly via a proxy, a
+# shared machine) obtained permanent API access, and "log out" only deleted the
+# client-side copy — the value it had handed out stayed valid forever.
+#
+# Logging in now mints an opaque random session id that maps to an expiry
+# server-side. Logout deletes the mapping, so the credential is actually dead.
+# ==============================================================================
+_sessions: Dict[str, float] = {}
+
+
+def _prune_sessions(now: Optional[float] = None) -> None:
+    now = time.time() if now is None else now
+    for sid in [s for s, exp in _sessions.items() if exp <= now]:
+        _sessions.pop(sid, None)
+
+
+def _issue_session() -> str:
+    """Mint an opaque session id bound to a server-side expiry."""
+    _prune_sessions()
+    sid = secrets.token_urlsafe(32)
+    _sessions[sid] = time.time() + SESSION_TTL_SECONDS
+    return sid
+
+
+def _session_valid(sid: str) -> bool:
+    if not sid:
+        return False
+    expiry = _sessions.get(sid)
+    if expiry is None:
+        return False
+    if expiry <= time.time():
+        _sessions.pop(sid, None)
+        return False
+    return True
+
+
+def _revoke_session(sid: str) -> None:
+    _sessions.pop(sid, None)
+
+
+def _credential_valid(bearer: str, cookie: str) -> bool:
+    """True when either a valid bearer token or a live session cookie is present."""
+    if bearer and hmac.compare_digest(bearer, MONITORX_AUTH_TOKEN):
+        return True
+    return _session_valid(cookie)
+
+
+def _request_bearer(request: Request) -> str:
+    """Read the optional bearer token from the Authorization header."""
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    return request.cookies.get(AUTH_COOKIE_NAME, "")
+    return ""
+
+
+def _request_authenticated(request: Request) -> bool:
+    """Validate a request via bearer token or session cookie."""
+    if not MONITORX_AUTH_TOKEN:
+        return True
+    return _credential_valid(
+        _request_bearer(request), request.cookies.get(AUTH_COOKIE_NAME, "")
+    )
 
 
 def _websocket_authenticated(websocket: WebSocket) -> bool:
@@ -292,9 +407,9 @@ def _websocket_authenticated(websocket: WebSocket) -> bool:
     if not MONITORX_AUTH_TOKEN:
         return True
     auth = websocket.headers.get("authorization", "")
-    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    token = token or websocket.cookies.get(AUTH_COOKIE_NAME, "") or websocket.query_params.get("token", "")
-    return bool(token) and hmac.compare_digest(token, MONITORX_AUTH_TOKEN)
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    bearer = bearer or websocket.query_params.get("token", "")
+    return _credential_valid(bearer, websocket.cookies.get(AUTH_COOKIE_NAME, ""))
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -313,8 +428,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 or request.url.path in AUTH_EXEMPT_PATHS
                 or request.method == "OPTIONS"):
             return await call_next(request)
-        token = _request_token(request)
-        if not token or not hmac.compare_digest(token, MONITORX_AUTH_TOKEN):
+        if not _request_authenticated(request):
             return JSONResponse(
                 {"detail": "Authentication required. Set the MonitorX auth token and sign in."},
                 status_code=401,
@@ -331,6 +445,25 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        # The dashboard renders host telemetry and exposes process-kill and VM
+        # lifecycle controls, so it must not be framable and must not be able
+        # to load or exfiltrate to third-party origins. 'unsafe-inline' for
+        # styles only: the UI ships inline style attributes, but no inline
+        # <script> is required.
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "font-src 'self' data:; "
+            "connect-src 'self' ws: wss:; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'; "
+            "base-uri 'none'; "
+            "form-action 'self'",
+        )
+        response.headers.setdefault("X-Frame-Options", "DENY")
         # Hashed/versioned static asset URLs are safe to keep locally. This
         # removes repeated transfers and parsing on every dashboard visit.
         if request.url.path.startswith("/static/"):
@@ -353,7 +486,6 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
-templates = Jinja2Templates(directory=str(FRONTEND_DIR))
 
 
 @app.post("/api/auth/login")
@@ -364,19 +496,22 @@ async def auth_login(payload: AuthLoginRequest, request: Request):
     if not hmac.compare_digest(payload.token, MONITORX_AUTH_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid MonitorX authentication token.")
     response = JSONResponse({"authenticated": True, "auth_required": True})
+    # The cookie carries a revocable session id, never MONITORX_AUTH_TOKEN.
     response.set_cookie(
         AUTH_COOKIE_NAME,
-        MONITORX_AUTH_TOKEN,
+        _issue_session(),
         httponly=True,
         secure=(request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"),
         samesite="strict",
-        max_age=60 * 60 * 12,
+        max_age=SESSION_TTL_SECONDS,
     )
     return response
 
 
 @app.post("/api/auth/logout")
-async def auth_logout():
+async def auth_logout(request: Request):
+    """Revoke the session server-side, not just in the browser."""
+    _revoke_session(request.cookies.get(AUTH_COOKIE_NAME, ""))
     response = JSONResponse({"authenticated": False})
     response.delete_cookie(AUTH_COOKIE_NAME)
     return response
@@ -691,7 +826,7 @@ async def get_network_stats() -> Dict[str, Any]:
     if (last_net_connections_count is None
             or now - last_net_connections_time >= NETWORK_CONNECTIONS_TTL):
         try:
-            last_net_connections_count = len(psutil.net_connections(kind='inet'))
+            last_net_connections_count = await asyncio.to_thread(_count_net_connections_sync)
             last_net_connections_time = now
         except Exception:
             # Keep the last known count when permissions are restricted.
@@ -770,6 +905,27 @@ async def get_gpu_stats() -> Optional[List[Dict[str, Any]]]:
     return gpus if gpus else None
 
 
+def _count_net_connections_sync() -> int:
+    """Blocking socket-table read. Call via asyncio.to_thread."""
+    return len(psutil.net_connections(kind='inet'))
+
+
+def _list_inet_connections_sync():
+    """Blocking snapshot of the inet socket table. Call via asyncio.to_thread."""
+    return psutil.net_connections(kind='inet')
+
+
+def _count_threads_sync() -> int:
+    """Blocking sum of thread counts across all processes."""
+    total = 0
+    for proc in psutil.process_iter(["num_threads"]):
+        try:
+            total += proc.info["num_threads"] or 0
+        except Exception:
+            pass
+    return total
+
+
 def _collect_process_stats_sync(limit: int) -> List[Dict[str, Any]]:
     """Synchronous psutil walk kept off the asyncio event loop."""
     processes = []
@@ -810,14 +966,8 @@ async def get_process_stats(limit: int = PROCESS_STATS_LIMIT) -> List[Dict[str, 
         return value
 
 
-async def _scan_process_states() -> Dict[str, int]:
-    """Count processes by state across ALL processes (not a top-N subset).
-
-    ``get_process_stats(limit=N)`` sorts by CPU and truncates, so zombies and
-    D-state processes — which consume ~0% CPU — routinely fall off the end of
-    the list on busy hosts. Diagnostic scans must therefore never reuse the
-    top-N view for state counting.
-    """
+def _scan_process_states_sync() -> Dict[str, int]:
+    """Blocking full-table process state walk. Call via asyncio.to_thread."""
     counts: Dict[str, int] = {}
     for proc in psutil.process_iter(['status']):
         try:
@@ -826,6 +976,21 @@ async def _scan_process_states() -> Dict[str, int]:
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
     return counts
+
+
+async def _scan_process_states() -> Dict[str, int]:
+    """Count processes by state across ALL processes (not a top-N subset).
+
+    ``get_process_stats(limit=N)`` sorts by CPU and truncates, so zombies and
+    D-state processes — which consume ~0% CPU — routinely fall off the end of
+    the list on busy hosts. Diagnostic scans must therefore never reuse the
+    top-N view for state counting.
+
+    The walk itself reads every /proc entry and takes tens of milliseconds on
+    a busy host, so it runs in a worker thread rather than stalling the
+    telemetry loop.
+    """
+    return await asyncio.to_thread(_scan_process_states_sync)
 
 
 async def get_system_info() -> Dict[str, Any]:
@@ -2230,28 +2395,10 @@ async def collect_all_stats(force: bool = False) -> SystemStats:
             _cached_optional("thermal", get_thermal_stats, 5.0, timeout=OPTIONAL_COLLECTOR_TIMEOUT),
         )
 
-        # Persist the real fields used by the collectors. The old code looked
-        # for non-existent top-level keys and silently stored zeros.
-        try:
-            disk_percent = max(
-                (float(p.get("percent", 0)) for p in disk.get("partitions", [])),
-                default=0.0,
-            )
-            with sqlite3.connect(str(DB_PATH)) as conn:  # Fixed: context manager (prevents resource leak)
-                conn.execute(
-                    "INSERT OR IGNORE INTO metrics (ts, cpu, mem, disk, net) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        time.time(),
-                        float(cpu.get("percent_total", 0)),
-                        float(memory.get("percent", 0)),
-                        disk_percent,
-                        float(network.get("rx_bytes_sec", 0)),
-                    ),
-                )
-                conn.execute("DELETE FROM metrics WHERE ts < ?", (time.time() - 86400 * 7,))
-                conn.commit()
-        except Exception:
-            logger.debug("Could not persist lightweight metrics snapshot", exc_info=True)
+        # NOTE: snapshots are persisted exactly once, by
+        # persist_snapshot_and_evaluate_alerts() into metric_history. A second
+        # write to a separate /tmp 'metrics' table used to happen here, storing
+        # the same samples twice on every telemetry tick.
 
         _stats_snapshot = SystemStats(
             timestamp=datetime.now().isoformat(),
@@ -2291,24 +2438,45 @@ async def broadcast_stats():
 # =============================================================================
 # Operations center: local history, alert rules, incident timeline and webhooks
 # =============================================================================
-OPERATIONS_DB = Path(os.environ.get("MONITORX_OPERATIONS_DB", str(BASE_DIR / "monitorx-operations.db")))
+OPERATIONS_DB = Path(os.environ.get(
+    "MONITORX_OPERATIONS_DB", str(_ensure_state_dir() / "monitorx-operations.db")
+))
 DEFAULT_ALERT_RULES = [
     {"id": "cpu-high", "name": "CPU usage high", "metric": "cpu", "operator": ">=", "threshold": 90, "cooldown_minutes": 15, "enabled": True},
     {"id": "memory-high", "name": "Memory pressure", "metric": "memory", "operator": ">=", "threshold": 90, "cooldown_minutes": 15, "enabled": True},
     {"id": "disk-high", "name": "Disk capacity low", "metric": "disk", "operator": ">=", "threshold": 90, "cooldown_minutes": 30, "enabled": True},
 ]
 
+@contextmanager
 def _ops_conn():
+    """Yield a SQLite connection that is committed AND closed.
+
+    NOTE: ``with sqlite3.connect(...) as conn`` only wraps a *transaction* —
+    it commits or rolls back but never closes the handle. Relying on it (as
+    this module previously did) leaks a file descriptor per call, and this
+    helper runs on the telemetry loop every STATS_INTERVAL seconds. The inner
+    ``with conn`` keeps the transaction semantics callers depend on; the
+    ``finally`` is what actually releases the descriptor.
+    """
+    # Host telemetry must not be world-readable, whoever opens the DB first.
+    fresh = not OPERATIONS_DB.exists()
     conn = sqlite3.connect(str(OPERATIONS_DB), timeout=10)
-    conn.row_factory = sqlite3.Row
-    # The broadcast task and the REST API write concurrently; WAL + a busy
-    # timeout keep those writers from tripping over each other.
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn  # Note: callers must use 'with _ops_conn() as conn:' for guaranteed close
+    try:
+        if fresh:
+            _harden_file_mode(OPERATIONS_DB)
+        conn.row_factory = sqlite3.Row
+        # The broadcast task and the REST API write concurrently; WAL + a busy
+        # timeout keep those writers from tripping over each other.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 def init_operations_store():
+    _ensure_state_dir()
     with _ops_conn() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS metric_history (timestamp TEXT PRIMARY KEY, cpu REAL, memory REAL, disk REAL, net_rx REAL, net_tx REAL);
@@ -2319,6 +2487,12 @@ def init_operations_store():
         """)
         if not conn.execute("SELECT count(*) FROM alert_rules").fetchone()[0]:
             conn.executemany("INSERT INTO alert_rules VALUES (:id,:name,:metric,:operator,:threshold,:cooldown_minutes,:enabled)", DEFAULT_ALERT_RULES)
+        # The 30-day retention DELETE below filters on timestamp; without this
+        # index it degrades to a full scan of every two-second sample.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_metric_history_ts ON metric_history(timestamp)")
+    # Host telemetry is not world-readable. Cover the WAL sidecars too.
+    for suffix in ("", "-wal", "-shm"):
+        _harden_file_mode(Path(str(OPERATIONS_DB) + suffix))
 
 def _metrics(stats):
     return {"cpu": float(stats.cpu.get("percent_total", 0)), "memory": float(stats.memory.get("percent", 0)), "disk": max([float(x.get("percent", 0)) for x in stats.disk.get("partitions", [])] or [0]), "net_rx": float(stats.network.get("rx_bytes_sec", 0)), "net_tx": float(stats.network.get("tx_bytes_sec", 0))}
@@ -2462,12 +2636,13 @@ class AlertRuleRequest(BaseModel):
     enabled: bool = True
 
 @app.get('/api/operations/overview')
-async def operations_overview(range: str = Query('1h', pattern='^(1h|6h|24h|7d)$')):
-    hours = {'1h': 1, '6h': 6, '24h': 24, '7d': 168}[range]
+async def operations_overview(window: str = Query('1h', alias='range', pattern='^(1h|6h|24h|7d)$')):
+    # Parameter is 'window' internally; 'range' would shadow the builtin.
+    hours = {'1h': 1, '6h': 6, '24h': 24, '7d': 168}[window]
     with _ops_conn() as conn:
         rows = conn.execute("SELECT * FROM metric_history WHERE timestamp >= datetime('now', ?) ORDER BY timestamp", (f'-{hours} hours',)).fetchall()
         incidents = conn.execute("SELECT * FROM incidents WHERE status='open' OR timestamp >= datetime('now','-24 hours') ORDER BY id DESC LIMIT 30").fetchall()
-    return {'range': range, 'history': [dict(x) for x in rows], 'incidents': [dict(x) for x in incidents]}
+    return {'range': window, 'history': [dict(x) for x in rows], 'incidents': [dict(x) for x in incidents]}
 
 @app.get('/api/operations/alert-rules')
 async def list_alert_rules():
@@ -2546,6 +2721,31 @@ class WebhookConfigRequest(BaseModel):
     enabled: bool = True
 
 
+def _reject_ssrf_target(hostname: str) -> Optional[str]:
+    """Return a rejection reason if `hostname` resolves somewhere internal.
+
+    The webhook URL is attacker-controllable through the settings API and the
+    server then POSTs to it. Without this check it doubles as a blind SSRF
+    primitive against loopback services, link-local metadata endpoints
+    (169.254.169.254) and the rest of the private network the host sits on.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return f"Webhook host '{hostname}' could not be resolved."
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr.split("%")[0])
+        except ValueError:
+            continue
+        if (ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return (f"Webhook host '{hostname}' resolves to internal address "
+                    f"{ip}. Webhooks may only target public endpoints.")
+    return None
+
+
 @app.post('/api/operations/webhook')
 async def set_webhook_config(cfg: WebhookConfigRequest):
     if cfg.url:
@@ -2555,6 +2755,9 @@ async def set_webhook_config(cfg: WebhookConfigRequest):
                 or parsed.username
                 or parsed.password):
             raise HTTPException(status_code=400, detail="Webhook URL must be an http(s) URL without embedded credentials.")
+        reason = await asyncio.to_thread(_reject_ssrf_target, parsed.hostname)
+        if reason:
+            raise HTTPException(status_code=400, detail=reason)
     with _ops_conn() as conn:
         conn.execute("INSERT INTO settings(key,value) VALUES('webhook_url',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (cfg.url,))
         conn.execute("INSERT INTO settings(key,value) VALUES('webhook_enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ('1' if cfg.enabled else '0',))
@@ -2580,31 +2783,37 @@ async def acknowledge_incident(incident_id: int):
 async def operations_audit(limit: int = Query(30, ge=1, le=200)):
     with _ops_conn() as conn: return [dict(x) for x in conn.execute('SELECT * FROM operations_audit ORDER BY id DESC LIMIT ?', (limit,))]
 
-# Lightweight SQLite persistence (24h) — P2 deferred
-DB_PATH = Path("/tmp/monitorx_metrics.db")
-
-def init_db():
-    try:
-        with sqlite3.connect(str(DB_PATH)) as conn:  # Fixed: context manager guarantees close even on error (prevents resource leak)
-            conn.execute("CREATE TABLE IF NOT EXISTS metrics (ts REAL PRIMARY KEY, cpu REAL, mem REAL, disk REAL, net REAL)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics(ts)")
-            conn.commit()
-    except Exception:
-        pass
-
-init_db()
-
 @app.get("/api/historical")
 async def historical(hours: int = Query(24, ge=1, le=168)):
+    """Historical samples from the single metric_history store.
+
+    This previously read a second, redundant SQLite file under /tmp that was
+    written on every telemetry tick with the same numbers. metric_history is
+    now the only source of truth.
+    """
     rows = []
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:  # Fixed: context manager
-            cutoff = time.time() - (hours * 3600)
-            cur = conn.execute("SELECT ts, cpu, mem, disk, net FROM metrics WHERE ts > ? ORDER BY ts ASC", (cutoff,))
+        cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+        with _ops_conn() as conn:
+            cur = conn.execute(
+                "SELECT timestamp, cpu, memory, disk, net_rx FROM metric_history "
+                "WHERE timestamp > ? ORDER BY timestamp ASC",
+                (cutoff,),
+            )
             for r in cur.fetchall():
-                rows.append({"ts": r[0], "cpu": r[1], "mem": r[2], "disk": r[3], "net": r[4]})
+                try:
+                    ts = datetime.fromisoformat(r["timestamp"]).timestamp()
+                except (TypeError, ValueError):
+                    continue
+                rows.append({
+                    "ts": ts,
+                    "cpu": r["cpu"],
+                    "mem": r["memory"],
+                    "disk": r["disk"],
+                    "net": r["net_rx"],
+                })
     except Exception:
-        pass
+        logger.debug("Historical query failed", exc_info=True)
     return {"count": len(rows), "data": rows}
 
 # REST API Endpoints
@@ -2644,8 +2853,29 @@ async def auth_status():
     return status
 
 
-# P2 deferred: Diagnostic / Process audit endpoint
-AUDIT_LOG = Path("/tmp/monitorx-audit.log")
+# Diagnostic / process-kill audit trail. Lives in the private state directory
+# (never /tmp) and is appended through _append_audit_line so a symlink planted
+# at the path cannot redirect the write.
+AUDIT_LOG = Path(os.environ.get("MONITORX_AUDIT_LOG", str(_ensure_state_dir() / "monitorx-audit.log")))
+
+
+def _append_audit_line(action: str, detail: str = "") -> bool:
+    """Append one audit record. Returns False if the write was refused."""
+    line = "{} | {} | {} | {}\n".format(
+        datetime.now().isoformat(),
+        os.getuid(),
+        str(action).replace("\n", " ").replace("|", "/"),
+        str(detail).replace("\n", " ").replace("|", "/"),
+    )
+    try:
+        _ensure_state_dir()
+        with _secure_open_append(AUDIT_LOG) as f:
+            f.write(line)
+        return True
+    except OSError as exc:
+        # ELOOP here means someone planted a symlink at AUDIT_LOG.
+        logger.warning("Audit append refused for %s: %s", AUDIT_LOG, exc)
+        return False
 
 @app.get("/api/audit")
 async def get_audit(log_lines: int = Query(50, ge=1, le=500)):
@@ -2665,12 +2895,7 @@ async def get_audit(log_lines: int = Query(50, ge=1, le=500)):
 @app.post("/api/audit")
 async def post_audit(action: str = Query(...), detail: str = Query("")):
     """Log a diagnostic or process kill action."""
-    try:
-        with open(AUDIT_LOG, "a") as f:
-            f.write(f"{datetime.now().isoformat()} | {os.getuid()} | {action} | {detail}\n")
-    except Exception:
-        pass
-    return {"logged": True}
+    return {"logged": _append_audit_line(action, detail)}
 
 
 @app.get("/api/stats", response_model=SystemStats)
@@ -2799,9 +3024,10 @@ def _report_to_markdown(data: Dict[str, Any]) -> str:
 
 
 @app.get("/api/report/export")
-async def report_export(format: str = Query("json", pattern="^(json|markdown)$")):
+async def report_export(fmt: str = Query("json", alias="format", pattern="^(json|markdown)$")):
+    # Parameter is 'fmt' internally; 'format' would shadow the builtin.
     data = await _collect_report_data()
-    if format == "markdown":
+    if fmt == "markdown":
         body = _report_to_markdown(data)
         filename = f"monitorx-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
         return Response(
@@ -3069,15 +3295,19 @@ async def get_process_detail(pid: int):
 
 
 @app.post("/api/processes/{pid}/kill")
-async def kill_process(pid: int, signal: int = Query(15)):
+async def kill_process(pid: int, sig: int = Query(15, alias="signal")):
     """Terminate a process with SIGTERM (15) or SIGKILL (9).
 
     A SIGTERM request gets a 5-second grace period for the process to exit
     cleanly; only then is it escalated to SIGKILL (and the response says so).
     Previously the escalation happened after 0.5s, which made SIGTERM requests
     effectively indistinguishable from SIGKILL.
+
+    NOTE: the parameter is ``sig``, not ``signal``. Naming it ``signal``
+    shadowed the stdlib ``signal`` module inside this function's scope; the
+    query-string name is preserved via ``alias`` so the wire API is unchanged.
     """
-    if signal not in (9, 15):
+    if sig not in (9, 15):
         raise HTTPException(status_code=400, detail="Only SIGTERM (15) and SIGKILL (9) are allowed.")
     try:
         proc = psutil.Process(pid)
@@ -3089,14 +3319,9 @@ async def kill_process(pid: int, signal: int = Query(15)):
                 raise HTTPException(status_code=403, detail=f"Process {pid} belongs to UID {proc_uids.real}; you are UID {current_uid}.")
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-        # Audit log (P2)
-        try:
-            with open("/tmp/monitorx-audit.log", "a") as f:
-                f.write(f"{datetime.now().isoformat()} | {os.getuid()} | kill | pid={pid} signal={signal}\n")
-        except Exception:
-            pass
-        proc.send_signal(signal)
-        if signal == 9:
+        _append_audit_line("kill", f"pid={pid} signal={sig}")
+        proc.send_signal(sig)
+        if sig == 9:
             return {"success": True, "message": f"Process {pid} killed (SIGKILL)"}
         # Graceful window: poll briefly, then escalate only if still alive.
         escalated = False
@@ -3178,12 +3403,8 @@ async def kill_processes_batch(payload: BatchKillRequest):
             record(pid, False,
                    f"belongs to UID {proc_uids.real}; you are UID {current_uid} (skipped)")
             continue
-        # Audit log (P2), mirroring the single-PID endpoint.
-        try:
-            with open("/tmp/monitorx-audit.log", "a") as f:
-                f.write(f"{datetime.now().isoformat()} | {current_uid} | kill | pid={pid} signal={payload.signal}\n")
-        except Exception:
-            pass
+        # Audit log, mirroring the single-PID endpoint.
+        _append_audit_line("kill", f"pid={pid} signal={payload.signal}")
         try:
             proc.send_signal(payload.signal)
         except psutil.NoSuchProcess:
@@ -4031,12 +4252,7 @@ async def troubleshoot_health_check():
     try:
         with open("/proc/sys/kernel/threads-max") as fh:
             threads_max = int(fh.read().split()[0])
-        threads_total = 0
-        for proc in psutil.process_iter(["num_threads"]):
-            try:
-                threads_total += proc.info["num_threads"] or 0
-            except Exception:
-                pass
+        threads_total = await asyncio.to_thread(_count_threads_sync)
     except Exception:
         threads_max = threads_total = None
 
@@ -4428,7 +4644,7 @@ async def troubleshoot_network_ports():
     ports = []
     
     try:
-        connections = psutil.net_connections(kind='inet')
+        connections = await asyncio.to_thread(_list_inet_connections_sync)
         for conn in connections:
             if conn.status == 'LISTEN':
                 ip, port = conn.laddr
@@ -4479,13 +4695,34 @@ async def troubleshoot_network_ports():
     return ports
 
 
-@app.get("/api/troubleshoot/bottlenecks")
-async def troubleshoot_bottlenecks():
-    """
-    Identifies top CPU, Memory, and Thread resource bottlenecks
-    along with stuck processes.
-    """
+def _prime_cpu_samplers_sync():
+    """Blocking walk that initialises psutil's per-process CPU sampler."""
     procs = []
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            proc.cpu_percent()  # initialise the per-process sampler
+            procs.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return procs
+
+
+def _list_zombies_sync():
+    """Blocking walk returning (pid, name, ppid) for every zombie process."""
+    zombies = []
+    for proc in psutil.process_iter(['pid', 'name', 'ppid', 'status']):
+        try:
+            status = (proc.info['status'] or '').lower()
+            if status in ('zombie', 'defunct'):
+                zombies.append((proc.info['pid'], proc.info['name'] or '?', proc.info['ppid']))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return zombies
+
+
+def _collect_bottleneck_procs_sync() -> List[Dict[str, Any]]:
+    """Blocking full process walk for the bottleneck view."""
+    procs: List[Dict[str, Any]] = []
     for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'memory_info', 'status', 'num_threads', 'username']):
         try:
             info = proc.info
@@ -4501,6 +4738,16 @@ async def troubleshoot_bottlenecks():
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
+    return procs
+
+
+@app.get("/api/troubleshoot/bottlenecks")
+async def troubleshoot_bottlenecks():
+    """
+    Identifies top CPU, Memory, and Thread resource bottlenecks
+    along with stuck processes.
+    """
+    procs = await asyncio.to_thread(_collect_bottleneck_procs_sync)
 
     cpu_hogs = sorted(procs, key=lambda x: x['cpu_percent'], reverse=True)[:5]
     mem_hogs = sorted(procs, key=lambda x: x['memory_mb'], reverse=True)[:5]
@@ -4811,13 +5058,7 @@ async def _fix_kill_top_cpu(target: Optional[str] = None) -> Dict[str, Any]:
     my_pid = os.getpid()
     my_uid = os.geteuid()
 
-    procs = []
-    for proc in psutil.process_iter(["pid", "name"]):
-        try:
-            proc.cpu_percent()  # initialise the per-process sampler
-            procs.append(proc)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
+    procs = await asyncio.to_thread(_prime_cpu_samplers_sync)
 
     # One shared measurement window for every process.
     await asyncio.sleep(0.25)
@@ -4868,14 +5109,7 @@ async def _fix_reap_zombies(target: Optional[str] = None) -> Dict[str, Any]:
     wait() loop.  Only parents owned by the dashboard user (or any parent when
     running as root) are nudged.
     """
-    zombies = []
-    for proc in psutil.process_iter(['pid', 'name', 'ppid', 'status']):
-        try:
-            status = (proc.info['status'] or '').lower()
-            if status in ('zombie', 'defunct'):
-                zombies.append((proc.info['pid'], proc.info['name'] or '?', proc.info['ppid']))
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
+    zombies = await asyncio.to_thread(_list_zombies_sync)
     if not zombies:
         return {"success": True, "message": "No zombie processes found to reap."}
 
@@ -4893,13 +5127,7 @@ async def _fix_reap_zombies(target: Optional[str] = None) -> Dict[str, Any]:
 
     await asyncio.sleep(0.6)
 
-    remaining = 0
-    for proc in psutil.process_iter(['status']):
-        try:
-            if (proc.info['status'] or '').lower() in ('zombie', 'defunct'):
-                remaining += 1
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
+    remaining = len(await asyncio.to_thread(_list_zombies_sync))
 
     msg = f"SIGCHLD sent to {nudged} parent(s); {len(zombies)} zombie(s) found, {remaining} still present."
     if denied:
@@ -5437,8 +5665,10 @@ SAFE_DIAGNOSTIC_COMMANDS = {
 async def run_command(request: Request):
     """Run one of the dashboard's explicitly approved, read-only diagnostics.
 
-    This endpoint is reachable from the browser and MonitorX has no authentication,
-    so accepting an arbitrary shell command would be remote code execution.
+    Authentication is optional (it is only enforced when MONITORX_AUTH_TOKEN is
+    set), so this endpoint must assume it is reachable by anyone who can reach
+    the port. Accepting an arbitrary shell command would therefore be remote
+    code execution; only the preset allowlist below is ever executed.
     """
     try:
         body = await request.json()
