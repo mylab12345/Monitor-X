@@ -17,6 +17,7 @@ Real-time, modern monitoring and automated troubleshooting dashboard for Linux s
 - **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections). Multi-select kill runs as a single batched request and is **owner-guarded per process**: PIDs owned by another user are individually refused with the reason shown in the summary toast, while authorized PIDs are still terminated — the bulk kill never aborts wholesale on the first unauthorized target.
 - **Service & VM Management** — Card-based systemd service manager with KPI counters (Total / Active / Failed / Inactive / Loaded), search/filter/sort, an auto-refresh interval selector, sticky bulk actions (start, stop, restart, reload, enable, disable), per-unit journal log viewer, and an in-UI authorization status with actionable errors. Running libvirt/KVM guests show live vCPU, RAM, disk I/O, and network throughput metrics.
 - **KVM Guest Lifecycle Controls** — `Start`, `Shutdown`, `Reboot`, `Suspend`, `Resume`, and a destructive `Poweroff` for every libvirt domain discovered on the host, with a state-aware action matrix, bulk operations on multiple guests, KPI counters (Total / Running / Stopped / Paused / Other), search/filter/sort, an auto-refresh interval selector, and a built-in audit log of the last 50 control actions. Controls run through the libvirt API when MonitorX has read-write access and transparently fall back to a narrowly scoped `sudo virsh` policy otherwise; a dropped `libvirtd` connection is re-established automatically without restarting the dashboard.
+- **VM Guest Insights (in-VM visibility)** — See *inside* every VM: the full **process table** (PID, user, CPU%, MEM%, RSS, uptime, command — sortable, filterable), **logged-in user sessions** plus the guest's **local user accounts**, and **root-disk usage** with every real filesystem. Each running VM gets a 🔍 Insights button opening a live modal with 10-second auto-refresh; a fleet **Guest Insights overview** at the top of the VMs tab rolls up process counts, sessions, and root-disk pressure for every connected guest at once. Access is per-VM SSH with key-based auth only; libvirt auto-discovers guest IPs to pre-fill the connection form. The design is strictly read-only and allowlist-based — see [VM Guest Insights](#vm-guest-insights-in-vm-visibility) below.
 - **Secure Local-First Access** — Authentication is optional for localhost; set `MONITORX_AUTH_TOKEN` when exposing MonitorX through a trusted reverse proxy or container network.
 
 ---
@@ -108,6 +109,43 @@ VM lifecycle controls use two independent paths, and the dashboard enables the b
    for the lifecycle verbs `start`, `shutdown`, `reboot`, `destroy`, `suspend`, and `resume` — plus the serial-console form `… console -- <domain>` and the CPU/RAM resize forms `… setvcpus <domain> …`, `… setmem <domain> …`, `… setmaxmem <domain> …`. Nothing else is granted — no shell, no `undefine`, no arbitrary arguments. The `--no-pkttyagent` flag is part of the whitelisted command line and must stay in sync with `_virsh_command()` in `backend/main.py`; sudo matches the full argv, so a mismatch makes every control command fail with “not allowed to execute”.
 
 The **VMs (Libvirt)** tab reports which mode is active, disables controls only when both paths fail, and surfaces the exact libvirt/`virsh` error instead of reporting a false success.
+
+### VM Guest Insights (in-VM visibility)
+
+Hypervisor metrics stop at the guest boundary. Guest Insights crosses it: MonitorX
+connects to each VM over **SSH** and surfaces its **processes**, **users**, and
+**root disk** in the dashboard.
+
+**Setup per VM** (one minute):
+
+1. Authorize MonitorX's public key inside the guest:
+   `ssh-copy-id -i ~/.ssh/id_ed25519.pub root@<guest-ip>` (or paste into the
+   guest's `~/.ssh/authorized_keys`).
+2. Open the VMs tab → **🔍 Insights** on the running VM → the guest address is
+   pre-filled when libvirt can discover it (qemu-guest-agent or DHCP leases) →
+   **💾 Save & Collect**.
+
+**Security model** (defense in depth — please read before exposing MonitorX):
+
+- **Read-only by design.** Exactly four commands are ever executed inside a
+  guest: `ps`, `who`, `getent passwd`, and `df -kP`. Their argv is built from
+  compile-time constants; there is no API — and no UI path — to run anything else.
+- **No shell is ever spawned.** All execution uses `create_subprocess_exec`
+  with a fixed argument vector. Operator input (host/user/port/key path) is
+  strictly validated (IP/hostname and username grammars, leading-dash option
+  injection refused) and only ever lands in its designated argv slot.
+- **Key-based auth only.** ssh runs with `BatchMode=yes` and
+  `PasswordAuthentication=no`; MonitorX can neither prompt nor store passwords.
+  Profiles persist in the private state directory as mode-`0600` files and hold
+  a key *path*, never key material.
+- **Blast-radius limits.** Every command has a hard timeout, output reads are
+  capped (a hostile guest cannot exhaust host memory), and a concurrency
+  semaphore bounds simultaneous SSH connections. Profile changes are audited.
+
+REST API: `GET/PUT/DELETE /api/vms/{vm_id}/insights/config`,
+`GET /api/vms/{vm_id}/insights`, fleet roll-up `GET /api/vms/insights`.
+Tunables: `MONITORX_INSIGHTS_SSH_TIMEOUT`, `MONITORX_INSIGHTS_TTL`,
+`MONITORX_INSIGHTS_OVERVIEW_TTL`, `MONITORX_INSIGHTS_CONCURRENCY`.
 
 > **Upgrading from an earlier version?** Releases before this fix generated a policy for `virsh --no-ask-password …`. That is a **systemctl** flag which `virsh` rejects outright, so every Start/Shutdown/Reboot silently failed — and `poweroff` isn’t a `virsh` verb at all (the correct one is `destroy`). A later release also shipped a runtime command line that omitted `--no-pkttyagent`, which made sudo reject the exact same commands. Re-run `./systemd/install-service.sh` to replace the stale policy, then restart MonitorX.
 

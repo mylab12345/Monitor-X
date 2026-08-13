@@ -129,6 +129,13 @@ const state = {
     resizeVmId: null,
     resizeVcpus: 2,
     resizeMemMb: 2048,
+    // Guest Insights (SSH: processes / users / root disk per VM)
+    insightsVmId: null,
+    insightsVmName: null,
+    insightsTab: 'processes',
+    insightsData: null,
+    insightsAutoTimer: null,
+    insightsProcSearch: '',
     // Full process table cache (WebSocket keeps a lightweight top-N sample).
     processesFull: null,
     processListLoading: false,
@@ -1890,6 +1897,7 @@ async function switchTab(tabId) {
         await fetchVmCapabilities();
         fetchVms();
         fetchVmAuditLog();
+        fetchVmInsightsOverview();
     }
     if (tabId === 'services') fetchServices();
     if (tabId === 'troubleshoot') switchSubTab(state.currentSubTab || 'health-hub');
@@ -2025,6 +2033,7 @@ function vmExtraButtons(vm) {
     // Console button - available for running VMs
     if (running) {
         html += `<button type="button" class="btn btn-sm btn-accent vm-console-btn" data-vm-console="${id}" data-vm-console-name="${name}" title="Open VM serial console">🖥️ Serial Console</button>`;
+        html += `<button type="button" class="btn btn-sm btn-outline vm-insights-btn" data-vm-insights="${id}" data-vm-insights-name="${name}" title="Inspect processes, users, and root disk inside the guest over SSH">🔍 Insights</button>`;
     }
 
     // Resize button - available for running or stopped VMs
@@ -2175,6 +2184,14 @@ function initVmDelegation(container) {
                 parseInt(resizeBtn.dataset.vmVcpus) || 2,
                 parseInt(resizeBtn.dataset.vmMem) || 2048
             );
+            return;
+        }
+        // Handle Guest Insights button
+        const insightsBtn = e.target.closest('[data-vm-insights]');
+        if (insightsBtn && container.contains(insightsBtn)) {
+            e.preventDefault();
+            e.stopPropagation();
+            openVmInsights(insightsBtn.dataset.vmInsights, insightsBtn.dataset.vmInsightsName);
             return;
         }
     });
@@ -2741,6 +2758,447 @@ function closeResizeModal() {
     document.getElementById('resize-modal').classList.remove('show');
     state.resizeVmId = null;
 }
+
+
+/* ===========================================================================
+   VM Guest Insights — processes, users, root disk inside each guest (SSH)
+   All collection happens server-side against a fixed read-only command
+   allowlist; the frontend only renders escaped JSON.
+   ========================================================================== */
+
+function vmiDiskBarClass(percent) {
+    if (percent >= 90) return 'danger';
+    if (percent >= 75) return 'warn';
+    return '';
+}
+
+/* --- Fleet overview (top of the VMs tab) --------------------------------- */
+
+async function fetchVmInsightsOverview(force = false) {
+    const panel = document.getElementById('vm-insights-overview');
+    const grid = document.getElementById('vm-insights-overview-grid');
+    if (!panel || !grid) return;
+    try {
+        const url = `${API_BASE}/api/vms/insights${force ? '?force=true' : ''}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(await readApiError(res));
+        const data = await res.json();
+        panel.hidden = false;
+        renderVmInsightsOverview(data, grid);
+    } catch (e) {
+        panel.hidden = false;
+        grid.innerHTML = `<div class="vmi-card"><div class="vmi-card-error">Could not load guest insights: ${escapeHtml(e.message)}</div></div>`;
+    }
+}
+
+function renderVmInsightsOverview(data, grid) {
+    const vms = Array.isArray(data.vms) ? data.vms : [];
+    if (!vms.length) {
+        grid.innerHTML = `<p class="no-data">${escapeHtml(data.message || 'No VMs are connected for insights yet. Open 🔍 Insights on a running VM card to configure SSH access.')}</p>`;
+        return;
+    }
+    grid.innerHTML = vms.map(entry => {
+        const name = escapeHtml(entry.vm_name || entry.vm);
+        if (!entry.ok) {
+            return `
+                <div class="vmi-card">
+                    <div class="vmi-card-header"><strong title="${escapeHtml(entry.vm)}">${name}</strong><span class="vmi-card-status error">OFFLINE</span></div>
+                    <div class="vmi-card-error">${escapeHtml(entry.error || 'Insights unavailable.')}</div>
+                    <div class="vmi-card-actions"><button type="button" class="btn btn-sm btn-outline" data-vmi-open="${escapeAttr(entry.vm)}" data-vmi-open-name="${escapeAttr(entry.vm_name || entry.vm)}">⚙ Configure</button></div>
+                </div>`;
+        }
+        const proc = entry.processes || {};
+        const users = entry.users || {};
+        const disk = entry.root_disk || {};
+        const diskHtml = disk.ok
+            ? `<div class="vmi-disk-row"><span>💾</span><div class="vm-progress"><i class="${vmiDiskBarClass(disk.percent || 0)}" style="width:${Math.min(disk.percent || 0, 100)}%"></i></div><b>${(disk.percent ?? 0)}%</b></div>`
+            : `<div class="vmi-disk-row"><span>💾</span><span class="vmi-card-error">${escapeHtml(disk.error || 'n/a')}</span></div>`;
+        return `
+            <div class="vmi-card">
+                <div class="vmi-card-header"><strong title="${escapeHtml(entry.vm)}">${name}</strong><span class="vmi-card-status ok">LIVE</span></div>
+                <div class="vmi-card-stats">
+                    <span>⚙️ Processes <b>${proc.ok ? proc.count : '—'}</b></span>
+                    <span>👤 Sessions <b>${users.ok ? users.sessions : '—'}</b></span>
+                    <span>🧑 Accounts <b>${users.ok ? users.accounts : '—'}</b></span>
+                </div>
+                ${diskHtml}
+                <div class="vmi-card-actions"><button type="button" class="btn btn-sm btn-outline" data-vmi-open="${escapeAttr(entry.vm)}" data-vmi-open-name="${escapeAttr(entry.vm_name || entry.vm)}">🔍 Open</button></div>
+            </div>`;
+    }).join('');
+
+    // One delegated opener for the whole grid (survives re-renders).
+    if (grid.dataset.vmiDelegated !== '1') {
+        grid.dataset.vmiDelegated = '1';
+        grid.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-vmi-open]');
+            if (btn) openVmInsights(btn.dataset.vmiOpen, btn.dataset.vmiOpenName);
+        });
+    }
+}
+
+/* --- Modal lifecycle ------------------------------------------------------ */
+
+function setInsightsStatus(message, kind = '') {
+    const el = document.getElementById('vm-insights-status');
+    if (!el) return;
+    el.textContent = message || '';
+    el.className = `vm-insights-status${kind ? ` ${kind}` : ''}`;
+}
+
+function insightsConnSummary(configured, host) {
+    const el = document.getElementById('vm-insights-conn-summary');
+    if (el) el.textContent = configured ? `🔗 SSH connected profile: ${host} (read-only)` : '🔗 SSH connection not configured yet — click to set up';
+}
+
+async function openVmInsights(vmId, vmName) {
+    state.insightsVmId = vmId;
+    state.insightsVmName = vmName || vmId;
+    state.insightsData = null;
+    state.insightsProcSearch = '';
+    const searchInput = document.getElementById('vm-insights-proc-search');
+    if (searchInput) searchInput.value = '';
+
+    document.getElementById('vm-insights-name').textContent = state.insightsVmName;
+    document.getElementById('vm-insights-modal').classList.add('show');
+    setInsightsStatus('Loading connection profile…');
+    switchInsightsTab(state.insightsTab || 'processes');
+    clearInsightsPanes();
+
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/insights/config`);
+        if (!res.ok) throw new Error(await readApiError(res));
+        const data = await res.json();
+
+        document.getElementById('vm-insights-host').value = data.config?.host || '';
+        document.getElementById('vm-insights-port').value = data.config?.port || 22;
+        document.getElementById('vm-insights-user').value = data.config?.user || 'root';
+        document.getElementById('vm-insights-key').value = data.config?.identity_file || '';
+        document.getElementById('vm-insights-forget').hidden = !data.configured;
+        insightsConnSummary(data.configured, data.config ? `${data.config.user}@${data.config.host}:${data.config.port}` : '');
+
+        const chipsWrap = document.getElementById('vm-insights-discovered');
+        const chips = document.getElementById('vm-insights-discovered-chips');
+        const addresses = Array.isArray(data.discovered_addresses) ? data.discovered_addresses : [];
+        if (addresses.length) {
+            chipsWrap.hidden = false;
+            chips.innerHTML = addresses.map(ip =>
+                `<button type="button" class="vm-insights-chip" data-vmi-ip="${escapeAttr(ip)}" title="Use this address">${escapeHtml(ip)}</button>`
+            ).join('');
+            // Pre-fill the host when no profile exists yet.
+            if (!data.config?.host && !document.getElementById('vm-insights-host').value) {
+                document.getElementById('vm-insights-host').value = addresses[0];
+            }
+        } else {
+            chipsWrap.hidden = true;
+            chips.innerHTML = '';
+        }
+
+        if (!data.ssh_available) {
+            setInsightsStatus('The ssh client is not installed on the MonitorX host — insights cannot run.', 'error');
+            return;
+        }
+        if (data.configured) {
+            await fetchVmInsights(false);
+            setInsightsAutoRefresh();
+        } else {
+            setInsightsStatus('Set the guest address and credentials above, then press "Save & Collect".');
+            const conn = document.getElementById('vm-insights-conn');
+            if (conn) conn.classList.remove('collapsed');
+        }
+    } catch (e) {
+        setInsightsStatus(`Could not load the connection profile: ${e.message}`, 'error');
+    }
+}
+
+function closeVmInsights() {
+    document.getElementById('vm-insights-modal').classList.remove('show');
+    if (state.insightsAutoTimer) { clearInterval(state.insightsAutoTimer); state.insightsAutoTimer = null; }
+    state.insightsVmId = null;
+    state.insightsData = null;
+}
+
+function clearInsightsPanes() {
+    ['vm-insights-proc-body', 'vm-insights-sessions-body', 'vm-insights-accounts-body', 'vm-insights-fs-body'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = '';
+    });
+    const rootCard = document.getElementById('vm-insights-root-card');
+    if (rootCard) rootCard.innerHTML = '';
+    ['processes', 'users', 'root_disk'].forEach(key => {
+        const badge = document.getElementById(`vmi-badge-${key.replace('_', '-')}`);
+        if (badge) badge.hidden = true;
+    });
+}
+
+function switchInsightsTab(tab) {
+    state.insightsTab = tab;
+    document.querySelectorAll('.vm-insights-tab').forEach(btn => {
+        const active = btn.dataset.insightsTab === tab;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-selected', String(active));
+    });
+    document.querySelectorAll('.vm-insights-pane').forEach(pane => pane.classList.remove('active'));
+    const pane = document.getElementById(`vm-insights-pane-${tab.replace('_', '-')}`);
+    if (pane) pane.classList.add('active');
+}
+
+/* --- Collection ------------------------------------------------------------ */
+
+async function fetchVmInsights(force) {
+    const vmId = state.insightsVmId;
+    if (!vmId) return;
+    setInsightsStatus('Collecting insights from the guest…');
+    try {
+        const url = `${API_BASE}/api/vms/${encodeURIComponent(vmId)}/insights${force ? '?force=true' : ''}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || data.error || `Request failed (${res.status})`);
+        if (!data.configured) {
+            setInsightsStatus(data.error || 'Not configured.', 'error');
+            return;
+        }
+        state.insightsData = data;
+        renderInsightsData(data);
+        const failures = ['processes', 'users', 'root_disk'].filter(k => data[k] && !data[k].ok);
+        if (failures.length) {
+            const first = data[failures[0]].error || '';
+            setInsightsStatus(`Collected at ${data.collected_at} — ${failures.length} section(s) unavailable: ${first}`, 'error');
+        } else {
+            setInsightsStatus(`Collected at ${data.collected_at} from ${data.host} — all sections OK.`, 'ok');
+        }
+    } catch (e) {
+        setInsightsStatus(`Insights collection failed: ${e.message}`, 'error');
+    }
+}
+
+function renderInsightsData(data) {
+    renderInsightsProcesses(data.processes);
+    renderInsightsUsers(data.users);
+    renderInsightsRootDisk(data.root_disk);
+    setInsightsBadges(data);
+}
+
+function setInsightsBadges(data) {
+    const setBadge = (key, text, warn = false) => {
+        const badge = document.getElementById(`vmi-badge-${key.replace('_', '-')}`);
+        if (!badge) return;
+        if (text === null) { badge.hidden = true; return; }
+        badge.hidden = false;
+        badge.textContent = text;
+        badge.className = `vmi-badge${warn ? ' warn' : ''}`;
+    };
+    const proc = data.processes || {};
+    setBadge('processes', proc.ok ? String(proc.count) : '!', !proc.ok);
+    const users = data.users || {};
+    setBadge('users', users.ok ? String((users.sessions || []).length) : '!', !users.ok);
+    const disk = data.root_disk || {};
+    setBadge('root_disk', disk.ok ? `${disk.root?.percent ?? 0}%` : '!', !disk.ok || (disk.root?.percent ?? 0) >= 90);
+}
+
+/* --- Section renderers ------------------------------------------------------ */
+
+function renderInsightsProcesses(section) {
+    const tbody = document.getElementById('vm-insights-proc-body');
+    const countEl = document.getElementById('vm-insights-proc-count');
+    if (!tbody) return;
+    if (!section || !section.ok) {
+        tbody.innerHTML = `<tr><td colspan="7"><div class="vm-insights-error-box">${escapeHtml(section?.error || 'Process data unavailable.')}</div></td></tr>`;
+        if (countEl) countEl.textContent = '';
+        return;
+    }
+    const search = state.insightsProcSearch.toLowerCase();
+    const rows = (section.processes || []).filter(p => {
+        if (!search) return true;
+        return String(p.pid).includes(search)
+            || (p.name || '').toLowerCase().includes(search)
+            || (p.user || '').toLowerCase().includes(search);
+    }).slice(0, 200);
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="7"><div class="vm-insights-empty">${search ? 'No processes match the filter.' : 'No processes reported by the guest.'}</div></td></tr>`;
+    } else {
+        tbody.innerHTML = rows.map(p => `
+            <tr>
+                <td>${p.pid}</td>
+                <td>${escapeHtml(p.user)}</td>
+                <td>${p.cpu_percent.toFixed(1)}</td>
+                <td>${p.memory_percent.toFixed(1)}</td>
+                <td>${formatBytes((p.memory_mb || 0) * 1024 * 1024)}</td>
+                <td>${escapeHtml(p.etime || '')}</td>
+                <td class="cmd">${escapeHtml(p.name || '')}</td>
+            </tr>`).join('');
+    }
+    if (countEl) {
+        const extra = section.truncated ? ' (list truncated)' : '';
+        countEl.textContent = `${section.count} process${section.count === 1 ? '' : 'es'}${extra} — showing ${rows.length}`;
+    }
+}
+
+function renderInsightsUsers(section) {
+    const sessionsBody = document.getElementById('vm-insights-sessions-body');
+    const accountsBody = document.getElementById('vm-insights-accounts-body');
+    if (!sessionsBody || !accountsBody) return;
+    if (!section || !section.ok) {
+        sessionsBody.innerHTML = `<tr><td colspan="4"><div class="vm-insights-error-box">${escapeHtml(section?.error || 'User data unavailable.')}</div></td></tr>`;
+        accountsBody.innerHTML = '';
+        return;
+    }
+    const sessions = section.sessions || [];
+    sessionsBody.innerHTML = sessions.length
+        ? sessions.map(s => `
+            <tr>
+                <td>${escapeHtml(s.user)}</td>
+                <td>${escapeHtml(s.tty)}</td>
+                <td>${escapeHtml(s.login_time)}</td>
+                <td>${escapeHtml(s.from || '—')}</td>
+            </tr>`).join('')
+        : `<tr><td colspan="4"><div class="vm-insights-empty">No interactive login sessions.${section.sessions_error ? ` (${escapeHtml(section.sessions_error)})` : ''}</div></td></tr>`;
+
+    const accounts = section.accounts || [];
+    accountsBody.innerHTML = accounts.length
+        ? accounts.map(a => `
+            <tr>
+                <td>${escapeHtml(a.name)}</td>
+                <td>${a.uid}</td>
+                <td class="cmd">${escapeHtml(a.home)}</td>
+                <td class="cmd">${escapeHtml(a.shell)}</td>
+            </tr>`).join('')
+        : `<tr><td colspan="4"><div class="vm-insights-empty">No local user accounts reported.${section.accounts_error ? ` (${escapeHtml(section.accounts_error)})` : ''}</div></td></tr>`;
+}
+
+function renderInsightsRootDisk(section) {
+    const rootCard = document.getElementById('vm-insights-root-card');
+    const fsBody = document.getElementById('vm-insights-fs-body');
+    if (!rootCard || !fsBody) return;
+    if (!section || !section.ok) {
+        rootCard.innerHTML = `<div class="vm-insights-error-box">${escapeHtml(section?.error || 'Disk data unavailable.')}</div>`;
+        fsBody.innerHTML = '';
+        return;
+    }
+    const root = section.root || {};
+    const percent = root.percent ?? 0;
+    const cls = vmiDiskBarClass(percent) || 'ok';
+    rootCard.innerHTML = `
+        <div class="vmi-root-device">${escapeHtml(root.device || 'unknown device')}<small>mounted on ${escapeHtml(root.mountpoint || '/')}</small></div>
+        <div class="vmi-root-bar">
+            <div class="vm-progress"><i class="${vmiDiskBarClass(percent)}" style="width:${Math.min(percent, 100)}%"></i></div>
+            <small>${formatBytes((root.used_kb || 0) * 1024)} used of ${formatBytes((root.size_kb || 0) * 1024)} · ${formatBytes((root.avail_kb || 0) * 1024)} free</small>
+        </div>
+        <div class="vm-insights-root-percent ${cls}">${percent}%</div>`;
+
+    const filesystems = (section.filesystems || []).filter(fs => !fs.pseudo);
+    fsBody.innerHTML = filesystems.length
+        ? filesystems.map(fs => `
+            <tr>
+                <td class="cmd">${escapeHtml(fs.device)}</td>
+                <td class="cmd">${escapeHtml(fs.mountpoint)}</td>
+                <td>${formatBytes((fs.size_kb || 0) * 1024)}</td>
+                <td>${formatBytes((fs.used_kb || 0) * 1024)}</td>
+                <td>${formatBytes((fs.avail_kb || 0) * 1024)}</td>
+                <td><div class="vm-progress"><i class="${vmiDiskBarClass(fs.percent || 0)}" style="width:${Math.min(fs.percent || 0, 100)}%"></i></div> ${fs.percent}%</td>
+            </tr>`).join('')
+        : `<tr><td colspan="6"><div class="vm-insights-empty">No real filesystems reported.</div></td></tr>`;
+}
+
+/* --- Connection profile management ------------------------------------------ */
+
+async function saveVmInsightsConfig() {
+    const vmId = state.insightsVmId;
+    if (!vmId) return;
+    const host = document.getElementById('vm-insights-host').value.trim();
+    const port = parseInt(document.getElementById('vm-insights-port').value, 10) || 22;
+    const user = document.getElementById('vm-insights-user').value.trim() || 'root';
+    const identityFile = document.getElementById('vm-insights-key').value.trim();
+
+    if (!host) { showToast('Enter the guest address (IP or hostname).', 'warning'); return; }
+    if (port < 1 || port > 65535) { showToast('Port must be between 1 and 65535.', 'warning'); return; }
+
+    const btn = document.getElementById('vm-insights-save');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/insights/config`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host, port, user, identity_file: identityFile || null }),
+        });
+        const result = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(result.detail || `Save failed (${res.status})`);
+        showToast('SSH profile saved.', 'success');
+        document.getElementById('vm-insights-forget').hidden = false;
+        insightsConnSummary(true, `${user}@${host}:${port}`);
+        const conn = document.getElementById('vm-insights-conn');
+        if (conn) conn.classList.add('collapsed');
+        await fetchVmInsights(true);
+        setInsightsAutoRefresh();
+        fetchVmInsightsOverview(true);
+    } catch (e) {
+        setInsightsStatus(`Could not save the profile: ${e.message}`, 'error');
+        showToast(`Profile save failed: ${e.message}`, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '💾 Save & Collect';
+    }
+}
+
+async function forgetVmInsightsConfig() {
+    const vmId = state.insightsVmId;
+    if (!vmId) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/vms/${encodeURIComponent(vmId)}/insights/config`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await readApiError(res));
+        showToast('SSH profile forgotten.', 'info');
+        document.getElementById('vm-insights-forget').hidden = true;
+        insightsConnSummary(false);
+        const conn = document.getElementById('vm-insights-conn');
+        if (conn) conn.classList.remove('collapsed');
+        clearInsightsPanes();
+        setInsightsStatus('Profile removed. Configure a new connection to continue.');
+        fetchVmInsightsOverview();
+    } catch (e) {
+        showToast(`Could not remove the profile: ${e.message}`, 'error');
+    }
+}
+
+function setInsightsAutoRefresh() {
+    if (state.insightsAutoTimer) { clearInterval(state.insightsAutoTimer); state.insightsAutoTimer = null; }
+    const enabled = document.getElementById('vm-insights-auto')?.checked;
+    const modalOpen = document.getElementById('vm-insights-modal')?.classList.contains('show');
+    if (enabled && modalOpen && state.insightsVmId) {
+        state.insightsAutoTimer = setInterval(() => fetchVmInsights(true), 10000);
+    }
+}
+
+function initVmInsightsEvents() {
+    document.getElementById('vm-insights-close')?.addEventListener('click', closeVmInsights);
+    document.getElementById('vm-insights-modal')?.addEventListener('click', (e) => {
+        if (e.target.id === 'vm-insights-modal') closeVmInsights();
+    });
+    document.getElementById('vm-insights-refresh')?.addEventListener('click', () => fetchVmInsights(true));
+    document.getElementById('vm-insights-auto')?.addEventListener('change', setInsightsAutoRefresh);
+    document.getElementById('vm-insights-save')?.addEventListener('click', saveVmInsightsConfig);
+    document.getElementById('vm-insights-forget')?.addEventListener('click', forgetVmInsightsConfig);
+
+    document.getElementById('vm-insights-conn-toggle')?.addEventListener('click', () => {
+        document.getElementById('vm-insights-conn')?.classList.toggle('collapsed');
+    });
+
+    document.getElementById('vm-insights-discovered-chips')?.addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-vmi-ip]');
+        if (chip) document.getElementById('vm-insights-host').value = chip.dataset.vmiIp;
+    });
+
+    document.querySelectorAll('.vm-insights-tab').forEach(btn => {
+        btn.addEventListener('click', () => switchInsightsTab(btn.dataset.insightsTab));
+    });
+
+    document.getElementById('vm-insights-proc-search')?.addEventListener('input', (e) => {
+        state.insightsProcSearch = e.target.value;
+        if (state.insightsData) renderInsightsProcesses(state.insightsData.processes);
+    });
+
+    document.getElementById('vm-insights-overview-refresh')?.addEventListener('click', () => fetchVmInsightsOverview(true));
+}
+
 
 
 
@@ -3522,6 +3980,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('vm-bulk-reboot')?.addEventListener('click', () => bulkVmAction('reboot'));
     document.getElementById('vm-bulk-clear')?.addEventListener('click', clearVmSelection);
     document.getElementById('vm-audit-refresh')?.addEventListener('click', fetchVmAuditLog);
+    initVmInsightsEvents();
 
     // Keyboard shortcut: '/' to focus the VM search input on the VMs tab.
     document.addEventListener('keydown', (e) => {

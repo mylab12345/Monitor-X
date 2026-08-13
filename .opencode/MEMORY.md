@@ -325,6 +325,19 @@ POST /api/services/{name}/{action}  // start/stop/restart/reload/enable/disable
 
 ## File Change Log
 
+### v2.7 (2026-08-13) — VM GUEST INSIGHTS: PROCESSES, USERS, ROOT DISK ON ALL VMS
+**Added**:
+- **Guest Insights** — in-VM visibility over SSH for every libvirt guest: full process table (pid/ppid/user/cpu/mem/rss/etime/comm, CPU-sorted, searchable), logged-in sessions (`who`) + local accounts (`getent passwd`, uid 0 and ≥1000), and root-disk usage + all real filesystems (`df -kP`, pseudo-fs filtered).
+- Per-VM 🔍 Insights modal on running VM cards: collapsible SSH connection form (host/port/user/identity-file path), libvirt auto-discovered guest IPs as prefill chips (agent → DHCP lease), per-section error boxes, tab badges, 10s auto-refresh, Force refresh.
+- **Fleet overview** panel at the top of the VMs tab (`GET /api/vms/insights`): LIVE/OFFLINE cards per configured VM with process count, session count, and root-disk % bar.
+- **Security model** (strict): only four read-only commands ever run in guests (`ps`, `who`, `getent passwd`, `df -kP`) from argv constants; no shell anywhere (`create_subprocess_exec` only); host/user validated against strict grammars with leading-dash option-injection refusal; ssh hardened (`BatchMode`, `PasswordAuthentication=no`, `KbdInteractiveAuthentication=no`, `accept-new` host keys); hard timeouts + capped output reads + concurrency semaphore; profiles are mode-0600 files in the private state dir holding a key *path*, never secrets; profile changes audited.
+- API: `GET/PUT/DELETE /api/vms/{vm_id}/insights/config`, `GET /api/vms/{vm_id}/insights?force=`, `GET /api/vms/insights?force=`. Env: `MONITORX_INSIGHTS_SSH_TIMEOUT/TTL/OVERVIEW_TTL/CONCURRENCY`.
+- **Tests**: `tests/test_vm_insights.py` (26 tests: injection matrix, exact hardened argv, hostile-output parsers, 0600 store round-trip, endpoint behaviour with a stub ssh incl. timeout/cap/failure paths), `tests/smoke-vm-insights.js` (22 jsdom checks incl. XSS-escape of hostile process names), new hardened-ssh source contracts in `test_contracts.py`; `test_contracts.py` RuntimeSmoke re-syncs the auth token so the whole suite runs in one process.
+
+**Files changed**: `backend/main.py` (+~620 insights section), `frontend/index.html` (overview panel + insights modal + css link), `frontend/js/app.js` (+~390), `frontend/css/vm-insights.css` (NEW), `tests/test_vm_insights.py` (NEW), `tests/smoke-vm-insights.js` (NEW), `tests/test_contracts.py`, `README.md`, `.env.example`, `.opencode/MEMORY.md`.
+
+**Verified in sandbox**: real end-to-end against a live OpenSSH server (95 processes / real accounts / real `df` data collected through the HTTP API), injection attempts all rejected (422/400), state files 0600 inside a 0700 dir, full Python suite + all three jsdom smoke suites green.
+
 ### v2.5 (2026-08-09) — FLIGHT CONTROL LOOP REMOVED + COMPACT HOST IDENTITY
 **Removed**:
 - The GO/NO-GO Flight Control Loop board (`#mission-board`) from the top of the Dashboard tab, with `frontend/js/mission-control.js` and `frontend/css/mission-control.css` deleted outright. The header MET/UTC readout keeps the **DOY mission clock** — its tick moved into `nasa-enhance.js` and its styles into `nasa-theme.css`.

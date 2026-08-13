@@ -2075,6 +2075,692 @@ async def vm_action_log(limit: int = Query(20, ge=1, le=_VM_ACTION_LOG_LIMIT)):
     return {"entries": recent, "total": len(_vm_action_log)}
 
 
+# ==============================================================================
+# VM GUEST INSIGHTS — processes, logged-in users, and root disk on every VM
+#
+# Hypervisor metrics (vCPU/RAM/disk-IO rates) cannot see *inside* a guest, so
+# this feature inspects each VM over SSH and surfaces its process table, user
+# sessions/accounts, and root-filesystem usage in the dashboard.
+#
+# SECURITY MODEL
+# --------------
+# * No shell is ever invoked. Commands run via asyncio.create_subprocess_exec
+#   with a fixed argv; a shell interpreter appears nowhere in this code path.
+# * Only four read-only commands are executed on guests, and their argv is
+#   built exclusively from the INSIGHTS_CMD_* constants below. Operator input
+#   (host/user/port/key) never becomes part of a remote command line — it is
+#   strictly validated and placed only in its designated argv slot.
+# * ssh is hardened with BatchMode + disabled password/keyboard auth, so it
+#   can neither prompt nor hang waiting for interactive input.
+# * Every execution has a hard timeout, a capped output read (a hostile or
+#   broken guest cannot exhaust memory), and a global concurrency semaphore.
+# * Connection profiles persist in the private state directory (0600, atomic
+#   replace, O_NOFOLLOW on read) and never contain secrets — an identity
+#   *file path*, not key material.
+# * The feature is read-only by design: nothing here can modify a guest.
+# ==============================================================================
+
+INSIGHTS_SSH_TIMEOUT = max(float(os.environ.get("MONITORX_INSIGHTS_SSH_TIMEOUT", "12")), 3.0)
+INSIGHTS_CACHE_TTL = max(float(os.environ.get("MONITORX_INSIGHTS_TTL", "5")), 1.0)
+INSIGHTS_OVERVIEW_TTL = max(float(os.environ.get("MONITORX_INSIGHTS_OVERVIEW_TTL", "10")), 2.0)
+INSIGHTS_SSH_CONCURRENCY = min(max(int(os.environ.get("MONITORX_INSIGHTS_CONCURRENCY", "6")), 1), 32)
+INSIGHTS_MAX_OUTPUT = 512 * 1024          # bytes read per guest command
+INSIGHTS_MAX_ERROR = 4096                 # stderr retained for diagnostics
+INSIGHTS_MAX_PROCESSES = 800
+INSIGHTS_MAX_SESSIONS = 200
+INSIGHTS_MAX_ACCOUNTS = 500
+INSIGHTS_MAX_FILESYSTEMS = 100
+
+# The ONLY commands ever executed on a guest. Fixed argv, read-only tools,
+# header-free machine-readable output where available.
+INSIGHTS_CMD_PROCESSES = ("ps", "-eo", "pid=,ppid=,user=,pcpu=,pmem=,rss=,etime=,comm=")
+INSIGHTS_CMD_SESSIONS = ("who",)
+INSIGHTS_CMD_ACCOUNTS = ("getent", "passwd")
+INSIGHTS_CMD_FILESYSTEMS = ("df", "-kP")
+
+# Pseudo/virtual devices reported by ``df`` that are never real root disks.
+INSIGHTS_PSEUDO_DEVICES = {
+    "tmpfs", "devtmpfs", "udev", "proc", "sysfs", "cgroup", "cgroup2", "devpts",
+    "mqueue", "hugetlbfs", "debugfs", "tracefs", "fusectl", "configfs",
+    "securityfs", "pstore", "bpf", "autofs", "binfmt_misc", "rpc_pipefs",
+    "nsfs", "ramfs", "fuse.lxcfs", "systemd-1", "selinuxfs", "efivarfs",
+}
+
+_INSIGHTS_HOSTNAME_RE = re.compile(
+    r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+)
+_INSIGHTS_USER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+
+# Cache of recent collections so UI polling cannot hammer guests.
+_insights_cache: Dict[str, Dict[str, Any]] = {}
+_insights_overview_cache: Dict[str, Any] = {}
+_insights_config_lock = asyncio.Lock()
+_insights_ssh_semaphore = asyncio.Semaphore(INSIGHTS_SSH_CONCURRENCY)
+
+
+def _insights_config_path() -> Path:
+    """Location of the per-VM SSH profiles inside the private state dir."""
+    return Path(os.environ.get(
+        "MONITORX_INSIGHTS_CONFIG",
+        str(_ensure_state_dir() / "vm-insights-config.json"),
+    ))
+
+
+def _validate_insights_host(host: str) -> str:
+    """Accept an IPv4/IPv6 literal or RFC-1123 hostname; reject everything else.
+
+    The value only ever lands in the ``user@host`` argv slot, but it is still
+    validated hard: whitespace, control characters, shell metacharacters and
+    leading dashes (option injection) are all refused by construction.
+    """
+    value = str(host or "")
+    if not value or value != value.strip():
+        raise ValueError("Host must not be empty or contain surrounding whitespace.")
+    if len(value) > 253:
+        raise ValueError("Host must be a non-empty address (max 253 chars).")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError("Host contains control characters.")
+    if value.startswith("-"):
+        raise ValueError("Host must not start with '-'.")
+    candidate = value[1:-1] if value.startswith("[") and value.endswith("]") else value
+    try:
+        ipaddress.ip_address(candidate)
+        return value
+    except ValueError:
+        pass
+    if not _INSIGHTS_HOSTNAME_RE.fullmatch(candidate):
+        raise ValueError("Host must be an IP address or a valid hostname (letters, digits, '.', '-').")
+    return value
+
+
+def _validate_insights_user(user: str) -> str:
+    value = str(user or "")
+    if not value or value != value.strip():
+        raise ValueError("SSH user must not be empty or contain surrounding whitespace.")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError("SSH user contains control characters.")
+    if not _INSIGHTS_USER_RE.fullmatch(value):
+        raise ValueError("SSH user must match [A-Za-z0-9][A-Za-z0-9._-]{0,31}.")
+    return value
+
+
+def _validate_identity_file(path: Optional[str]) -> Optional[str]:
+    """Validate a private-key *path* on the MonitorX host (never key data)."""
+    if path is None or not str(path).strip():
+        return None
+    value = str(path).strip()
+    if len(value) > 4096:
+        raise ValueError("Identity file path is too long.")
+    if any(ord(ch) < 32 for ch in value):
+        raise ValueError("Identity file path contains control characters.")
+    resolved = Path(value).expanduser()
+    if not resolved.is_file():
+        raise ValueError(f"Identity file does not exist: {resolved}")
+    return str(resolved)
+
+
+class VmInsightsConfigRequest(BaseModel):
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    user: str = Field(default="root", min_length=1, max_length=32)
+    identity_file: Optional[str] = Field(default=None, max_length=4096)
+
+
+def _load_insights_configs() -> Dict[str, Dict[str, Any]]:
+    """Read the profile store. O_NOFOLLOW: a planted symlink aborts the read
+    instead of redirecting it to a file of an attacker's choosing."""
+    path = _insights_config_path()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return {}
+    try:
+        with os.fdopen(fd, "r") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    configs: Dict[str, Dict[str, Any]] = {}
+    for key, entry in data.items():
+        if isinstance(key, str) and isinstance(entry, dict) and isinstance(entry.get("host"), str):
+            configs[key[:128]] = entry
+    return configs
+
+
+async def _save_insights_configs(configs: Dict[str, Dict[str, Any]]) -> None:
+    """Atomically persist the profile store with 0600 permissions."""
+    path = _insights_config_path()
+    _ensure_state_dir()
+    payload = json.dumps(configs, indent=2, sort_keys=True)
+
+    def _write() -> None:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, payload.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    await asyncio.get_running_loop().run_in_executor(None, _write)
+
+
+def _ssh_binary() -> str:
+    return shutil.which("ssh") or "/usr/bin/ssh"
+
+
+def _vm_insights_ssh_argv(config: Dict[str, Any], remote_command) -> List[str]:
+    """Build the exact argv for one guest inspection.
+
+    Only constants plus pre-validated profile fields are interpolated. The
+    remote command comes from the INSIGHTS_CMD_* allowlist and is appended
+    verbatim — ssh joins it for the guest's shell, which is safe because it
+    contains no operator-controlled data whatsoever.
+    """
+    argv = [
+        _ssh_binary(),
+        "-o", "BatchMode=yes",
+        "-o", "PasswordAuthentication=no",
+        "-o", "KbdInteractiveAuthentication=no",
+        "-o", "PubkeyAuthentication=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "UpdateHostKeys=no",
+        "-o", "ConnectTimeout=5",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=1",
+        "-o", "LogLevel=ERROR",
+    ]
+    identity = config.get("identity_file")
+    if identity:
+        argv += ["-o", "IdentitiesOnly=yes", "-i", str(identity)]
+    argv += ["-p", str(int(config["port"])), f"{config['user']}@{config['host']}"]
+    argv += list(remote_command)
+    return argv
+
+
+async def _read_stream_capped(stream, cap: int):
+    """Read at most ``cap`` bytes so a guest cannot exhaust host memory."""
+    chunks = []
+    total = 0
+    while total < cap:
+        chunk = await stream.read(min(65536, cap - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks), total >= cap
+
+
+async def _run_insights_ssh(config: Dict[str, Any], remote_command) -> Dict[str, Any]:
+    """Run one allowlisted read-only command inside a guest over SSH.
+
+    Returns ``{"returncode", "stdout", "stderr", "truncated", "timed_out"}``.
+    """
+    argv = _vm_insights_ssh_argv(config, remote_command)
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+
+    async def _collect():
+        out_task = asyncio.ensure_future(_read_stream_capped(proc.stdout, INSIGHTS_MAX_OUTPUT))
+        err_task = asyncio.ensure_future(_read_stream_capped(proc.stderr, INSIGHTS_MAX_ERROR))
+        await asyncio.gather(out_task, err_task)
+        await proc.wait()
+        return out_task.result(), err_task.result()
+
+    try:
+        (stdout_b, out_capped), (stderr_b, _err_capped) = await asyncio.wait_for(
+            _collect(), timeout=INSIGHTS_SSH_TIMEOUT
+        )
+        return {
+            "returncode": proc.returncode if proc.returncode is not None else -1,
+            "stdout": stdout_b.decode("utf-8", errors="replace"),
+            "stderr": stderr_b.decode("utf-8", errors="replace"),
+            "truncated": out_capped,
+            "timed_out": False,
+        }
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            pass
+        return {
+            "returncode": -1,
+            "stdout": "",
+            "stderr": f"Command timed out after {INSIGHTS_SSH_TIMEOUT:.0f}s.",
+            "truncated": False,
+            "timed_out": True,
+        }
+
+
+def _insights_error(result: Dict[str, Any]) -> Optional[str]:
+    """Translate an SSH result into an operator-friendly error, or None."""
+    if result["timed_out"]:
+        return result["stderr"] or "SSH command timed out."
+    if result["returncode"] != 0:
+        detail = (result["stderr"] or result["stdout"] or "").strip().splitlines()
+        tail = detail[-1][:300] if detail else f"exit code {result['returncode']}"
+        if result["returncode"] == 255:
+            return (f"SSH connection failed: {tail}. Check the host/port/user, "
+                    f"that sshd is running in the guest, and that MonitorX's "
+                    f"public key is authorized there.")
+        return f"Guest command exited with code {result['returncode']}: {tail}"
+    return None
+
+
+# --- Parsers (pure functions; hostile guest output must never crash us) -----
+
+def _parse_ps_table(text: str, limit: int = INSIGHTS_MAX_PROCESSES) -> Dict[str, Any]:
+    """Parse ``ps -eo pid=,ppid=,user=,pcpu=,pmem=,rss=,etime=,comm=`` output."""
+    rows = []
+    truncated = False
+    for line in text.splitlines():
+        parts = line.split(None, 7)
+        if len(parts) < 8:
+            continue
+        pid_s, ppid_s, user, pcpu_s, pmem_s, rss_s, etime, comm = parts
+        try:
+            pid = int(pid_s)
+            ppid = int(ppid_s)
+            rss_kb = max(int(rss_s), 0)
+        except ValueError:
+            continue
+        try:
+            cpu = min(max(float(pcpu_s), 0.0), 100000.0)
+        except ValueError:
+            cpu = 0.0
+        try:
+            mem = min(max(float(pmem_s), 0.0), 100.0)
+        except ValueError:
+            mem = 0.0
+        rows.append({
+            "pid": pid,
+            "ppid": ppid,
+            "user": user[:64],
+            "cpu_percent": cpu,
+            "memory_percent": mem,
+            "memory_mb": round(rss_kb / 1024.0, 1),
+            "etime": etime[:32],
+            "name": comm[:256],
+        })
+        if len(rows) >= limit:
+            truncated = True
+            break
+    rows.sort(key=lambda r: r["cpu_percent"], reverse=True)
+    return {"processes": rows, "truncated": truncated}
+
+
+_WHO_LINE_RE = re.compile(r"^(?P<user>\S+)\s+(?P<tty>\S+)\s+(?P<when>.+?)(?:\s*\((?P<source>[^)]*)\))?\s*$")
+
+
+def _parse_who_sessions(text: str, limit: int = INSIGHTS_MAX_SESSIONS) -> Dict[str, Any]:
+    """Parse ``who`` output into login sessions (user, tty, when, source)."""
+    sessions = []
+    for line in text.splitlines():
+        if len(sessions) >= limit:
+            break
+        match = _WHO_LINE_RE.fullmatch(line.strip())
+        if not match:
+            continue
+        sessions.append({
+            "user": match.group("user")[:64],
+            "tty": match.group("tty")[:64],
+            "login_time": (match.group("when") or "").strip()[:64],
+            "from": (match.group("source") or "").strip()[:128],
+        })
+    return {"sessions": sessions, "truncated": len(sessions) >= limit}
+
+
+def _parse_passwd_accounts(text: str, limit: int = INSIGHTS_MAX_ACCOUNTS) -> Dict[str, Any]:
+    """Parse ``getent passwd``; report human users (uid 0 or >= 1000)."""
+    accounts = []
+    total = 0
+    for line in text.splitlines():
+        fields = line.split(":")
+        if len(fields) < 7:
+            continue
+        total += 1
+        try:
+            uid = int(fields[2])
+        except ValueError:
+            continue
+        if uid != 0 and uid < 1000:
+            continue  # system/service account
+        if len(accounts) < limit:
+            accounts.append({
+                "name": fields[0][:64],
+                "uid": uid,
+                "home": fields[5][:256],
+                "shell": fields[6][:128],
+            })
+    accounts.sort(key=lambda a: a["uid"])
+    return {"accounts": accounts, "total_entries": total, "truncated": len(accounts) >= limit}
+
+
+def _parse_df_filesystems(text: str, limit: int = INSIGHTS_MAX_FILESYSTEMS) -> Dict[str, Any]:
+    """Parse ``df -kP`` (POSIX one-line-per-fs) into filesystem records.
+
+    The root filesystem is the entry mounted at ``/``; when a guest has none
+    (rare), the first real (non-pseudo) filesystem is used as the fallback.
+    """
+    filesystems = []
+    for index, line in enumerate(text.splitlines()):
+        if index == 0 and line.split()[:1] == ["Filesystem"]:
+            continue
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            continue
+        device, size_s, used_s, avail_s, capacity, mountpoint = parts
+        try:
+            size_kb = max(int(size_s), 0)
+            used_kb = max(int(used_s), 0)
+            avail_kb = max(int(avail_s), 0)
+            percent = int(capacity.rstrip("%")) if capacity.rstrip("%").isdigit() else 0
+        except ValueError:
+            continue
+        device_short = device.split("/")[-1][:64] if "/" in device else device[:64]
+        filesystems.append({
+            "device": device[:256],
+            "device_short": device_short,
+            "mountpoint": mountpoint[:256],
+            "size_kb": size_kb,
+            "used_kb": used_kb,
+            "avail_kb": avail_kb,
+            "percent": min(max(percent, 0), 100),
+            "pseudo": device.split(":")[0].lower() in INSIGHTS_PSEUDO_DEVICES,
+        })
+        if len(filesystems) >= limit:
+            break
+    root = next((fs for fs in filesystems if fs["mountpoint"] == "/"), None)
+    if root is None:
+        root = next((fs for fs in filesystems if not fs["pseudo"]), None)
+    return {"root": root, "filesystems": filesystems}
+
+
+# --- Section probes ----------------------------------------------------------
+
+async def _probe_guest_processes(config: Dict[str, Any]) -> Dict[str, Any]:
+    result = await _run_insights_ssh(config, INSIGHTS_CMD_PROCESSES)
+    error = _insights_error(result)
+    if error:
+        return {"ok": False, "error": error}
+    parsed = _parse_ps_table(result["stdout"])
+    return {
+        "ok": True,
+        "count": len(parsed["processes"]),
+        "truncated": parsed["truncated"] or result["truncated"],
+        "processes": parsed["processes"],
+    }
+
+
+async def _probe_guest_users(config: Dict[str, Any]) -> Dict[str, Any]:
+    sessions_res, accounts_res = await asyncio.gather(
+        _run_insights_ssh(config, INSIGHTS_CMD_SESSIONS),
+        _run_insights_ssh(config, INSIGHTS_CMD_ACCOUNTS),
+    )
+    sessions_error = _insights_error(sessions_res)
+    accounts_error = _insights_error(accounts_res)
+    if sessions_error and accounts_error:
+        return {"ok": False, "error": sessions_error}
+    sessions = _parse_who_sessions(sessions_res["stdout"]) if not sessions_error else {"sessions": [], "truncated": False}
+    accounts = _parse_passwd_accounts(accounts_res["stdout"]) if not accounts_error else {"accounts": [], "total_entries": 0, "truncated": False}
+    return {
+        "ok": True,
+        "sessions": sessions["sessions"],
+        "sessions_truncated": sessions["truncated"],
+        "accounts": accounts["accounts"],
+        "account_entries_total": accounts["total_entries"],
+        "accounts_truncated": accounts["truncated"],
+        **({"sessions_error": sessions_error} if sessions_error else {}),
+        **({"accounts_error": accounts_error} if accounts_error else {}),
+    }
+
+
+async def _probe_guest_root_disk(config: Dict[str, Any]) -> Dict[str, Any]:
+    result = await _run_insights_ssh(config, INSIGHTS_CMD_FILESYSTEMS)
+    error = _insights_error(result)
+    if error:
+        return {"ok": False, "error": error}
+    parsed = _parse_df_filesystems(result["stdout"])
+    if parsed["root"] is None:
+        return {"ok": False, "error": "The guest reported no root filesystem (no mount at '/')."}
+    return {
+        "ok": True,
+        "root": parsed["root"],
+        "filesystems": parsed["filesystems"],
+        "truncated": result["truncated"],
+    }
+
+
+async def _resolve_insights_config(vm_id: str) -> Optional[Dict[str, Any]]:
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        return None
+    configs = _load_insights_configs()
+    config = configs.get(vm_id)
+    if not isinstance(config, dict) or not config.get("host"):
+        return None
+    return config
+
+
+async def collect_vm_insights(vm_id: str, force: bool = False) -> Dict[str, Any]:
+    """Collect all three guest sections concurrently, with a short cache."""
+    now = time.monotonic()
+    cached = _insights_cache.get(vm_id)
+    if not force and cached and now - cached["at"] < INSIGHTS_CACHE_TTL:
+        return cached["payload"]
+
+    config = await _resolve_insights_config(vm_id)
+    if config is None:
+        payload = {
+            "vm": vm_id,
+            "configured": False,
+            "error": "No SSH profile is configured for this VM yet. "
+                     "Save a connection profile in the Insights panel first.",
+        }
+        return payload
+
+    async with _insights_ssh_semaphore:
+        processes, users, root_disk = await asyncio.gather(
+            _probe_guest_processes(config),
+            _probe_guest_users(config),
+            _probe_guest_root_disk(config),
+            return_exceptions=True,
+        )
+
+    def _section(value, fallback_error):
+        if isinstance(value, Exception):
+            logger.warning("Guest insights probe failed for %s: %s", vm_id, value)
+            return {"ok": False, "error": fallback_error}
+        return value
+
+    payload = {
+        "vm": vm_id,
+        "configured": True,
+        "collected_at": datetime.now().isoformat(timespec="seconds"),
+        "host": config.get("host"),
+        "processes": _section(processes, "Process collection failed unexpectedly."),
+        "users": _section(users, "User collection failed unexpectedly."),
+        "root_disk": _section(root_disk, "Disk collection failed unexpectedly."),
+    }
+    _insights_cache[vm_id] = {"at": now, "payload": payload}
+    return payload
+
+
+async def _discover_vm_addresses(vm_id: str) -> List[str]:
+    """Best-effort guest IP discovery via libvirt (agent first, DHCP leases
+    second). Empty list when libvirt or the guest provides nothing."""
+    if not LIBVIRT_AVAILABLE or not VM_ID_PATTERN.fullmatch(vm_id):
+        return []
+    domain, error = await _resolve_domain(vm_id)
+    if error or domain is None:
+        return []
+
+    def _addresses() -> List[str]:
+        found: List[str] = []
+        sources = [
+            libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT,
+            libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE,
+        ]
+        for source in sources:
+            try:
+                interfaces = domain.interfaceAddresses(source) or {}
+            except Exception:
+                continue
+            for info in interfaces.values():
+                for addr in (info or {}).get("addrs", []):
+                    ip = str(addr.get("addr") or "").strip()
+                    if not ip or ip.lower().startswith("fe80:"):
+                        continue
+                    if ip not in found:
+                        found.append(ip)
+            if found:
+                break
+        return found[:8]
+
+    try:
+        return await _run_libvirt(_addresses, timeout=6.0)
+    except Exception:
+        return []
+
+
+@app.get("/api/vms/insights")
+async def vms_insights_overview(force: bool = Query(False)):
+    """Fleet view: root-disk usage, user sessions, and process counts for
+    every VM with an SSH profile, collected concurrently and cached."""
+    now = time.monotonic()
+    cached = _insights_overview_cache.get("payload")
+    if not force and cached and now - _insights_overview_cache.get("at", 0) < INSIGHTS_OVERVIEW_TTL:
+        return cached
+
+    configs = _load_insights_configs()
+    if not configs:
+        payload = {"vms": [], "configured": 0, "message": "No VMs have an Insights SSH profile yet. Open 'Insights' on a running VM card to connect it."}
+        _insights_overview_cache.update({"at": now, "payload": payload})
+        return payload
+
+    results = await asyncio.gather(
+        *(collect_vm_insights(vm_id, force=force) for vm_id in configs),
+        return_exceptions=True,
+    )
+    vms = []
+    for vm_id, result in zip(configs, results):
+        entry: Dict[str, Any] = {"vm": vm_id, "vm_name": str(configs[vm_id].get("vm_name") or vm_id)}
+        if isinstance(result, Exception) or not isinstance(result, dict):
+            entry.update({"ok": False, "error": "Insights collection failed unexpectedly."})
+        elif not result.get("configured"):
+            entry.update({"ok": False, "error": result.get("error", "Not configured.")})
+        else:
+            entry["collected_at"] = result.get("collected_at")
+            section_errors = []
+            for key in ("processes", "users", "root_disk"):
+                section = result.get(key) or {}
+                if not section.get("ok"):
+                    entry[key] = {"ok": False, "error": section.get("error", "unavailable")}
+                    section_errors.append(entry[key]["error"])
+                    continue
+                if key == "processes":
+                    entry[key] = {"ok": True, "count": section.get("count", 0)}
+                elif key == "users":
+                    entry[key] = {"ok": True, "sessions": len(section.get("sessions", [])), "accounts": len(section.get("accounts", []))}
+                else:
+                    root = section.get("root") or {}
+                    entry[key] = {"ok": True, "device": root.get("device"), "mountpoint": root.get("mountpoint"),
+                                  "percent": root.get("percent"), "size_kb": root.get("size_kb"),
+                                  "used_kb": root.get("used_kb"), "avail_kb": root.get("avail_kb")}
+            # A guest is only "live" when at least one section succeeded;
+            # otherwise the fleet view must show it as unreachable.
+            if len(section_errors) == 3:
+                entry.update({"ok": False, "error": section_errors[0]})
+            else:
+                entry["ok"] = True
+        vms.append(entry)
+    payload = {"vms": vms, "configured": len(configs)}
+    _insights_overview_cache.update({"at": now, "payload": payload})
+    return payload
+
+
+@app.get("/api/vms/{vm_id}/insights")
+async def vm_insights(vm_id: str, force: bool = Query(False)):
+    """Processes, logged-in users/accounts, and root-disk usage for one VM."""
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        raise HTTPException(status_code=400, detail="Invalid VM identifier.")
+    return await collect_vm_insights(vm_id, force=force)
+
+
+@app.get("/api/vms/{vm_id}/insights/config")
+async def get_vm_insights_config(vm_id: str):
+    """Return the stored SSH profile for a VM plus discovered guest IPs."""
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        raise HTTPException(status_code=400, detail="Invalid VM identifier.")
+    configs = _load_insights_configs()
+    config = configs.get(vm_id)
+    return {
+        "vm": vm_id,
+        "configured": bool(config),
+        "config": {
+            "host": config.get("host"),
+            "port": config.get("port", 22),
+            "user": config.get("user"),
+            "identity_file": config.get("identity_file"),
+        } if config else None,
+        "discovered_addresses": await _discover_vm_addresses(vm_id),
+        "ssh_available": shutil.which("ssh") is not None,
+    }
+
+
+@app.put("/api/vms/{vm_id}/insights/config")
+async def put_vm_insights_config(vm_id: str, payload: VmInsightsConfigRequest):
+    """Validate and store the SSH profile used to inspect this VM."""
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        raise HTTPException(status_code=400, detail="Invalid VM identifier.")
+    try:
+        host = _validate_insights_host(payload.host)
+        user = _validate_insights_user(payload.user)
+        identity_file = _validate_identity_file(payload.identity_file)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    entry = {"host": host, "port": int(payload.port), "user": user, "identity_file": identity_file}
+
+    # Best-effort friendly name for the fleet overview (libvirt may be down).
+    try:
+        domain, error = await _resolve_domain(vm_id)
+        if not error and domain is not None:
+            entry["vm_name"] = await _run_libvirt(lambda: domain.name(), timeout=5.0)
+    except Exception:
+        pass
+
+    async with _insights_config_lock:
+        configs = _load_insights_configs()
+        configs[vm_id] = entry
+        await _save_insights_configs(configs)
+    _insights_cache.pop(vm_id, None)
+    _append_audit_line("vm-insights-config", f"saved SSH profile for {vm_id} ({user}@{host}:{payload.port})")
+    return {"vm": vm_id, "configured": True, "config": {**entry, "vm_name": entry.get("vm_name")}}
+
+
+@app.delete("/api/vms/{vm_id}/insights/config")
+async def delete_vm_insights_config(vm_id: str):
+    """Forget the SSH profile for a VM."""
+    if not VM_ID_PATTERN.fullmatch(vm_id):
+        raise HTTPException(status_code=400, detail="Invalid VM identifier.")
+    async with _insights_config_lock:
+        configs = _load_insights_configs()
+        if vm_id not in configs:
+            raise HTTPException(status_code=404, detail="No Insights profile is stored for this VM.")
+        del configs[vm_id]
+        await _save_insights_configs(configs)
+    _insights_cache.pop(vm_id, None)
+    _append_audit_line("vm-insights-config", f"removed SSH profile for {vm_id}")
+    return {"vm": vm_id, "configured": False}
+
+
 def _build_virsh_modify_command(subcmd: str, vm_id: str, *args) -> List[str]:
     """Build a virsh command for domain modification via the fallback path.
 
