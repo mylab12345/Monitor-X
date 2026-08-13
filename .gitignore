@@ -15,3 +15,7 @@ monitorx-operations.db-wal
 # Node tooling (jsdom smoke tests)
 node_modules/
 package-lock.json
+
+# MonitorX local state directory (MONITORX_STATE_DIR)
+.state/
+monitorx-audit.log

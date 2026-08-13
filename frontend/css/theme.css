@@ -1,3 +1,0 @@
-:root{--bg:#0b0d14;--card:#11131d;--text:#e8e8ef;--muted:#9aa0b0;--accent:#00d4aa;--accent2:#f0a500;--border:#1e2130}
-body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif}
-.card{background:var(--card);border:1px solid var(--border);border-radius:1rem;padding:1.5rem}
