@@ -17,6 +17,7 @@
     <link rel="stylesheet" href="/static/css/themes.css?v=20260809">
     <link rel="stylesheet" href="/static/css/quality-overrides.css?v=20260810-root">
     <link rel="stylesheet" href="/static/css/services.css?v=20260809-compact">
+    <link rel="stylesheet" href="/static/css/vm-insights.css?v=20260813-insights">
     <link rel="stylesheet" href="/static/css/layout-fit.css?v=20260810">
     <!-- xterm.js for VM Console -->
 </head>
@@ -662,6 +663,17 @@
                     Checking VM-control permissions…
                 </div>
 
+                <!-- Guest Insights fleet overview (SSH: processes, users, root disk) -->
+                <div class="vm-insights-overview" id="vm-insights-overview" hidden>
+                    <div class="vm-insights-overview-header">
+                        <h3>🛰️ Guest Insights <small>— processes · users · root disk, inside each VM over SSH</small></h3>
+                        <button type="button" class="btn btn-sm btn-outline" id="vm-insights-overview-refresh" title="Re-collect insights from every configured VM">↻ Refresh</button>
+                    </div>
+                    <div id="vm-insights-overview-grid" class="vm-insights-grid">
+                        <p class="no-data">Loading guest insights…</p>
+                    </div>
+                </div>
+
                 <div class="service-controls vm-controls-bar">
                     <input type="text" id="vm-search" placeholder="🔍 Search VM name, UUID, or state..." class="search-input">
                     <select id="vm-state-filter" class="filter-select">
@@ -872,6 +884,117 @@
                     <div class="resize-actions">
                         <button type="button" class="btn btn-outline" id="resize-cancel">Cancel</button>
                         <button type="button" class="btn btn-primary" id="resize-apply">Apply Resize</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- VM Guest Insights Modal (processes / users / root disk over SSH) -->
+    <div class="modal" id="vm-insights-modal">
+        <div class="modal-content" style="max-width: 1080px;">
+            <div class="modal-header">
+                <h3>🔍 Guest Insights — <span id="vm-insights-name"></span></h3>
+                <div class="console-header-actions">
+                    <button type="button" class="btn btn-sm btn-outline" id="vm-insights-refresh" title="Re-collect now">↻ Refresh</button>
+                    <label class="vm-insights-autorefresh" title="Re-collect every 10 seconds while open">
+                        <input type="checkbox" id="vm-insights-auto" checked> Auto 10s
+                    </label>
+                    <button type="button" class="modal-close" aria-label="Close dialog" id="vm-insights-close">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <!-- SSH connection profile -->
+                <div class="vm-insights-conn" id="vm-insights-conn">
+                    <button type="button" class="vm-insights-conn-toggle" id="vm-insights-conn-toggle" aria-expanded="true">
+                        <span id="vm-insights-conn-summary">🔗 SSH connection…</span>
+                        <span class="vm-insights-conn-caret">▾</span>
+                    </button>
+                    <div class="vm-insights-conn-body" id="vm-insights-conn-body">
+                        <div class="vm-insights-conn-grid">
+                            <div class="field">
+                                <label for="vm-insights-host">Host / IP</label>
+                                <input type="text" id="vm-insights-host" placeholder="192.168.122.10" autocomplete="off" spellcheck="false">
+                            </div>
+                            <div class="field">
+                                <label for="vm-insights-port">Port</label>
+                                <input type="number" id="vm-insights-port" min="1" max="65535" value="22">
+                            </div>
+                            <div class="field">
+                                <label for="vm-insights-user">SSH user</label>
+                                <input type="text" id="vm-insights-user" placeholder="root" autocomplete="off" spellcheck="false">
+                            </div>
+                            <div class="field">
+                                <label for="vm-insights-key">Identity file <small>(optional path on the MonitorX host)</small></label>
+                                <input type="text" id="vm-insights-key" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false">
+                            </div>
+                        </div>
+                        <div id="vm-insights-discovered" class="vm-insights-discovered" hidden>
+                            <span class="vm-insights-discovered-label">Guest addresses found by libvirt:</span>
+                            <span id="vm-insights-discovered-chips"></span>
+                        </div>
+                        <p class="vm-insights-hint">
+                            Read-only inspection: MonitorX runs only <code>ps</code>, <code>who</code>,
+                            <code>getent passwd</code>, and <code>df -kP</code> in the guest with key-based
+                            auth (BatchMode — no passwords are ever used or stored). Authorize MonitorX's
+                            public key in the guest's <code>~/.ssh/authorized_keys</code>.
+                        </p>
+                        <div class="vm-insights-conn-actions">
+                            <button type="button" class="btn btn-primary btn-sm" id="vm-insights-save">💾 Save &amp; Collect</button>
+                            <button type="button" class="btn btn-outline btn-sm" id="vm-insights-forget" hidden>🗑 Forget profile</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Section tabs -->
+                <div class="vm-insights-tabs" role="tablist" aria-label="Guest insight sections">
+                    <button type="button" role="tab" class="vm-insights-tab active" data-insights-tab="processes" aria-selected="true">⚙️ Processes <span class="vmi-badge" id="vmi-badge-processes" hidden></span></button>
+                    <button type="button" role="tab" class="vm-insights-tab" data-insights-tab="users" aria-selected="false">👤 Users <span class="vmi-badge" id="vmi-badge-users" hidden></span></button>
+                    <button type="button" role="tab" class="vm-insights-tab" data-insights-tab="root_disk" aria-selected="false">💾 Root Disk <span class="vmi-badge" id="vmi-badge-root-disk" hidden></span></button>
+                </div>
+
+                <div id="vm-insights-status" class="vm-insights-status" role="status"></div>
+
+                <div class="vm-insights-pane active" id="vm-insights-pane-processes">
+                    <div class="vm-insights-toolbar">
+                        <input type="text" id="vm-insights-proc-search" class="search-input" placeholder="🔍 Filter by name, user, or PID…">
+                        <span class="text-muted" id="vm-insights-proc-count"></span>
+                    </div>
+                    <div class="table-container vm-insights-table-wrap">
+                        <table class="data-table vm-insights-table">
+                            <thead>
+                                <tr><th>PID</th><th>User</th><th>CPU %</th><th>Mem %</th><th>RSS</th><th>Uptime</th><th>Command</th></tr>
+                            </thead>
+                            <tbody id="vm-insights-proc-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="vm-insights-pane" id="vm-insights-pane-users">
+                    <h4 class="vm-insights-subtitle">Active login sessions</h4>
+                    <div class="table-container vm-insights-table-wrap">
+                        <table class="data-table vm-insights-table">
+                            <thead><tr><th>User</th><th>Terminal</th><th>Logged in</th><th>From</th></tr></thead>
+                            <tbody id="vm-insights-sessions-body"></tbody>
+                        </table>
+                    </div>
+                    <h4 class="vm-insights-subtitle">Local user accounts <small class="text-muted">(uid 0 and ≥ 1000)</small></h4>
+                    <div class="table-container vm-insights-table-wrap">
+                        <table class="data-table vm-insights-table">
+                            <thead><tr><th>Name</th><th>UID</th><th>Home</th><th>Shell</th></tr></thead>
+                            <tbody id="vm-insights-accounts-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="vm-insights-pane" id="vm-insights-pane-root-disk">
+                    <div id="vm-insights-root-card" class="vm-insights-root-card"></div>
+                    <h4 class="vm-insights-subtitle">All filesystems</h4>
+                    <div class="table-container vm-insights-table-wrap">
+                        <table class="data-table vm-insights-table">
+                            <thead><tr><th>Device</th><th>Mount</th><th>Size</th><th>Used</th><th>Free</th><th style="min-width:140px;">Use %</th></tr></thead>
+                            <tbody id="vm-insights-fs-body"></tbody>
+                        </table>
                     </div>
                 </div>
             </div>

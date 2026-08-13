@@ -64,6 +64,26 @@ class SourceContracts(unittest.TestCase):
         self.assertTrue(buttons)
         self.assertTrue(all(re.search(r"\btype\s*=", button, re.IGNORECASE) for button in buttons))
 
+    def test_vm_insights_ssh_path_is_hardened(self):
+        backend = BACKEND.read_text()
+        # Hardened ssh: never interactive, never password-authenticated.
+        self.assertIn("BatchMode=yes", backend)
+        self.assertIn("PasswordAuthentication=no", backend)
+        self.assertIn("KbdInteractiveAuthentication=no", backend)
+        # The guest command allowlist exists and stays pinned to exactly
+        # four read-only tools — any change needs a security review.
+        self.assertIn('INSIGHTS_CMD_PROCESSES = ("ps"', backend)
+        self.assertIn('INSIGHTS_CMD_SESSIONS = ("who",)', backend)
+        self.assertIn('INSIGHTS_CMD_ACCOUNTS = ("getent", "passwd")', backend)
+        self.assertIn('INSIGHTS_CMD_FILESYSTEMS = ("df", "-kP")', backend)
+        # No shell interpreter is ever spawned anywhere in the backend.
+        self.assertNotIn("shell=True", backend)
+        self.assertNotIn("create_subprocess_shell", backend)
+        # Profiles store a key *path* only; input validation is mandatory.
+        self.assertIn("_validate_identity_file", backend)
+        self.assertIn("_validate_insights_host", backend)
+        self.assertIn("_validate_insights_user", backend)
+
 
 class RuntimeSmoke(unittest.TestCase):
     """Run only when setup.sh dependencies are available."""
@@ -81,6 +101,12 @@ class RuntimeSmoke(unittest.TestCase):
         os.environ["MONITORX_OPERATIONS_DB"] = cls.db.name
         sys.path.insert(0, str(ROOT / "backend"))
         import main
+
+        # Whole-suite runs may import the backend in another test module
+        # before this class configures the token; re-sync the import-time
+        # value so the authentication contract under test is preserved.
+        if main.MONITORX_AUTH_TOKEN != os.environ["MONITORX_AUTH_TOKEN"]:
+            main.MONITORX_AUTH_TOKEN = os.environ["MONITORX_AUTH_TOKEN"]
 
         cls.main = main
         cls.client = TestClient(main.app)

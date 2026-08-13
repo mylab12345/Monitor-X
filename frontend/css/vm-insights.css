@@ -1,0 +1,449 @@
+/* ============================================================================
+   VM Guest Insights — fleet overview panel + inspection modal
+   (processes / users / root disk collected inside guests over SSH)
+   Built entirely on the theme CSS custom properties so all 13 themes apply.
+   ========================================================================== */
+
+/* --- Fleet overview panel (top of the VMs tab) ---------------------------- */
+
+.vm-insights-overview {
+    margin: 0 0 18px;
+    padding: 14px 16px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
+    backdrop-filter: blur(12px);
+}
+
+.vm-insights-overview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.vm-insights-overview-header h3 {
+    margin: 0;
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+}
+
+.vm-insights-overview-header small {
+    color: var(--text-dim);
+    font-weight: 400;
+    font-size: 0.72rem;
+}
+
+.vm-insights-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 10px;
+}
+
+.vmi-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.vmi-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.vmi-card-header strong {
+    font-size: 0.85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vmi-card-status {
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.vmi-card-status.ok { color: var(--success); background: var(--success-bg); }
+.vmi-card-status.error { color: var(--danger); background: var(--danger-bg); }
+
+.vmi-card-stats {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+}
+
+.vmi-card-stats b {
+    color: var(--text-main);
+    font-variant-numeric: tabular-nums;
+}
+
+.vmi-disk-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+}
+
+.vmi-disk-row .vm-progress {
+    flex: 1;
+    min-width: 60px;
+}
+
+.vmi-card-error {
+    font-size: 0.74rem;
+    color: var(--danger);
+    line-height: 1.35;
+    word-break: break-word;
+}
+
+.vmi-card-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+/* --- Modal: connection panel ---------------------------------------------- */
+
+.vm-insights-conn {
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-md);
+    margin-bottom: 12px;
+    background: var(--bg-surface);
+    overflow: hidden;
+}
+
+.vm-insights-conn-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 12px;
+    background: transparent;
+    border: none;
+    color: var(--text-main);
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.vm-insights-conn-toggle:hover { background: var(--bg-card-hover); }
+.vm-insights-conn-caret { color: var(--text-dim); transition: transform 0.2s ease; }
+.vm-insights-conn.collapsed .vm-insights-conn-caret { transform: rotate(-90deg); }
+.vm-insights-conn.collapsed .vm-insights-conn-body { display: none; }
+
+.vm-insights-conn-body {
+    padding: 4px 12px 12px;
+    border-top: 1px solid var(--border-card);
+}
+
+.vm-insights-conn-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 2fr;
+    gap: 10px;
+    margin: 10px 0;
+}
+
+.vm-insights-conn-grid .field label {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.vm-insights-conn-grid .field label small {
+    text-transform: none;
+    color: var(--text-dim);
+}
+
+.vm-insights-conn-grid input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 7px 9px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-sm);
+    color: var(--text-main);
+    font-size: 0.82rem;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.vm-insights-conn-grid input:focus {
+    outline: none;
+    border-color: var(--border-hover);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.vm-insights-discovered {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+    font-size: 0.74rem;
+}
+
+.vm-insights-discovered-label { color: var(--text-dim); }
+
+.vm-insights-chip {
+    display: inline-block;
+    padding: 2px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--accent-blue);
+    background: var(--accent-glow);
+    border: 1px solid var(--border-hover);
+    border-radius: 999px;
+    cursor: pointer;
+}
+
+.vm-insights-chip:hover { filter: brightness(1.2); }
+
+.vm-insights-hint {
+    margin: 0 0 10px;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--text-dim);
+}
+
+.vm-insights-hint code {
+    color: var(--text-muted);
+    background: var(--bg-input);
+    border-radius: 4px;
+    padding: 0 4px;
+}
+
+.vm-insights-conn-actions {
+    display: flex;
+    gap: 8px;
+}
+
+/* --- Modal: tabs ----------------------------------------------------------- */
+
+.vm-insights-tabs {
+    display: flex;
+    gap: 6px;
+    border-bottom: 1px solid var(--border-card);
+    margin-bottom: 10px;
+}
+
+.vm-insights-tab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    padding: 8px 14px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.vm-insights-tab:hover { color: var(--text-main); }
+
+.vm-insights-tab.active {
+    color: var(--accent-blue);
+    border-bottom-color: var(--accent-blue);
+}
+
+.vmi-badge {
+    font-size: 0.66rem;
+    font-weight: 700;
+    background: var(--accent-glow);
+    color: var(--accent-blue);
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-variant-numeric: tabular-nums;
+}
+
+.vmi-badge.warn { background: var(--warning-bg); color: var(--warning); }
+
+.vm-insights-pane { display: none; }
+.vm-insights-pane.active { display: block; }
+
+.vm-insights-status {
+    min-height: 18px;
+    font-size: 0.76rem;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+}
+
+.vm-insights-status.error { color: var(--danger); }
+.vm-insights-status.ok { color: var(--success); }
+
+.vm-insights-autorefresh {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+}
+
+/* --- Modal: tables ---------------------------------------------------------- */
+
+.vm-insights-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.vm-insights-toolbar .search-input { flex: 1; max-width: 380px; }
+
+.vm-insights-table-wrap {
+    max-height: 46vh;
+    overflow: auto;
+    margin-bottom: 14px;
+}
+
+.vm-insights-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+}
+
+.vm-insights-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    text-align: left;
+    padding: 7px 10px;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-card);
+}
+
+.vm-insights-table tbody td {
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border-card);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.vm-insights-table tbody td.cmd {
+    white-space: normal;
+    word-break: break-all;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+}
+
+.vm-insights-table tbody tr:hover td { background: var(--bg-card-hover); }
+
+.vm-insights-subtitle {
+    margin: 14px 0 8px;
+    font-size: 0.8rem;
+    color: var(--text-main);
+    letter-spacing: 0.03em;
+}
+
+.vm-insights-subtitle small { font-weight: 400; }
+
+.vm-insights-empty {
+    padding: 18px 10px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+}
+
+.vm-insights-error-box {
+    padding: 14px;
+    border: 1px solid var(--danger);
+    background: var(--danger-bg);
+    color: var(--text-main);
+    border-radius: var(--radius-md);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+/* --- Modal: root disk card --------------------------------------------------- */
+
+.vm-insights-root-card {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 14px 16px;
+    margin-bottom: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-card);
+    border-radius: var(--radius-md);
+}
+
+.vm-insights-root-card .vmi-root-device {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-main);
+}
+
+.vm-insights-root-card .vmi-root-device small {
+    display: block;
+    color: var(--text-dim);
+    font-size: 0.68rem;
+    margin-top: 2px;
+}
+
+.vm-insights-root-card .vmi-root-bar {
+    flex: 1;
+    min-width: 180px;
+}
+
+.vm-insights-root-card .vmi-root-bar .vm-progress { height: 10px; }
+
+.vm-insights-root-card .vmi-root-bar small {
+    display: block;
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+}
+
+.vm-insights-root-percent {
+    font-size: 1.5rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    min-width: 84px;
+    text-align: right;
+}
+
+.vm-insights-root-percent.ok { color: var(--success); }
+.vm-insights-root-percent.warn { color: var(--warning); }
+.vm-insights-root-percent.danger { color: var(--danger); }
+
+/* Progress bar colour states reused by overview + modal */
+.vm-progress i.warn { background: var(--warning); }
+.vm-progress i.danger { background: var(--danger); }
+
+@media (max-width: 900px) {
+    .vm-insights-conn-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 600px) {
+    .vm-insights-conn-grid { grid-template-columns: 1fr; }
+    .vm-insights-root-card { flex-direction: column; align-items: stretch; }
+    .vm-insights-root-percent { text-align: left; }
+}
