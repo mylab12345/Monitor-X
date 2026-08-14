@@ -43,15 +43,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# backend/requirements.txt is a pointer to the canonical root requirements file.
+# Install from the single canonical dependency list.
 COPY requirements.txt ./
-COPY backend/requirements.txt ./backend/requirements.txt
 
 # Create a self-contained virtualenv that the runtime image can copy verbatim.
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade pip \
-    && pip install -r backend/requirements.txt \
+    && pip install -r requirements.txt \
     && pip install libvirt-python==11.3.0
 
 # -----------------------------------------------------------------------------
