@@ -8,7 +8,6 @@ __pycache__/
 .env
 .idea/
 .vscode/
-.opencode/
 node_modules/
 README.md
 setup.sh
