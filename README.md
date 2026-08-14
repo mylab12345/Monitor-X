@@ -1,251 +1,55 @@
-# MonitorX - System Monitoring & Troubleshooting Dashboard
+# MonitorX
 
-Real-time, modern monitoring and automated troubleshooting dashboard for Linux servers (CPU, RAM, Storage, Network, GPU, VMs, Systemd Services, and Logs).
+A local-first Linux monitoring dashboard for live host metrics, diagnostics, processes, systemd services, and libvirt virtual machines.
 
-
-## Features
-
-- **Ultra-Modern Glassmorphism UI** — High-tech dark slate interface with neon accent glows, live sparklines, and a **thirteen-theme picker** (Midnight, Aurora, Ember, Forest, Nebula, Graphite, plus the natural set — Ocean, Lagoon, Meadow, Desert, Canyon, Arctic, Sakura) that re-skins the entire dashboard in one click.
-- **NASA Mission-Control Styling** — The header carries MET, UTC, and DOY (day-of-year) mission clocks, plus a flight-control boot sequence and a live telemetry ticker rendered as a mission readout strip.
-- **Real-Time Canvas Sparklines** — Live 30s trend graphs for CPU, Memory, and Network Bandwidth.
-- **Troubleshoot Mode Hub** — Automated diagnostic scan (up to 16 check categories across CPU, Memory, Storage, Services, Processes, Kernel, Network, Hardware, and Security) calculating a **System Health Index (0-100)** score with **1-Click Remediation Fixes** and a **rolling health-score trend sparkline** so you can watch whether the host improves or degrades across scans.
-- **Auto-Fix Engine** — Every issue the scan detects gets a fix button *inside* the hub, plus a **⚡ Fix All Issues** batch runner and a **Review Fix Plan** modal to pick exactly which repairs to apply. The scanner also surfaces hard-to-find problems: CPU overheating/thermal pressure, interface RX/TX errors and drops, process/thread exhaustion, a sharply rising load trend, NTP clock desync, and spikes in failed login attempts. Fixes include: clear RAM page cache, vacuum systemd journal, restart failed or individual services, clear the kernel error buffer, kill runaway processes (owner-guarded), reap zombie processes via SIGCHLD, flush the DNS resolver cache, and clean stale temp files. Every execution is timed, audited, and shown in the **Remediation History** panel — the hub re-scans automatically after each fix and reports which issues it resolved.
-- **Live Log Inspector** — Auto-tail streaming for system logs and `dmesg` with level filtering (`ALL`, `🔴 ERROR`, `⚠️ WARN`, `ℹ️ INFO`) and regex search.
-- **Network Diagnostic Suite** — Interactive ICMP Ping latency tester, TCP Port connectivity checker, DNS resolver benchmark, and active listening ports table.
-- **Resource Bottleneck Finder** — Identifies top CPU, RAM, and thread consumers alongside stuck/zombie process killers.
-- **Safe Diagnostic Console** — Approved read-only diagnostic presets (`df -h`, `free -h`, `ss -tulpn`, `systemctl --failed`, `dmesg -T`, `uname -a`) with command history. Arbitrary shell execution is intentionally disabled.
-- **Process Manager** — Interactive process table with sorting, multi-select kill, and full process detail inspector (cmdline, open file handles, socket connections). Multi-select kill runs as a single batched request and is **owner-guarded per process**: PIDs owned by another user are individually refused with the reason shown in the summary toast, while authorized PIDs are still terminated — the bulk kill never aborts wholesale on the first unauthorized target.
-- **Service & VM Management** — Card-based systemd service manager with KPI counters (Total / Active / Failed / Inactive / Loaded), search/filter/sort, an auto-refresh interval selector, sticky bulk actions (start, stop, restart, reload, enable, disable), per-unit journal log viewer, and an in-UI authorization status with actionable errors. Running libvirt/KVM guests show live vCPU, RAM, disk I/O, and network throughput metrics.
-- **KVM Guest Lifecycle Controls** — `Start`, `Shutdown`, `Reboot`, `Suspend`, `Resume`, and a destructive `Poweroff` for every libvirt domain discovered on the host, with a state-aware action matrix, bulk operations on multiple guests, KPI counters (Total / Running / Stopped / Paused / Other), search/filter/sort, an auto-refresh interval selector, and a built-in audit log of the last 50 control actions. Controls run through the libvirt API when MonitorX has read-write access and transparently fall back to a narrowly scoped `sudo virsh` policy otherwise; a dropped `libvirtd` connection is re-established automatically without restarting the dashboard.
-- **VM Guest Insights (in-VM visibility)** — See *inside* every VM: the full **process table** (PID, user, CPU%, MEM%, RSS, uptime, command — sortable, filterable), **logged-in user sessions** plus the guest's **local user accounts**, and **root-disk usage** with every real filesystem. Each running VM gets a 🔍 Insights button opening a live modal with 10-second auto-refresh; a fleet **Guest Insights overview** at the top of the VMs tab rolls up process counts, sessions, and root-disk pressure for every connected guest at once. Access is per-VM SSH with key-based auth only; libvirt auto-discovers guest IPs to pre-fill the connection form. The design is strictly read-only and allowlist-based — see [VM Guest Insights](#vm-guest-insights-in-vm-visibility) below.
-- **Secure Local-First Access** — Authentication is optional for localhost; set `MONITORX_AUTH_TOKEN` when exposing MonitorX through a trusted reverse proxy or container network.
-
----
-
-## Quick Start
+## Run locally
 
 ```bash
-# 1. Setup Python Virtual Environment and dependencies
 ./setup.sh
-
-# 2. Launch dashboard directly
 ./launch.sh
 ```
 
-Open **http://localhost:8080** in your browser.
+Open <http://localhost:8080>.
 
-For a network-facing deployment, set a strong token before starting MonitorX:
+> `setup.sh` targets Debian/Ubuntu hosts and installs the optional libvirt dependencies. To expose MonitorX beyond localhost, put it behind a trusted HTTPS reverse proxy and set a strong `MONITORX_AUTH_TOKEN`.
 
-```bash
-export MONITORX_AUTH_TOKEN="replace-with-a-long-random-secret"
-export MONITORX_HOST=0.0.0.0   # only behind a trusted HTTPS reverse proxy
-./launch.sh
-```
-
-Performance can be tuned without editing code. Core telemetry defaults to two
-seconds; process samples are cached for five seconds and slower hardware/VM
-collectors use their own cache windows:
+## Run with Docker
 
 ```bash
-export MONITORX_STATS_INTERVAL=2
-export MONITORX_PROCESS_TTL=5
-export MONITORX_CONNECTIONS_TTL=10
+MONITORX_AUTH_TOKEN="change-this" docker compose up --build -d
 ```
 
----
+The container provides dashboard metrics. Host systemd control requires the native installation; mount the libvirt socket only when VM monitoring is needed.
 
-## Themes
+## Configuration
 
-MonitorX ships with **thirteen complete visual themes**, switchable from the **🎨 Theme** button in the top-right corner (or press `t` to cycle through them). Each theme re-skins every element — backgrounds, surfaces, text, accent colours, status colours, HUD overlays and glows — so the whole tool takes on a different character instantly. Your choice is saved and restored across visits.
+Copy `.env.example` to `.env` for local settings. Common variables:
 
-| Theme      | Look                                              |
-|------------|---------------------------------------------------|
-| **Midnight** | Deep-space flight control (default): navy + cyan HUD |
-| **Aurora**   | Clean daylight console — the light theme            |
-| **Ember**    | Warm sunset operations room (amber / orange)        |
-| **Forest**   | Deep-green telemetry lab (emerald / teal)            |
-| **Nebula**   | Violet mission deck (indigo / magenta)              |
-| **Graphite** | Minimal monochrome ops desk — no overlays, no glow  |
-| **Ocean**    | Deep-sea command deck (natural): abyssal blues + aqua  |
-| **Desert**   | Dusk-dune ops camp (natural): sand + golden hour      |
-| **Arctic**   | Polar-night frost station (natural): ice blues + silver |
+- `MONITORX_HOST` — bind address (default: `127.0.0.1`)
+- `MONITORX_PORT` — HTTP port (default: `8080`)
+- `MONITORX_AUTH_TOKEN` — required when the app is exposed beyond localhost
+- `MONITORX_STATE_DIR` — directory for local state and audit data
 
-Themes are driven entirely by CSS custom properties defined in `frontend/css/themes.css` and applied via `<body class="theme-…">`, so they compose cleanly with the existing NASA mission-control, NEXUS HUD and mission-board layers. Use the `🎨` button or `t` shortcut to switch.
+## Project layout
 
----
+```text
+backend/       FastAPI application
+frontend/      Static dashboard assets
+systemd/       Optional native service installer and unit template
+tests/         API, security, and browser smoke tests
+Dockerfile     Container image
+docker-compose.yml  Local container deployment
+```
 
-## Systemd Service Setup (Run on Boot)
-
-To run MonitorX as a background systemd service that starts automatically on boot:
+## Verify
 
 ```bash
-# Run installer script (creates and enables /etc/systemd/system/monitorx.service)
-./systemd/install-service.sh
+python -m pytest
+node tests/smoke-services.js
+node tests/smoke-rootstorage-processes.js
+node tests/smoke-vm-insights.js
 ```
 
-To keep token authentication enabled for the systemd deployment, run the
-installer with the token in its environment; it writes `/etc/monitorx.env`
-with mode `0600` and the unit loads it automatically:
+## Security
 
-```bash
-MONITORX_AUTH_TOKEN="replace-with-a-long-random-secret" ./systemd/install-service.sh
-```
-
-### Dashboard service controls
-
-A dashboard process runs as your regular user, so plain `systemctl restart …` is normally rejected by systemd/polkit. The installer now creates a **limited passwordless sudo policy** only for MonitorX’s `start`, `stop`, `restart`, `reload`, `enable`, and `disable` actions on `.service` units, plus the explicit remediation commands used by the Troubleshoot Hub (drop page cache, vacuum journals, and clear kernel buffer/logs). It does **not** grant shell access.
-
-### VM (libvirt/KVM) control authorization
-
-VM lifecycle controls use two independent paths, and the dashboard enables the buttons when **either** works:
-
-1. **Native libvirt (preferred).** The installer adds MonitorX’s user to the host’s `libvirt` (or `kvm`) group and sets `SupplementaryGroups=` in the unit file, so the backend opens a **read-write** connection to `qemu:///system` and drives guests through the libvirt API directly — no sudo, no subprocess, and precise error messages.
-2. **`sudo virsh` fallback.** When a read-write connection is unavailable, the installer’s `/etc/sudoers.d/monitorx-virsh` policy permits exactly the argv MonitorX runs:
-
-   ```
-   virsh --quiet --no-pkttyagent --connect qemu:///system <verb> -- <domain>
-   ```
-
-   for the lifecycle verbs `start`, `shutdown`, `reboot`, `destroy`, `suspend`, and `resume` — plus the serial-console form `… console -- <domain>` and the CPU/RAM resize forms `… setvcpus <domain> …`, `… setmem <domain> …`, `… setmaxmem <domain> …`. Nothing else is granted — no shell, no `undefine`, no arbitrary arguments. The `--no-pkttyagent` flag is part of the whitelisted command line and must stay in sync with `_virsh_command()` in `backend/main.py`; sudo matches the full argv, so a mismatch makes every control command fail with “not allowed to execute”.
-
-The **VMs (Libvirt)** tab reports which mode is active, disables controls only when both paths fail, and surfaces the exact libvirt/`virsh` error instead of reporting a false success.
-
-### VM Guest Insights (in-VM visibility)
-
-Hypervisor metrics stop at the guest boundary. Guest Insights crosses it: MonitorX
-connects to each VM over **SSH** and surfaces its **processes**, **users**, and
-**root disk** in the dashboard.
-
-**Setup per VM** (one minute):
-
-1. Authorize MonitorX's public key inside the guest:
-   `ssh-copy-id -i ~/.ssh/id_ed25519.pub root@<guest-ip>` (or paste into the
-   guest's `~/.ssh/authorized_keys`).
-2. Open the VMs tab → **🔍 Insights** on the running VM → the guest address is
-   pre-filled when libvirt can discover it (qemu-guest-agent or DHCP leases) →
-   **💾 Save & Collect**.
-
-**Security model** (defense in depth — please read before exposing MonitorX):
-
-- **Read-only by design.** Exactly four commands are ever executed inside a
-  guest: `ps`, `who`, `getent passwd`, and `df -kP`. Their argv is built from
-  compile-time constants; there is no API — and no UI path — to run anything else.
-- **No shell is ever spawned.** All execution uses `create_subprocess_exec`
-  with a fixed argument vector. Operator input (host/user/port/key path) is
-  strictly validated (IP/hostname and username grammars, leading-dash option
-  injection refused) and only ever lands in its designated argv slot.
-- **Key-based auth only.** ssh runs with `BatchMode=yes` and
-  `PasswordAuthentication=no`; MonitorX can neither prompt nor store passwords.
-  Profiles persist in the private state directory as mode-`0600` files and hold
-  a key *path*, never key material.
-- **Blast-radius limits.** Every command has a hard timeout, output reads are
-  capped (a hostile guest cannot exhaust host memory), and a concurrency
-  semaphore bounds simultaneous SSH connections. Profile changes are audited.
-
-REST API: `GET/PUT/DELETE /api/vms/{vm_id}/insights/config`,
-`GET /api/vms/{vm_id}/insights`, fleet roll-up `GET /api/vms/insights`.
-Tunables: `MONITORX_INSIGHTS_SSH_TIMEOUT`, `MONITORX_INSIGHTS_TTL`,
-`MONITORX_INSIGHTS_OVERVIEW_TTL`, `MONITORX_INSIGHTS_CONCURRENCY`.
-
-> **Upgrading from an earlier version?** Releases before this fix generated a policy for `virsh --no-ask-password …`. That is a **systemctl** flag which `virsh` rejects outright, so every Start/Shutdown/Reboot silently failed — and `poweroff` isn’t a `virsh` verb at all (the correct one is `destroy`). A later release also shipped a runtime command line that omitted `--no-pkttyagent`, which made sudo reject the exact same commands. Re-run `./systemd/install-service.sh` to replace the stale policy, then restart MonitorX.
-
-After updating an existing installation, run the installer once more and reload MonitorX:
-
-```bash
-./systemd/install-service.sh
-# or, if MonitorX is already installed:
-sudo systemctl restart monitorx
-```
-
-The **Systemd Services** tab shows whether this policy is available, disables controls if it is not, and displays the exact API error rather than reporting a false success. Availability is verified by asking sudo to validate the exact `systemctl --no-ask-password <action> <unit>` argv MonitorX runs — not merely whether the account holds *some* sudo privilege — so the tab only reports "available" when the granted commands actually match.
-
-The service inventory merges the live systemd unit list with installed unit files. This means enabled, disabled, static, masked, running, waiting/sleeping, failed, and stopped services are shown; a unit that is installed but not currently loaded is displayed as **inactive / dead**. A Docker deployment cannot inspect host systemd without a deliberately configured host D-Bus integration, so run the native systemd installation when host service management is required.
-
-### Useful Service Commands
-
-```bash
-sudo systemctl status monitorx
-sudo systemctl restart monitorx
-sudo systemctl stop monitorx
-journalctl -u monitorx -f
-```
-
-### Troubleshooting: `status=203/EXEC`
-
-If the service keeps restarting and `systemctl status monitorx` shows `code=exited, status=203/EXEC`, systemd could not **execute** the interpreter named in `ExecStart` — it is not a bug in `main.py`. The usual cause is a missing or broken virtual environment: `setup.sh` may never have been run, or the `.venv` was copied from another machine/path or its base Python was upgraded/removed, leaving `bin/python3` as a dangling symlink.
-
-Diagnose, then repair:
-
-```bash
-# 1. Confirm which command fails and why (look for "No such file or directory"
-#    or "Permission denied" in the journal).
-systemctl cat monitorx
-journalctl -u monitorx -n 20 --no-pager
-
-# 2. Inspect the interpreter the unit references.
-ls -la /home/<user>/Monitor-X/.venv/bin/python3
-readlink -f /home/<user>/Monitor-X/.venv/bin/python3   # points at nothing? => broken venv
-
-# 3. Repair: rebuild the venv, then regenerate and restart the service.
-#    (setup.sh now detects a dangling/broken interpreter and rebuilds it;
-#    install-service.sh now verifies the venv actually works before installing.)
-cd /home/<user>/Monitor-X
-./setup.sh
-./systemd/install-service.sh
-sudo systemctl daemon-reload
-sudo systemctl restart monitorx
-sudo systemctl status monitorx --no-pager
-```
-
-The installer now also generates `ExecStart` with an absolute path to `backend/main.py`, so the unit keeps working even if the service is started from a different working directory.
-
----
-
-## Workspace Structure
-
-```
-MonitorX/
-├── backend/
-│   ├── main.py               # FastAPI application with REST & WebSocket APIs
-│   └── requirements.txt      # Python dependencies
-├── frontend/
-│   ├── index.html            # Dashboard HTML structure
-│   ├── css/styles.css        # Modern Glassmorphic CSS Theme
-│   ├── css/themes.css        # Multi-theme system (13 themes + picker styles)
-│   └── js/app.js             # Real-time WebSocket logic, Canvas charts & theme switcher
-├── systemd/
-│   ├── monitorx.service      # Systemd service unit template
-│   └── install-service.sh    # Automated service installer script
-├── launch.sh                 # Launcher script
-├── setup.sh                  # Setup script
-└── README.md                 # Project documentation
-```
-
----
-
-## Suggested Future Improvements
-
-1. **Persistent Time-Series Storage**:
-   - Connect an embedded SQLite, TimescaleDB, or Prometheus exporter to store historical metrics over days/weeks for long-term trend analysis.
-2. **Automated Notification Webhooks**:
-   - Send instant alerts (Slack, Discord, Telegram, or Email) when the System Health Index drops below a threshold (e.g. `< 70`). *Partially done: the Operations Center already ships alert rules + webhooks.*
-3. **Custom Dashboard Widgets**:
-   - Allow users to pin, drag, and resize metric cards or custom command outputs to create personalized monitoring views.
-4. **Service safety workflow**:
-   - Add maintenance windows, dependency previews, per-service log tails, and an audit timeline recording who invoked each action and its result.
-5. **Role-based operator permissions**:
-   - Extend token authentication into granular Viewer, Diagnostician, and Operator roles before exposing the dashboard to multiple administrators.
-6. **Alert rules UI**:
-   - Let operators create threshold rules with cooldowns, acknowledgement, silencing, and notification routing directly from the dashboard.
-7. **Fleet view**:
-   - Securely aggregate multiple MonitorX agents into a host inventory with tags, health rollups, and drill-down diagnostics.
-
-
-### Performance and security defaults
-
-MonitorX uses one shared WebSocket telemetry stream and caches slower hardware
-collectors so the live dashboard remains responsive. The default bind is
-`127.0.0.1`; set `MONITORX_HOST=0.0.0.0` only behind a trusted reverse proxy.
-For a protected deployment, set `MONITORX_AUTH_TOKEN` and sign in through the
-dashboard. Docker and Kubernetes CLI monitoring integrations are intentionally
-removed; the Dockerfile/Compose files are deployment formats only.
+MonitorX can inspect and, when explicitly authorized, operate host services and VMs. Keep it private, use token authentication outside localhost, and review `systemd/install-service.sh` before granting its narrowly scoped sudo policy.

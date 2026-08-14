@@ -1,2 +1,0 @@
-# Kept for tooling that looks in backend/. Canonical dependency list: ../requirements.txt
--r ../requirements.txt
