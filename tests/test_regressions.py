@@ -190,11 +190,11 @@ class SessionTokens(unittest.TestCase):
                 self.assertIsNotNone(cookie)
                 self.assertNotEqual(cookie, token)
                 # session id must still authenticate
-                self.assertEqual(client.get("/api/stats/cpu").status_code, 200)
+                self.assertEqual(client.get("/api/stats/processes").status_code, 200)
                 # and logout must revoke it server-side
                 client.post("/api/auth/logout")
                 client.cookies.set(main.AUTH_COOKIE_NAME, cookie)
-                self.assertEqual(client.get("/api/stats/cpu").status_code, 401)
+                self.assertEqual(client.get("/api/stats/processes").status_code, 401)
         finally:
             os.environ.pop("MONITORX_AUTH_TOKEN", None)
             sys.modules.pop("main", None)
