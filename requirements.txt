@@ -6,8 +6,7 @@ starlette>=1.3.1
 uvicorn[standard]>=0.30.1
 websockets>=12.0
 psutil>=5.9.8
-# jinja2 removed: Jinja2Templates was imported but never rendered anything
-# (every response is JSON or a directly-read static index.html), so the
-# dependency and its advisories were pure attack surface.
-aiofiles>=23.2.1
+# jinja2/aiofiles removed: Jinja2Templates was imported but never rendered
+# anything (every response is JSON or a directly-read static index.html), and
+# aiofiles was never imported at all — both were pure attack surface.
 py3nvml>=0.2.7

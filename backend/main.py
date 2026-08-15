@@ -22,7 +22,7 @@ import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional
@@ -176,11 +176,6 @@ async def _conn_alive_async(conn) -> bool:
         return await _run_libvirt(lambda: conn.isAlive(), timeout=5.0) == 1
     except Exception:
         return False
-
-
-async def _libvirt_conn_alive_async():
-    """Check if the read-only libvirt connection is alive (async safe)."""
-    return await _conn_alive_async(libvirt_conn)
 
 
 async def _ensure_libvirt_conn() -> bool:
@@ -581,6 +576,19 @@ VM_ACTION_TO_VIRSH = {
     "poweroff": "destroy",
     "destroy": "destroy",
 }
+
+# Libvirt domain state enums -> human-readable names, shared by metrics
+# collection and post-action status reads. Empty on hosts without libvirt.
+VM_STATE_NAMES = {
+    libvirt.VIR_DOMAIN_NOSTATE: "no_state",
+    libvirt.VIR_DOMAIN_RUNNING: "running",
+    libvirt.VIR_DOMAIN_BLOCKED: "blocked",
+    libvirt.VIR_DOMAIN_PAUSED: "paused",
+    libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown",
+    libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
+    libvirt.VIR_DOMAIN_CRASHED: "crashed",
+    libvirt.VIR_DOMAIN_PMSUSPENDED: "pmsuspended",
+} if LIBVIRT_AVAILABLE else {}
 
 # Domain names may legitimately contain spaces and other characters, so the
 # identifier is passed to virsh as a single argv element (never a shell string).
@@ -1389,23 +1397,15 @@ def _virsh_command(action: str, vm_id: str) -> List[str]:
     return [sudo, "-n", *args]
 
 
-async def _run_virsh_action(action: str, vm_id: str) -> Optional[str]:
-    """Run a constrained virsh command as the privileged fallback path.
+async def _run_virsh_with_retry(command: List[str], timeout: float = 30.0,
+                                timeout_message: str = "virsh command timed out") -> tuple:
+    """Execute a (possibly sudo-prefixed) virsh argv with a hard timeout.
 
-    Returns ``None`` on success, or a human-readable error string on failure.
-
-    Older virsh (<11.4) rejects ``--no-pkttyagent`` with
-    ``unsupported option``. The sudoers policy now allows both forms, so we
-    transparently retry without the flag when that specific error is seen.
+    Returns ``(proc, error, returncode)``; ``proc`` is ``None`` when the
+    binary could not be executed at all. Transparently retries without
+    ``--no-pkttyagent`` when the host virsh predates libvirt 11.4 and rejects
+    that flag (both forms are whitelisted by the installer's sudoers policy).
     """
-    if not _virsh_present():
-        return ("virsh is not installed on this host. Install the libvirt-clients "
-                "package, then re-run systemd/install-service.sh.")
-
-    command = _virsh_command(action, vm_id)
-    if not command:
-        return "sudo is not installed. Re-run systemd/install-service.sh to configure VM controls."
-
     async def _exec(cmd: List[str]) -> tuple:
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -1420,7 +1420,7 @@ async def _run_virsh_action(action: str, vm_id: str) -> Optional[str]:
             return None, f"Could not execute {cmd[0]}: permission denied.", -1
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=VM_ACTION_TIMEOUT
+                proc.communicate(), timeout=timeout
             )
         except asyncio.TimeoutError:
             try:
@@ -1428,24 +1428,44 @@ async def _run_virsh_action(action: str, vm_id: str) -> Optional[str]:
                 await proc.communicate()
             except (ProcessLookupError, Exception):
                 pass
-            return None, (f"virsh {action} timed out after {int(VM_ACTION_TIMEOUT)}s. "
-                          f"The guest may be unresponsive; try Poweroff to force-stop it."), -1
+            return proc, timeout_message, -1
         err = (stderr.decode(errors="replace").strip()
                or stdout.decode(errors="replace").strip())
         return proc, err, proc.returncode
 
     proc, err, rc = await _exec(command)
     if proc is None:
-        return err
+        return proc, err, rc
     if rc != 0 and _is_pkttyagent_unsupported_error(err):
         retry = _without_pkttyagent_argv(command)
         if retry:
             proc2, err2, rc2 = await _exec(retry)
-            if proc2 is None:
-                return err2
-            if rc2 == 0:
-                return None
+            if proc2 is None or rc2 == 0:
+                return proc2, err2, rc2
             err, rc = err2, rc2
+    return proc, err, rc
+
+
+async def _run_virsh_action(action: str, vm_id: str) -> Optional[str]:
+    """Run a constrained virsh command as the privileged fallback path.
+
+    Returns ``None`` on success, or a human-readable error string on failure.
+    """
+    if not _virsh_present():
+        return ("virsh is not installed on this host. Install the libvirt-clients "
+                "package, then re-run systemd/install-service.sh.")
+
+    command = _virsh_command(action, vm_id)
+    if not command:
+        return "sudo is not installed. Re-run systemd/install-service.sh to configure VM controls."
+
+    proc, err, rc = await _run_virsh_with_retry(
+        command, timeout=VM_ACTION_TIMEOUT,
+        timeout_message=(f"virsh {action} timed out after {int(VM_ACTION_TIMEOUT)}s. "
+                         f"The guest may be unresponsive; try Poweroff to force-stop it."),
+    )
+    if proc is None:
+        return err
     if rc != 0:
         return _humanize_vm_error(err, action, rc)
     return None
@@ -2051,18 +2071,12 @@ async def control_vm(vm_id: str, action: str, payload: Optional[VMActionRequest]
 
 async def _read_domain_state(vm_id: str) -> Optional[str]:
     """Best-effort read of a domain's current state name after an action."""
-    state_names = {
-        libvirt.VIR_DOMAIN_NOSTATE: "no_state", libvirt.VIR_DOMAIN_RUNNING: "running",
-        libvirt.VIR_DOMAIN_BLOCKED: "blocked", libvirt.VIR_DOMAIN_PAUSED: "paused",
-        libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown", libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
-        libvirt.VIR_DOMAIN_CRASHED: "crashed", libvirt.VIR_DOMAIN_PMSUSPENDED: "pmsuspended",
-    }
     try:
         domain, error = await _resolve_domain(vm_id)
         if error or domain is None:
             return None
         info = await _run_libvirt(domain.info, timeout=5.0)
-        return state_names.get(info[0], "unknown")
+        return VM_STATE_NAMES.get(info[0], "unknown")
     except Exception:
         return None
 
@@ -2789,37 +2803,12 @@ async def _run_virsh_modify(command: List[str]) -> Optional[str]:
     """
     if not command:
         return "sudo/virsh not available"
-
-    async def _exec(cmd: List[str]) -> Optional[str]:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-            err = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
-            if proc.returncode != 0:
-                return err or f"virsh command failed (exit code {proc.returncode})"
-            return None
-        except asyncio.TimeoutError:
-            return "virsh command timed out"
-        except Exception as e:
-            return str(e)
-
-    err = await _exec(command)
-    if err and _is_pkttyagent_unsupported_error(err):
-        retry = _without_pkttyagent_argv(command)
-        if retry:
-            retry_err = await _exec(retry)
-            # If retry succeeds (None) return success; otherwise return
-            # the retry's error only if it is not the same pkttyagent complaint.
-            if retry_err is None:
-                return None
-            # Prefer the retry error when it is more informative than the
-            # original unsupported-option noise.
-            if not _is_pkttyagent_unsupported_error(retry_err):
-                return retry_err
-    return err
+    proc, err, rc = await _run_virsh_with_retry(command, timeout=30)
+    if proc is None:
+        return err
+    if rc != 0:
+        return err or f"virsh command failed (exit code {rc})"
+    return None
 
 
 
@@ -2838,13 +2827,6 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
     # Ensure connection is alive before attempting operations
     if not await _ensure_libvirt_conn():
         return None
-
-    state_map = {
-        libvirt.VIR_DOMAIN_NOSTATE: "no_state", libvirt.VIR_DOMAIN_RUNNING: "running",
-        libvirt.VIR_DOMAIN_BLOCKED: "blocked", libvirt.VIR_DOMAIN_PAUSED: "paused",
-        libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown", libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
-        libvirt.VIR_DOMAIN_CRASHED: "crashed", libvirt.VIR_DOMAIN_PMSUSPENDED: "pmsuspended",
-    }
 
     # Run blocking libvirt call in thread executor with timeout
     global libvirt_conn
@@ -2874,7 +2856,7 @@ async def get_vm_stats() -> Optional[List[Dict[str, Any]]]:
                 # All blocking libvirt reads for one domain run together in the
                 # executor so a slow guest cannot stall the event loop.
                 vm = await _run_libvirt(
-                    lambda d=domain: _collect_domain_snapshot(d, state_map),
+                    lambda d=domain: _collect_domain_snapshot(d, VM_STATE_NAMES),
                     timeout=10.0,
                 )
                 if vm is None:
@@ -3469,39 +3451,6 @@ async def acknowledge_incident(incident_id: int):
 async def operations_audit(limit: int = Query(30, ge=1, le=200)):
     with _ops_conn() as conn: return [dict(x) for x in conn.execute('SELECT * FROM operations_audit ORDER BY id DESC LIMIT ?', (limit,))]
 
-@app.get("/api/historical")
-async def historical(hours: int = Query(24, ge=1, le=168)):
-    """Historical samples from the single metric_history store.
-
-    This previously read a second, redundant SQLite file under /tmp that was
-    written on every telemetry tick with the same numbers. metric_history is
-    now the only source of truth.
-    """
-    rows = []
-    try:
-        cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
-        with _ops_conn() as conn:
-            cur = conn.execute(
-                "SELECT timestamp, cpu, memory, disk, net_rx FROM metric_history "
-                "WHERE timestamp > ? ORDER BY timestamp ASC",
-                (cutoff,),
-            )
-            for r in cur.fetchall():
-                try:
-                    ts = datetime.fromisoformat(r["timestamp"]).timestamp()
-                except (TypeError, ValueError):
-                    continue
-                rows.append({
-                    "ts": ts,
-                    "cpu": r["cpu"],
-                    "mem": r["memory"],
-                    "disk": r["disk"],
-                    "net": r["net_rx"],
-                })
-    except Exception:
-        logger.debug("Historical query failed", exc_info=True)
-    return {"count": len(rows), "data": rows}
-
 # REST API Endpoints
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -3513,30 +3462,6 @@ async def root():
         media_type="text/html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
     )
-
-
-@app.get("/api/auth/status")
-async def auth_status():
-    """Report VM/service authorization state for UI visibility (P1)."""
-    status = {
-        "libvirt_available": LIBVIRT_AVAILABLE,
-        "libvirt_rw": False,
-        "virsh_policy_available": False,
-        "systemctl_policy_available": False,
-        "user_uid": os.getuid(),
-        "auth_required": bool(MONITORX_AUTH_TOKEN),
-        "authenticated": True,
-    }
-    # Path 1 for VM control: read-write libvirt connection (root, or the
-    # dashboard user in the 'libvirt'/'kvm' group).
-    if LIBVIRT_AVAILABLE:
-        rw_conn, _ = await _ensure_libvirt_rw_conn()
-        status["libvirt_rw"] = rw_conn is not None
-    # Path 2 for VM control: the exact-argv sudo virsh policy.
-    status["virsh_policy_available"] = await _virsh_fallback_allowed()
-    # Service control: the exact-argv systemctl sudo policy (root counts).
-    status["systemctl_policy_available"] = await _service_sudo_allowed()
-    return status
 
 
 # Diagnostic / process-kill audit trail. Lives in the private state directory
@@ -3589,47 +3514,9 @@ async def get_stats():
     return await collect_all_stats()
 
 
-@app.get("/api/stats/cpu")
-async def get_cpu():
-    return await get_cpu_stats()
-
-
-@app.get("/api/stats/memory")
-async def get_memory():
-    return await get_memory_stats()
-
-
-@app.get("/api/stats/disk")
-async def get_disk():
-    return await get_disk_stats()
-
-
-@app.get("/api/stats/network")
-async def get_network():
-    return await get_network_stats()
-
-
-@app.get("/api/stats/gpu")
-async def get_gpu():
-    gpu = await get_gpu_stats()
-    if gpu is None:
-        raise HTTPException(status_code=404, detail="GPU monitoring not available")
-    return gpu
-
-
 @app.get("/api/stats/processes")
 async def get_processes(limit: int = Query(30, ge=1, le=500)):
     return await get_process_stats(limit)
-
-
-@app.get("/api/stats/system")
-async def get_system():
-    return await get_system_info()
-
-
-@app.get("/api/stats/thermal")
-async def get_thermal():
-    return await get_thermal_stats()
 
 
 # =============================================================================
@@ -4142,16 +4029,6 @@ async def kill_processes_batch(payload: BatchKillRequest):
 
 # Power actions are intentionally not exposed to unauthenticated dashboard clients.
 # Service-level actions are available through the constrained service-control API below.
-@app.post("/api/system/reboot", status_code=403)
-async def reboot_system():
-    raise HTTPException(status_code=403, detail="Reboot is disabled from the unauthenticated dashboard.")
-
-
-@app.post("/api/system/shutdown", status_code=403)
-async def shutdown_system():
-    raise HTTPException(status_code=403, detail="Shutdown is disabled from the unauthenticated dashboard.")
-
-
 SYSTEMCTL_BIN = shutil.which("systemctl") or "/usr/bin/systemctl"
 SYSCTL_BIN = shutil.which("sysctl") or "/usr/sbin/sysctl"
 JOURNALCTL_BIN = shutil.which("journalctl") or "/usr/bin/journalctl"
@@ -4407,7 +4284,7 @@ async def troubleshoot_health_check():
             "name": "RAM & Swap Exhaustion",
             "status": "critical",
             "value": f"{mem_pct}% RAM used ({avail_mb:.0f} MB free), {swap_pct}% Swap",
-            "message": f"Memory critically low! Risk of OOM (Out Of Memory) process kills.",
+            "message": "Memory critically low! Risk of OOM (Out Of Memory) process kills.",
             "remediation": "Clear clean page caches using the 'Clear RAM Cache' button. If usage remains high, identify top memory-consuming processes in the Processes tab and restart/terminate them, or allocate more swap space/physical RAM.",
             "fix": memory_fixes[0],
             "fixes": memory_fixes,
@@ -6173,60 +6050,7 @@ async def perform_remediation(req: RemediateRequest):
     return await run_remediation(req.action, req.target)
 
 
-class FixAllRequest(BaseModel):
-    """Batch auto-fix plan: list of {action, target} entries to execute."""
-    actions: List[Dict[str, Any]] = Field(default_factory=list, max_length=40)
-    confirm: bool = Field(default=False)
 
-
-@app.post("/api/troubleshoot/fix-all")
-async def troubleshoot_fix_all(req: FixAllRequest):
-    """
-    Execute a whole repair plan sequentially — the hub's one-click "Fix All".
-
-    When `actions` is empty the plan is rebuilt automatically from a fresh
-    health scan (every fixable failing check).  `confirm` must be true.
-    Returns one result entry per action with per-fix duration and an overall
-    summary.
-    """
-    if not req.confirm:
-        raise HTTPException(status_code=400, detail="Confirmation required for batch remediation.")
-
-    plan = list(req.actions)
-    if not plan:
-        scan = await troubleshoot_health_check()
-        for check in scan.get("checks", []):
-            fixes = check.get("fixes") or ([check["fix"]] if check.get("fix") else [])
-            for fix in fixes:
-                if fix.get("action") not in FIX_EXECUTORS and fix.get("action") not in FIX_ACTION_ALIASES:
-                    continue
-                plan.append({"action": fix["action"], "target": fix.get("target")})
-        if not plan:
-            return {"results": [], "summary": {"total": 0, "success": 0, "failed": 0},
-                    "message": "Scan found no fixable issues."}
-
-    results = []
-    for item in plan[:40]:
-        action = str(item.get("action", ""))
-        target = item.get("target")
-        meta = FIX_ACTION_META.get(FIX_ACTION_ALIASES.get(action, action), {})
-        try:
-            result = await run_remediation(action, target)
-        except HTTPException as e:
-            result = {"success": False, "message": e.detail, "action": action, "target": target,
-                      "duration_ms": 0, "timestamp": datetime.now().isoformat()}
-        result.setdefault("label", meta.get("label", action))
-        results.append(result)
-
-    summary = {
-        "total": len(results),
-        "success": sum(1 for r in results if r.get("success")),
-        "failed": sum(1 for r in results if not r.get("success")),
-    }
-    message = (f"Applied {summary['success']} of {summary['total']} fixes successfully."
-               if summary["failed"] == 0 else
-               f"{summary['success']}/{summary['total']} fixes applied; {summary['failed']} need attention.")
-    return {"results": results, "summary": summary, "message": message}
 
 
 @app.get("/api/troubleshoot/fix-capabilities")
@@ -6392,7 +6216,7 @@ async def run_command(request: Request):
         raise HTTPException(status_code=504, detail="Diagnostic command timed out after 15 seconds.")
     except FileNotFoundError:
         raise HTTPException(status_code=501, detail=f"Diagnostic command is unavailable: {args[0]}")
-    except Exception as e:
+    except Exception:
         logger.exception("Diagnostic command failed")
         raise HTTPException(status_code=500, detail="Diagnostic command could not be executed.")
 

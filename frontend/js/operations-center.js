@@ -8,7 +8,6 @@
   const esc = value => { const d = document.createElement('div'); d.textContent = value ?? ''; return d.innerHTML; };
   const openModal = id => { const m = document.getElementById(id); if (m) m.classList.add('show'); };
   const closeModal = id => { const m = document.getElementById(id); if (m) m.classList.remove('show'); };
-  const closeModals = () => document.querySelectorAll('.modal.show').forEach(m => m.classList.remove('show'));
 
   async function load() {
     const range = el('ops-range').value;

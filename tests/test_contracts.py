@@ -123,12 +123,12 @@ class RuntimeSmoke(unittest.TestCase):
     def test_health_is_public_and_control_api_is_protected(self):
         self.client.cookies.clear()
         self.assertEqual(self.client.get("/api/health").status_code, 200)
-        self.assertEqual(self.client.get("/api/stats/cpu").status_code, 401)
+        self.assertEqual(self.client.get("/api/stats/processes").status_code, 401)
         self.assertEqual(
             self.client.post("/api/auth/login", json={"token": "contract-test-secret"}).status_code,
             200,
         )
-        self.assertEqual(self.client.get("/api/stats/cpu").status_code, 200)
+        self.assertEqual(self.client.get("/api/stats/processes").status_code, 200)
 
     def test_removed_routes_are_not_registered(self):
         self.assertEqual(self.client.get("/api/stats/containers").status_code, 404)
