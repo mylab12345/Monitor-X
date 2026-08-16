@@ -22,7 +22,9 @@ services:
       # Containers must listen on their network interface; localhost remains
       # the default for direct host launches.
       MONITORX_HOST: "0.0.0.0"
-      MONITORX_AUTH_TOKEN: "${MONITORX_AUTH_TOKEN:-}"
+      # Fail closed: a published host-control dashboard must never start with
+      # authentication silently disabled.
+      MONITORX_AUTH_TOKEN: "${MONITORX_AUTH_TOKEN:?Set MONITORX_AUTH_TOKEN to a long random value}"
       MONITORX_LIBVIRT_URI: "qemu:///system"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]

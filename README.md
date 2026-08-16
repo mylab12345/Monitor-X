@@ -16,8 +16,11 @@ Open <http://localhost:8080>.
 ## Run with Docker
 
 ```bash
-MONITORX_AUTH_TOKEN="change-this" docker compose up --build -d
+export MONITORX_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+docker compose up --build -d
 ```
+
+Compose intentionally refuses to start without a non-empty token.
 
 The container provides dashboard metrics. Host systemd control requires the native installation; mount the libvirt socket only when VM monitoring is needed.
 
@@ -27,7 +30,9 @@ Copy `.env.example` to `.env` for local settings. Common variables:
 
 - `MONITORX_HOST` — bind address (default: `127.0.0.1`)
 - `MONITORX_PORT` — HTTP port (default: `8080`)
-- `MONITORX_AUTH_TOKEN` — required when the app is exposed beyond localhost
+- `MONITORX_AUTH_TOKEN` — required by Docker Compose and for any network exposure
+- `MONITORX_COOKIE_SECURE` — set `true` when served through trusted HTTPS
+- `MONITORX_CONNECTIVITY_TARGET` — optional explicit host for outbound health probes (disabled by default)
 - `MONITORX_STATE_DIR` — directory for local state and audit data
 
 ## Project layout

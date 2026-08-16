@@ -25,7 +25,7 @@ if [ ! -f "$VENV_PYTHON" ]; then
 fi
 
 echo "=== Monitoring Dashboard ==="
-echo "Starting server on http://localhost:8080"
+echo "Starting server on http://${MONITORX_HOST:-127.0.0.1}:${MONITORX_PORT:-8080}"
 echo "Press Ctrl+C to stop"
 echo ""
 cd "$SCRIPT_DIR/backend"

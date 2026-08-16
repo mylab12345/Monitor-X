@@ -1723,12 +1723,6 @@ async function runDnsTest() {
             html += `<div style="color:var(--danger)"><b>Local Resolver:</b> Failed (${data.resolutions.local?.error})</div>`;
         }
 
-        if (data.resolutions.google_dns?.success) {
-            html += `<div style="color:var(--accent)"><b>Google DNS (8.8.8.8):</b> ${data.resolutions.google_dns.ips.join(', ')}</div>`;
-        } else {
-            html += `<div style="color:var(--danger)"><b>Google DNS:</b> Failed</div>`;
-        }
-
         resultsBox.innerHTML = html;
     } catch (e) {
         resultsBox.innerHTML = `<p style="color:var(--danger)">Error: ${escapeHtml(e.message)}</p>`;
@@ -2540,11 +2534,10 @@ function loadConsoleDependencies() {
 
     const style = document.createElement('link');
     style.rel = 'stylesheet';
-    style.href = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css';
+    style.href = '/static/vendor/simple-terminal.css';
     document.head.appendChild(style);
     const scripts = [
-        'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js',
-        'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js',
+        '/static/vendor/simple-terminal.js',
     ];
     consoleDependenciesPromise = scripts.reduce((promise, src) => promise.then(() => new Promise((resolve, reject) => {
         const script = document.createElement('script');
