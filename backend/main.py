@@ -14,26 +14,33 @@ import os
 import platform
 import re
 import secrets
+import shutil
 import signal
 import socket
 import sqlite3
-import shutil
+import ssl
 import time
-import urllib.request
-import xml.etree.ElementTree as ET
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
+import psutil
+from defusedxml import ElementTree as ET
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel, Field
-import psutil
 
 # Optional imports for GPU monitoring
 try:
@@ -66,6 +73,13 @@ MAX_DIAGNOSTIC_OUTPUT = 100_000
 # Browser sessions are short-lived random ids mapped to an expiry, never the
 # shared secret itself. See _issue_session/_session_valid below.
 SESSION_TTL_SECONDS = max(int(os.environ.get("MONITORX_SESSION_TTL", str(12 * 3600))), 60)
+MAX_SESSIONS = max(int(os.environ.get("MONITORX_MAX_SESSIONS", "4096")), 16)
+LOGIN_WINDOW_SECONDS = 60.0
+LOGIN_MAX_FAILURES = 5
+LOGIN_BLOCK_SECONDS = 30.0
+MAX_WEBSOCKET_CONNECTIONS = max(int(os.environ.get("MONITORX_MAX_WEBSOCKETS", "100")), 1)
+MAX_CONSOLE_CONNECTIONS = max(int(os.environ.get("MONITORX_MAX_CONSOLES", "4")), 1)
+COOKIE_SECURE = os.environ.get("MONITORX_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes"}
 # Optional hardware integrations must never hold up the first dashboard frame.
 # A later telemetry frame fills them in once available.
 OPTIONAL_COLLECTOR_TIMEOUT = max(float(os.environ.get("MONITORX_OPTIONAL_TIMEOUT", "2")), 0.5)
@@ -99,7 +113,7 @@ if NVML_AVAILABLE:
         nvml.nvmlInit()
         logger.info("NVML initialized successfully")
     except Exception as e:
-        logger.warning(f"NVML initialization failed: {e}")
+        logger.warning("NVML initialization failed: %s", e)
         NVML_AVAILABLE = False
 
 # ==============================================================================
@@ -249,29 +263,32 @@ async def _ensure_libvirt_rw_conn():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager"""
-    # Startup
+    """Start and deterministically stop background telemetry resources."""
     init_operations_store()
-    asyncio.create_task(broadcast_stats())
+    broadcast_task = asyncio.create_task(broadcast_stats(), name="monitorx-broadcast")
     logger.info("Monitoring Dashboard started")
-    yield
-    # Shutdown
-    if NVML_AVAILABLE:
-        try:
-            nvml.nvmlShutdown()
-        except Exception:
-            pass
-    for _conn in (libvirt_conn, libvirt_rw_conn):
-        if _conn:
+    try:
+        yield
+    finally:
+        broadcast_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await broadcast_task
+        if NVML_AVAILABLE:
             try:
-                _conn.close()
-            except Exception:
-                pass
-    global _libvirt_executor
-    if _libvirt_executor:
-        _libvirt_executor.shutdown(wait=False)
-        _libvirt_executor = None
-    logger.info("Monitoring Dashboard stopped")
+                nvml.nvmlShutdown()
+            except Exception as exc:
+                logger.debug("NVML shutdown failed: %s", exc)
+        for connection in (libvirt_conn, libvirt_rw_conn):
+            if connection:
+                try:
+                    connection.close()
+                except Exception as exc:
+                    logger.debug("Libvirt connection shutdown failed: %s", exc)
+        global _libvirt_executor
+        if _libvirt_executor:
+            _libvirt_executor.shutdown(wait=False, cancel_futures=True)
+            _libvirt_executor = None
+        logger.info("Monitoring Dashboard stopped")
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -341,12 +358,20 @@ def _harden_file_mode(path: Path) -> None:
 # server-side. Logout deletes the mapping, so the credential is actually dead.
 # ==============================================================================
 _sessions: Dict[str, float] = {}
+_login_failures: Dict[str, collections.deque] = {}
+_login_blocked_until: Dict[str, float] = {}
 
 
 def _prune_sessions(now: Optional[float] = None) -> None:
     now = time.time() if now is None else now
     for sid in [s for s, exp in _sessions.items() if exp <= now]:
         _sessions.pop(sid, None)
+    # Keep memory bounded even if a valid token is replayed for many logins.
+    # Reserve one slot for the session _issue_session is about to add.
+    overflow = len(_sessions) - MAX_SESSIONS + 1
+    if overflow > 0:
+        for sid, _ in sorted(_sessions.items(), key=lambda item: item[1])[:overflow]:
+            _sessions.pop(sid, None)
 
 
 def _issue_session() -> str:
@@ -355,6 +380,41 @@ def _issue_session() -> str:
     sid = secrets.token_urlsafe(32)
     _sessions[sid] = time.time() + SESSION_TTL_SECONDS
     return sid
+
+
+def _login_client_key(request: Request) -> str:
+    """Use the direct peer address; untrusted forwarding headers are ignored."""
+    return request.client.host if request.client else "unknown"
+
+
+def _login_retry_after(client_key: str, now: Optional[float] = None) -> int:
+    now = time.monotonic() if now is None else now
+    until = _login_blocked_until.get(client_key, 0.0)
+    if until <= now:
+        _login_blocked_until.pop(client_key, None)
+        return 0
+    return max(1, int(until - now) + 1)
+
+
+def _record_login_failure(client_key: str) -> None:
+    now = time.monotonic()
+    if len(_login_failures) >= 4096 and client_key not in _login_failures:
+        # Direct peer addresses are untrusted input; bound the limiter itself.
+        oldest_key = next(iter(_login_failures))
+        _login_failures.pop(oldest_key, None)
+        _login_blocked_until.pop(oldest_key, None)
+    failures = _login_failures.setdefault(client_key, collections.deque())
+    while failures and failures[0] <= now - LOGIN_WINDOW_SECONDS:
+        failures.popleft()
+    failures.append(now)
+    if len(failures) >= LOGIN_MAX_FAILURES:
+        _login_blocked_until[client_key] = now + LOGIN_BLOCK_SECONDS
+        failures.clear()
+
+
+def _clear_login_failures(client_key: str) -> None:
+    _login_failures.pop(client_key, None)
+    _login_blocked_until.pop(client_key, None)
 
 
 def _session_valid(sid: str) -> bool:
@@ -405,6 +465,21 @@ def _websocket_authenticated(websocket: WebSocket) -> bool:
     bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     bearer = bearer or websocket.query_params.get("token", "")
     return _credential_valid(bearer, websocket.cookies.get(AUTH_COOKIE_NAME, ""))
+
+
+def _websocket_origin_allowed(websocket: WebSocket) -> bool:
+    """Reject cross-site browser upgrades while permitting non-browser clients.
+
+    Browsers always send Origin. CLI clients commonly omit it, which is safe
+    because a malicious website cannot suppress or forge this header.
+    """
+    origin = websocket.headers.get("origin")
+    if origin is None:
+        return True
+    parsed = urlparse(origin)
+    host = websocket.headers.get("host", "").lower().rstrip(".")
+    origin_host = parsed.netloc.lower().rstrip(".")
+    return parsed.scheme in {"http", "https"} and bool(host) and origin_host == host
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -488,15 +563,27 @@ async def auth_login(payload: AuthLoginRequest, request: Request):
     """Create a short-lived browser session for protected deployments."""
     if not MONITORX_AUTH_TOKEN:
         return {"authenticated": True, "auth_required": False}
+    client_key = _login_client_key(request)
+    retry_after = _login_retry_after(client_key)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many authentication attempts. Try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
     if not hmac.compare_digest(payload.token, MONITORX_AUTH_TOKEN):
+        _record_login_failure(client_key)
         raise HTTPException(status_code=401, detail="Invalid MonitorX authentication token.")
+    _clear_login_failures(client_key)
     response = JSONResponse({"authenticated": True, "auth_required": True})
     # The cookie carries a revocable session id, never MONITORX_AUTH_TOKEN.
+    # Proxy headers are intentionally ignored unless the operator explicitly
+    # requests Secure cookies; trusting arbitrary X-Forwarded-Proto is unsafe.
     response.set_cookie(
         AUTH_COOKIE_NAME,
         _issue_session(),
         httponly=True,
-        secure=(request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"),
+        secure=(request.url.scheme == "https" or COOKIE_SECURE),
         samesite="strict",
         max_age=SESSION_TTL_SECONDS,
     )
@@ -621,12 +708,13 @@ async def _run_cmd(cmd: list, timeout: float = 15.0, **kwargs):
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        try:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # Cancellation during application shutdown must reap the child too;
+        # otherwise its pipe transport survives until after the loop closes.
+        with suppress(ProcessLookupError):
             proc.kill()
-            await proc.communicate()
-        except Exception:
-            pass
+        with suppress(Exception):
+            await asyncio.shield(proc.communicate())
         raise
     return proc.returncode, stdout, stderr
 
@@ -637,15 +725,19 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
     
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket) -> bool:
+        if len(self.active_connections) >= MAX_WEBSOCKET_CONNECTIONS:
+            await websocket.close(code=1013, reason="Too many WebSocket connections")
+            return False
         await websocket.accept()
         self.active_connections.append(websocket)
-        logger.info(f"Client connected. Total: {len(self.active_connections)}")
+        logger.info("Client connected. Total: %s", len(self.active_connections))
+        return True
     
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-        logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
+        logger.info("Client disconnected. Total: %s", len(self.active_connections))
     
     async def broadcast(self, message: dict):
         """Fan out one frame concurrently so a slow browser cannot stall all peers."""
@@ -907,7 +999,7 @@ async def get_gpu_stats() -> Optional[List[Dict[str, Any]]]:
                 "power_limit": round(power_limit, 1)
             })
     except Exception as e:
-        logger.error(f"Error getting GPU stats: {e}")
+        logger.error("Error getting GPU stats: %s", e)
         return None
     
     return gpus if gpus else None
@@ -2295,16 +2387,22 @@ def _vm_insights_ssh_argv(config: Dict[str, Any], remote_command) -> List[str]:
 
 
 async def _read_stream_capped(stream, cap: int):
-    """Read at most ``cap`` bytes so a guest cannot exhaust host memory."""
+    """Retain at most ``cap`` bytes while draining the pipe to EOF."""
     chunks = []
-    total = 0
-    while total < cap:
-        chunk = await stream.read(min(65536, cap - total))
+    retained = 0
+    truncated = False
+    while True:
+        chunk = await stream.read(65536)
         if not chunk:
             break
-        chunks.append(chunk)
-        total += len(chunk)
-    return b"".join(chunks), total >= cap
+        remaining = cap - retained
+        if remaining > 0:
+            kept = chunk[:remaining]
+            chunks.append(kept)
+            retained += len(kept)
+        if len(chunk) > max(remaining, 0) or retained >= cap:
+            truncated = True
+    return b"".join(chunks), truncated
 
 
 async def _run_insights_ssh(config: Dict[str, Any], remote_command) -> Dict[str, Any]:
@@ -2328,6 +2426,12 @@ async def _run_insights_ssh(config: Dict[str, Any], remote_command) -> Dict[str,
         (stdout_b, out_capped), (stderr_b, _err_capped) = await asyncio.wait_for(
             _collect(), timeout=INSIGHTS_SSH_TIMEOUT
         )
+        # Custom capped readers replace communicate(); explicitly close the
+        # completed transport so short-lived test/event loops retain no pipes.
+        transport = getattr(proc, "_transport", None)
+        if transport is not None:
+            transport.close()
+            await asyncio.sleep(0)
         return {
             "returncode": proc.returncode if proc.returncode is not None else -1,
             "stdout": stdout_b.decode("utf-8", errors="replace"),
@@ -2335,15 +2439,15 @@ async def _run_insights_ssh(config: Dict[str, Any], remote_command) -> Dict[str,
             "truncated": out_capped,
             "timed_out": False,
         }
-    except asyncio.TimeoutError:
-        try:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        with suppress(ProcessLookupError):
             proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
-            pass
+        # communicate() closes both pipe transports as well as reaping the
+        # process; wait() alone leaves transports alive after loop shutdown.
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         return {
             "returncode": -1,
             "stdout": "",
@@ -3095,10 +3199,12 @@ async def broadcast_stats():
         started = time.monotonic()
         try:
             stats = await collect_all_stats()
-            await asyncio.to_thread(persist_snapshot_and_evaluate_alerts, stats)
+            webhook_jobs = await asyncio.to_thread(persist_snapshot_and_evaluate_alerts, stats)
+            for job in webhook_jobs:
+                asyncio.create_task(_notify_webhook(*job))
             await manager.broadcast(stats.model_dump())
         except Exception as e:
-            logger.error(f"Error broadcasting stats: {e}")
+            logger.error("Error broadcasting stats: %s", e)
         elapsed = time.monotonic() - started
         await asyncio.sleep(max(0.1, STATS_INTERVAL - elapsed))
 
@@ -3170,7 +3276,9 @@ _HISTORY_CLEANUP_INTERVAL = 600.0  # seconds; the DELETE scans the whole table
 
 
 def persist_snapshot_and_evaluate_alerts(stats):
+    """Persist a snapshot and return webhook jobs to schedule on the main loop."""
     global _last_history_cleanup
+    webhook_jobs = []
     values = _metrics(stats); now = datetime.now().isoformat()
     with _ops_conn() as conn:
         conn.execute("INSERT OR REPLACE INTO metric_history VALUES (?,?,?,?,?,?)", (now, values['cpu'], values['memory'], values['disk'], values['net_rx'], values['net_tx']))
@@ -3217,15 +3325,15 @@ def persist_snapshot_and_evaluate_alerts(stats):
                     severity = 'critical' if value >= rule['threshold'] + 5 else 'warning'
                     conn.execute("INSERT INTO incidents(timestamp,rule_id,title,severity,value) VALUES(?,?,?,?,?)", (now, rule['id'], rule['name'], severity, value))
                     conn.execute("INSERT INTO operations_audit(timestamp,action,target,outcome,detail) VALUES(?,?,?,?,?)", (now, 'alert_opened', rule['id'], 'success', f'{value:.1f}'))
-                    # Optional outbound notification (fires on the event loop).
-                    try:
-                        asyncio.create_task(_notify_webhook(
-                            rule['name'], severity, f"{value:.1f}", rule['metric'],
-                        ))
-                    except Exception as exc:
-                        logger.warning("Webhook scheduling failed: %s", exc)
+                    # This function runs in a worker thread. Return notification
+                    # arguments to broadcast_stats(), which owns the event loop.
+                    webhook_jobs.append(
+                        (rule['name'], severity, f"{value:.1f}", rule['metric'])
+                    )
             elif last is not None and last['status'] == 'open':
                 conn.execute("UPDATE incidents SET status='resolved', acknowledged_at=COALESCE(acknowledged_at,?) WHERE id=?", (now, last['id']))
+    return webhook_jobs
+
 
 def audit_operation(action, target, outcome='success', detail=''):
     with _ops_conn() as conn:
@@ -3253,12 +3361,45 @@ def _webhook_config():
     }
 
 
+def _resolve_public_address(hostname: str, port: int) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a host and return one public address, rejecting mixed answers."""
+    try:
+        infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return None, f"Host '{hostname}' could not be resolved."
+    addresses = []
+    for info in infos:
+        addr = info[4][0].split("%")[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if (not ip.is_global or ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return None, f"Host '{hostname}' resolves to non-public address {ip}."
+        addresses.append(str(ip))
+    if not addresses:
+        return None, f"Host '{hostname}' did not resolve to a usable public address."
+    return addresses[0], None
+
+
 def _fire_webhook_sync(title: str, severity: str, value: str, metric: str) -> Optional[str]:
-    """Best-effort synchronous webhook POST. Returns error string or None."""
+    """POST to a validated, pinned public IP without following redirects."""
     cfg = _webhook_config()
     if not cfg["enabled"] or not cfg["url"]:
         return None
-    payload = {
+    url = cfg["url"]
+    if not url.isascii() or any(ord(char) <= 32 or ord(char) == 127 for char in url):
+        return "Stored webhook URL is invalid."
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return "Stored webhook URL is invalid."
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    address, reason = _resolve_public_address(parsed.hostname, port)
+    if reason:
+        return reason
+
+    payload = json.dumps({
         "title": title,
         "severity": severity,
         "value": value,
@@ -3266,19 +3407,58 @@ def _fire_webhook_sync(title: str, severity: str, value: str, metric: str) -> Op
         "host": socket.gethostname(),
         "timestamp": datetime.now().isoformat(),
         "source": "MonitorX",
-    }
-    req = urllib.request.Request(
-        cfg["url"],
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": "MonitorX/1.0"},
-        method="POST",
-    )
+    }).encode("utf-8")
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+
+    # Connect to the address that was just validated. Keeping the original
+    # hostname for Host and TLS SNI prevents DNS-rebinding between check/send.
+    raw = None
+    wrapped = None
     try:
-        with urllib.request.urlopen(req, timeout=WEBHOOK_TIMEOUT) as resp:
-            resp.read()
+        raw = socket.create_connection((address, port), timeout=WEBHOOK_TIMEOUT)
+        sock = raw
+        if parsed.scheme == "https":
+            wrapped = ssl.create_default_context().wrap_socket(raw, server_hostname=parsed.hostname)
+            sock = wrapped
+        host_header = parsed.hostname
+        if ":" in host_header:
+            host_header = f"[{host_header}]"
+        if parsed.port and parsed.port not in {80, 443}:
+            host_header = f"{host_header}:{parsed.port}"
+        request_bytes = (
+            f"POST {path} HTTP/1.1\r\n"
+            f"Host: {host_header}\r\n"
+            "Content-Type: application/json\r\n"
+            "User-Agent: MonitorX/1.0\r\n"
+            f"Content-Length: {len(payload)}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii") + payload
+        sock.sendall(request_bytes)
+        response = b""
+        while b"\r\n" not in response and len(response) < 4096:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            response += chunk
+        status_line = response.split(b"\r\n", 1)[0].decode("ascii", "replace")
+        match = re.match(r"HTTP/\d(?:\.\d)?\s+(\d{3})", status_line)
+        if not match:
+            return "Webhook returned an invalid HTTP response."
+        status = int(match.group(1))
+        if 300 <= status < 400:
+            return "Webhook redirects are refused to prevent SSRF."
+        if status < 200 or status >= 300:
+            return f"Webhook returned HTTP {status}."
         return None
     except Exception as exc:
         return str(exc)
+    finally:
+        try:
+            (wrapped or raw).close() if (wrapped or raw) else None
+        except OSError:
+            pass
 
 
 async def _notify_webhook(title: str, severity: str, value: str, metric: str):
@@ -3341,25 +3521,19 @@ async def update_alert_rule(rule_id: str, update: RuleUpdateRequest):
         if not row:
             raise HTTPException(status_code=404, detail="Alert rule not found")
 
-        sets = []
-        params = []
-        # CRITICAL FIX: Use explicit whitelist + safe parameterization instead of f-string
-        # (root cause: dynamic column construction from user input)
-        field_map = {
-            "name": update.name,
-            "metric": update.metric,
-            "threshold": update.threshold,
-            "cooldown_minutes": update.cooldown_minutes,
-            "enabled": update.enabled,
-        }
-        for col, val in field_map.items():
-            if val is not None:
-                sets.append(f"{col}=?")
-                params.append(int(val) if col == "enabled" else val)
-
-        if sets:
-            params.append(rule_id)
-            conn.execute(f"UPDATE alert_rules SET {', '.join(sets)} WHERE id=?", params)
+        # Keep SQL fully static. Even allowlisted identifier interpolation is
+        # needlessly hard for scanners and future reviewers to prove safe.
+        updates = (
+            ("UPDATE alert_rules SET name=? WHERE id=?", update.name),
+            ("UPDATE alert_rules SET metric=? WHERE id=?", update.metric),
+            ("UPDATE alert_rules SET threshold=? WHERE id=?", update.threshold),
+            ("UPDATE alert_rules SET cooldown_minutes=? WHERE id=?", update.cooldown_minutes),
+            ("UPDATE alert_rules SET enabled=? WHERE id=?",
+             int(update.enabled) if update.enabled is not None else None),
+        )
+        for statement, value in updates:
+            if value is not None:
+                conn.execute(statement, (value, rule_id))
 
         updated = conn.execute("SELECT * FROM alert_rules WHERE id=?", (rule_id,)).fetchone()
     audit_operation('alert_rule_updated', rule_id)
@@ -3389,41 +3563,25 @@ class WebhookConfigRequest(BaseModel):
     enabled: bool = True
 
 
-def _reject_ssrf_target(hostname: str) -> Optional[str]:
-    """Return a rejection reason if `hostname` resolves somewhere internal.
-
-    The webhook URL is attacker-controllable through the settings API and the
-    server then POSTs to it. Without this check it doubles as a blind SSRF
-    primitive against loopback services, link-local metadata endpoints
-    (169.254.169.254) and the rest of the private network the host sits on.
-    """
-    try:
-        infos = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
-        return f"Webhook host '{hostname}' could not be resolved."
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr.split("%")[0])
-        except ValueError:
-            continue
-        if (ip.is_loopback or ip.is_private or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            return (f"Webhook host '{hostname}' resolves to internal address "
-                    f"{ip}. Webhooks may only target public endpoints.")
-    return None
+def _reject_ssrf_target(hostname: str, port: int = 443) -> Optional[str]:
+    """Return a rejection reason unless a hostname resolves only publicly."""
+    _, reason = _resolve_public_address(hostname, port)
+    return reason
 
 
 @app.post('/api/operations/webhook')
 async def set_webhook_config(cfg: WebhookConfigRequest):
     if cfg.url:
+        if not cfg.url.isascii() or any(ord(char) <= 32 or ord(char) == 127 for char in cfg.url):
+            raise HTTPException(status_code=400, detail="Webhook URL must contain printable ASCII without whitespace.")
         parsed = urlparse(cfg.url)
         if (parsed.scheme not in {"http", "https"}
                 or not parsed.hostname
                 or parsed.username
                 or parsed.password):
             raise HTTPException(status_code=400, detail="Webhook URL must be an http(s) URL without embedded credentials.")
-        reason = await asyncio.to_thread(_reject_ssrf_target, parsed.hostname)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        reason = await asyncio.to_thread(_reject_ssrf_target, parsed.hostname, port)
         if reason:
             raise HTTPException(status_code=400, detail=reason)
     with _ops_conn() as conn:
@@ -3503,9 +3661,17 @@ async def get_audit(log_lines: int = Query(50, ge=1, le=500)):
     return {"entries": entries, "count": len(entries)}
 
 
+CLIENT_AUDIT_ACTIONS = {"diagnostic", "process_inspect", "report_export"}
+
+
 @app.post("/api/audit")
-async def post_audit(action: str = Query(...), detail: str = Query("")):
-    """Log a diagnostic or process kill action."""
+async def post_audit(
+    action: str = Query(..., min_length=1, max_length=32),
+    detail: str = Query("", max_length=256),
+):
+    """Log only the small set of non-privileged browser audit events."""
+    if action not in CLIENT_AUDIT_ACTIONS:
+        raise HTTPException(status_code=400, detail="Unsupported client audit action.")
     return {"logged": _append_audit_line(action, detail)}
 
 
@@ -3638,10 +3804,14 @@ async def health_check_endpoint():
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    if not _websocket_origin_allowed(websocket):
+        await websocket.close(code=4403, reason="WebSocket Origin is not allowed")
+        return
     if not _websocket_authenticated(websocket):
         await websocket.close(code=4401, reason="Authentication required")
         return
-    await manager.connect(websocket)
+    if not await manager.connect(websocket):
+        return
     try:
         try:
             stats = await asyncio.wait_for(collect_all_stats(), timeout=25.0)
@@ -3653,19 +3823,25 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json(stats.model_dump())
         
         while True:
-            data = await websocket.receive_text()
+            data = await asyncio.wait_for(websocket.receive_text(), timeout=90.0)
+            if len(data) > 64:
+                await websocket.close(code=1009, reason="Message too large")
+                break
             if data == "ping":
                 await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, asyncio.TimeoutError):
         manager.disconnect(websocket)
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+    except Exception as exc:
+        logger.error("WebSocket error: %s", exc)
         manager.disconnect(websocket)
 
 
 # =============================================================================
 # VM CONSOLE WEBSOCKET PROXY
 # =============================================================================
+
+_active_console_websockets: set = set()
+
 
 @app.websocket("/ws/vm-console/{vm_id}")
 async def vm_console_ws(websocket: WebSocket, vm_id: str):
@@ -3676,23 +3852,28 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
     Graphical VNC is intentionally not advertised: rendering it requires a
     dedicated noVNC client rather than a terminal emulator.
     """
+    if not _websocket_origin_allowed(websocket):
+        await websocket.close(code=4403, reason="WebSocket Origin is not allowed")
+        return
     if not _websocket_authenticated(websocket):
         await websocket.close(code=4401, reason="Authentication required")
         return
-    await websocket.accept()
-
+    if len(_active_console_websockets) >= MAX_CONSOLE_CONNECTIONS:
+        await websocket.close(code=1013, reason="Too many console connections")
+        return
     if not LIBVIRT_AVAILABLE:
         await websocket.close(code=1011, reason="libvirt is not installed")
         return
-
     if not VM_ID_PATTERN.fullmatch(vm_id):
-        await websocket.close(code=1011, reason="Invalid VM identifier")
+        await websocket.close(code=1008, reason="Invalid VM identifier")
         return
 
     domain, error = await _resolve_domain(vm_id)
     if error:
         await websocket.close(code=1011, reason=error)
         return
+    await websocket.accept()
+    _active_console_websockets.add(websocket)
 
     # The dashboard exposes a serial console only. xterm.js is a terminal
     # emulator, not a VNC renderer; advertising raw VNC bytes as a terminal
@@ -3744,7 +3925,8 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
             except Exception:
                 pass
         await websocket.send_json({"type": "error", "message": str(e)})
-        await websocket.close(code=1011, reason=str(e))
+        await websocket.close(code=1011, reason="Console process could not start")
+        _active_console_websockets.discard(websocket)
         return
 
     # Wrap the pty master in asyncio streams so reads never block the loop.
@@ -3766,7 +3948,8 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
         except OSError:
             pass
         await websocket.send_json({"type": "error", "message": str(e)})
-        await websocket.close(code=1011, reason=str(e))
+        await websocket.close(code=1011, reason="Console transport could not start")
+        _active_console_websockets.discard(websocket)
         return
 
     async def read_console():
@@ -3793,6 +3976,7 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
     except Exception:
         pass
     finally:
+        _active_console_websockets.discard(websocket)
         try:
             write_transport.close()
             read_transport.close()
@@ -3809,40 +3993,30 @@ async def vm_console_ws(websocket: WebSocket, vm_id: str):
 # Process management endpoints
 @app.get("/api/processes/{pid}")
 async def get_process_detail(pid: int):
-    """Get detailed process information.
+    """Get process metadata without exposing its environment or blocking I/O.
 
-    Fields that require elevated privileges (cmdline, environ, open files,
-    sockets) are read individually and degrade to a sensible placeholder on
-    ``AccessDenied`` instead of failing the whole request — an unprivileged
-    MonitorX can then still inspect the metadata of root-owned processes.
+    Environment variables are deliberately excluded: service credentials and
+    cloud tokens frequently live there. The psutil calls are moved to a worker
+    thread because several of them touch procfs and CPU sampling sleeps.
     """
-    try:
+    def collect() -> Dict[str, Any]:
         proc = psutil.Process(pid)
 
         def safe(getter, default):
             try:
                 value = getter()
                 return default if value is None else value
-            except (psutil.AccessDenied, psutil.ZombieProcess):
-                return default
-            except Exception:
+            except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
                 return default
 
-        connections = []
         try:
-            connections = [conn._asdict() for conn in proc.connections()]
-        except Exception:
+            connections = [conn._asdict() for conn in proc.net_connections()]
+        except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
             connections = []
-        open_files = []
         try:
-            open_files = [f._asdict() for f in proc.open_files() or []]
-        except Exception:
+            open_files = [item._asdict() for item in proc.open_files() or []]
+        except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
             open_files = []
-        environ = {}
-        try:
-            environ = dict(list(proc.environ().items())[:20])
-        except Exception:
-            environ = {}
 
         return {
             "pid": proc.pid,
@@ -3859,8 +4033,10 @@ async def get_process_detail(pid: int):
             "num_fds": safe(proc.num_fds, 0),
             "connections": connections,
             "open_files": open_files,
-            "environ": environ,
         }
+
+    try:
+        return await asyncio.to_thread(collect)
     except psutil.NoSuchProcess:
         raise HTTPException(status_code=404, detail="Process not found")
     except psutil.AccessDenied:
@@ -4037,7 +4213,8 @@ JOURNALCTL_BIN = shutil.which("journalctl") or "/usr/bin/journalctl"
 # can show whether the host is improving or degrading over time.
 _HEALTH_HISTORY = collections.deque(maxlen=60)
 DMESG_BIN = shutil.which("dmesg") or "/usr/bin/dmesg"
-SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@_.:-]*\.service$")
+# Reject option-like names, path separators, colons and traversal-like '..'.
+SERVICE_NAME_PATTERN = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9@_.-]*\.service$")
 SERVICE_ACTIONS = ("start", "stop", "restart", "reload", "enable", "disable")
 
 
@@ -4511,23 +4688,26 @@ async def troubleshoot_health_check():
             "fix": None,
         })
 
-    # 7. Network & DNS Connectivity
-    dns_ok = False
-    ping_ok = False
-    try:
-        socket.gethostbyname("dns.google")
-        dns_ok = True
-    except Exception:
-        pass
+    # 7. Network & DNS Connectivity. No third-party beacon is contacted unless
+    # the operator explicitly configures a probe target.
+    connectivity_target = os.environ.get("MONITORX_CONNECTIVITY_TARGET", "").strip()
+    dns_ok = not connectivity_target
+    ping_ok = not connectivity_target
+    if connectivity_target:
+        try:
+            await asyncio.get_running_loop().getaddrinfo(connectivity_target, None)
+            dns_ok = True
+        except Exception:
+            pass
 
-    try:
-        returncode, _, _ = await _run_cmd(
-            ["ping", "-c", "1", "-W", "2", "8.8.8.8"],
-            timeout=10.0,
-        )
-        ping_ok = (returncode == 0)
-    except Exception:
-        pass
+        try:
+            returncode, _, _ = await _run_cmd(
+                ["ping", "-c", "1", "-W", "2", connectivity_target],
+                timeout=10.0,
+            )
+            ping_ok = (returncode == 0)
+        except Exception:
+            pass
 
     if not ping_ok or not dns_ok:
         health_score -= 15
@@ -4565,8 +4745,9 @@ async def troubleshoot_health_check():
             "category": "Network",
             "name": "Network & DNS Connectivity",
             "status": "ok",
-            "value": "Outbound Internet & DNS operational",
-            "message": "Outbound networking and DNS resolution function correctly.",
+            "value": ("Outbound probe disabled" if not connectivity_target else f"{connectivity_target}: ping and DNS OK"),
+            "message": ("Set MONITORX_CONNECTIVITY_TARGET to enable an explicit outbound health probe."
+                        if not connectivity_target else "Configured networking and DNS probe succeeded."),
             "remediation": None,
             "fix": None,
         })
@@ -5052,14 +5233,10 @@ async def troubleshoot_logs(
             raw_logs = ["Log read timed out after 15s. The journal may be under heavy write load."]
 
         parsed_logs = []
-        search_pattern = None
-        if search:
-            try:
-                search_pattern = re.compile(search, re.IGNORECASE)
-            except re.error:
-                # A malformed pattern should not make the inspector fail;
-                # fall back to a literal, escaped search instead.
-                search_pattern = re.compile(re.escape(search), re.IGNORECASE)
+        # Search is intentionally literal. Accepting attacker-controlled Python
+        # regular expressions here enabled catastrophic-backtracking event-loop
+        # denial of service against long journal lines.
+        search_pattern = re.compile(re.escape(search), re.IGNORECASE) if search else None
         
         for line in raw_logs:
             if not line:
@@ -5090,13 +5267,21 @@ async def troubleshoot_logs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _require_public_probe_target(host: str, port: int = 443) -> None:
+    """Prevent diagnostics from becoming a loopback/LAN/cloud-metadata scanner."""
+    reason = await asyncio.to_thread(_reject_ssrf_target, host, port)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+
 @app.post("/api/troubleshoot/ping")
 async def troubleshoot_ping(req: PingRequest):
     """Run ICMP ping test against specified host"""
     host = req.host.strip()
-    if not re.match(r'^[a-zA-Z0-9.-]+$', host):
+    if not re.fullmatch(r'[a-zA-Z0-9.-]+', host):
         raise HTTPException(status_code=400, detail="Invalid hostname or IP address format")
-    
+    await _require_public_probe_target(host)
+
     count = req.count
     try:
         returncode, stdout, stderr = await _run_cmd(
@@ -5128,9 +5313,10 @@ async def troubleshoot_port_check(req: PortCheckRequest):
     """Test TCP port connectivity"""
     host = req.host.strip()
     port = req.port
-    if not re.match(r'^[a-zA-Z0-9.-]+$', host) or not (1 <= port <= 65535):
+    if not re.fullmatch(r'[a-zA-Z0-9.-]+', host) or not (1 <= port <= 65535):
         raise HTTPException(status_code=400, detail="Invalid host or port range")
-    
+    await _require_public_probe_target(host, port)
+
     timeout = req.timeout
     start_time = time.time()
     try:
@@ -5166,11 +5352,12 @@ async def troubleshoot_port_check(req: PortCheckRequest):
 
 @app.post("/api/troubleshoot/dns-lookup")
 async def troubleshoot_dns_lookup(req: DNSCheckRequest):
-    """Test DNS resolution across local resolver and Google Public DNS"""
+    """Test public DNS resolution through the host resolver."""
     domain = req.domain.strip()
-    if not re.match(r'^[a-zA-Z0-9.-]+$', domain):
+    if not re.fullmatch(r'[a-zA-Z0-9.-]+', domain):
         raise HTTPException(status_code=400, detail="Invalid domain name format")
-    
+    await _require_public_probe_target(domain)
+
     results = {}
     
     # Local resolution
@@ -5184,19 +5371,8 @@ async def troubleshoot_dns_lookup(req: DNSCheckRequest):
     except Exception as e:
         results["local"] = {"success": False, "error": str(e)}
 
-    # Google DNS
-    try:
-        returncode, stdout, _ = await _run_cmd(
-            ["dig", "+short", "+time=2", "@8.8.8.8", domain],
-            timeout=10.0,
-        )
-        out = stdout.decode().strip()
-        if out:
-            results["google_dns"] = {"success": True, "ips": [line.strip() for line in out.split('\n') if line.strip()]}
-        else:
-            results["google_dns"] = {"success": False, "error": "No response"}
-    except (asyncio.TimeoutError, FileNotFoundError, OSError):
-        results["google_dns"] = {"success": False, "error": "dig tool unavailable"}
+    # Deliberately avoid querying a hard-coded third-party resolver. The local
+    # resolver result is sufficient and does not leak operator queries.
 
     return {"domain": domain, "resolutions": results}
 
@@ -5251,8 +5427,8 @@ async def troubleshoot_network_ports():
                             "pid": p_id,
                             "process": p_name or "unknown"
                         })
-        except (asyncio.TimeoutError, Exception) as e:
-            logger.error(f"Error getting listening ports: {e}")
+        except Exception as e:
+            logger.error("Error getting listening ports: %s", e)
             
     ports.sort(key=lambda x: x["port"])
     return ports
@@ -5616,7 +5792,9 @@ async def _fix_kill_top_cpu(target: Optional[str] = None) -> Dict[str, Any]:
         "systemd", "init", "kthreadd", "kernel",
         "libvirtd", "sshd", "dbus-daemon", "dbus-broker", "udevd",
         "systemd-journald", "systemd-udevd", "cron", "rsyslogd", "rsyslog",
-        "chronyd", "systemd-resolved", "NetworkManager", "networkmanager",
+        "chronyd", "systemd-resolved", "networkmanager", "systemd-networkd",
+        "postgres", "postgresql", "mysqld", "mariadbd", "redis-server",
+        "nginx", "apache2", "httpd", "containerd", "dockerd", "kubelet",
     }
     my_pid = os.getpid()
     my_uid = os.geteuid()
@@ -5733,9 +5911,12 @@ async def _fix_clean_tmp(target: Optional[str] = None) -> Dict[str, Any]:
     find = shutil.which("find")
     if not find:
         return {"success": False, "message": "find(1) is not available on this host."}
-    cmd = [find, "/tmp", "/var/tmp", "-maxdepth", "2", "-type", "f", "-mtime", "+7", "-print", "-delete"]
-    if os.geteuid() != 0:
-        cmd = ["sudo", "-n", *cmd]
+    # Delete only files owned by the service account (root-owned when running
+    # as root), never another user's temp data. Stay on each temp filesystem.
+    # These are cleanup roots, not locations used to create security-sensitive
+    # state; ownership, age, type, depth, size, and filesystem are constrained.
+    cmd = [find, "/tmp", "/var/tmp", "-xdev", "-maxdepth", "2", "-type", "f",  # nosec
+           "-uid", str(os.geteuid()), "-mtime", "+7", "-size", "+1k", "-print", "-delete"]
     try:
         returncode, stdout, stderr = await _run_cmd(cmd, timeout=90.0)
     except asyncio.TimeoutError:
@@ -5843,7 +6024,9 @@ async def _fix_rotate_logs(target: Optional[str] = None) -> Dict[str, Any]:
     logrotate = shutil.which("logrotate")
     if not logrotate:
         return {"success": False, "message": "logrotate is not installed on this host."}
-    conf = target if target and target.startswith("/") and ".." not in target and os.path.isfile(target) else "/etc/logrotate.conf"
+    if target and target != "/etc/logrotate.conf":
+        return {"success": False, "message": "Only /etc/logrotate.conf is an approved logrotate configuration."}
+    conf = "/etc/logrotate.conf"
     try:
         returncode, stdout, stderr = await _sudo_cmd([logrotate, "--force", conf], timeout=90.0)
     except asyncio.TimeoutError:
@@ -5908,7 +6091,15 @@ async def _fix_reset_network_manager(target: Optional[str] = None) -> Dict[str, 
 
 
 async def _fix_renew_dhcp_lease(target: Optional[str] = None) -> Dict[str, Any]:
-    interfaces = [target] if target else await _active_non_loopback_interfaces()
+    active_interfaces = await _active_non_loopback_interfaces()
+    if target:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}", target):
+            return {"success": False, "message": "Invalid network interface name."}
+        if target not in active_interfaces:
+            return {"success": False, "message": "The requested interface is not active."}
+        interfaces = [target]
+    else:
+        interfaces = active_interfaces
     if not interfaces:
         return {"success": False, "message": "No active non-loopback interface found for DHCP renewal."}
 
@@ -5938,7 +6129,7 @@ async def _fix_renew_dhcp_lease(target: Optional[str] = None) -> Dict[str, Any]:
                 if not path:
                     continue
                 try:
-                    await _sudo_cmd([path, *args[1:]], timeout=25.0)
+                    await _sudo_cmd([path, *args], timeout=25.0)
                 except Exception:
                     pass
             renewed.append(iface)
@@ -6043,10 +6234,16 @@ async def run_remediation(action: str, target: Optional[str] = None) -> Dict[str
 
 
 @app.post("/api/troubleshoot/remediate")
-async def perform_remediation(req: RemediateRequest):
-    """
-    Executes automated safe fix and remediation actions.
-    """
+async def perform_remediation(req: RemediateRequest, request: Request):
+    """Execute a remediation, requiring configured auth for critical actions."""
+    canonical = FIX_ACTION_ALIASES.get(req.action, req.action)
+    metadata = FIX_ACTION_META.get(canonical)
+    if metadata and metadata.get("level") == "critical":
+        if not MONITORX_AUTH_TOKEN or not _request_authenticated(request):
+            raise HTTPException(
+                status_code=403,
+                detail="Critical remediation requires a configured authentication token and signed-in session.",
+            )
     return await run_remediation(req.action, req.target)
 
 

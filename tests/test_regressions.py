@@ -216,6 +216,53 @@ class DeadCode(unittest.TestCase):
         self.assertNotIn("jinja2", [r.split("=")[0].split(">")[0].split("<")[0] for r in reqs if r])
 
 
+class SecurityHardeningContracts(unittest.TestCase):
+    """Regression coverage for the repository-wide 2026-08-16 hardening."""
+
+    def test_no_third_party_runtime_assets(self):
+        html = (FRONTEND / "index.html").read_text()
+        app_js = (FRONTEND / "js" / "app.js").read_text()
+        self.assertNotIn("fonts.googleapis.com", html)
+        self.assertNotIn("cdn.jsdelivr.net", app_js)
+        self.assertTrue((FRONTEND / "vendor" / "simple-terminal.js").is_file())
+
+    def test_compose_requires_authentication_token(self):
+        compose = (ROOT / "docker-compose.yml").read_text()
+        self.assertIn("MONITORX_AUTH_TOKEN:?", compose)
+        self.assertNotIn("MONITORX_AUTH_TOKEN:-", compose)
+
+    def test_sensitive_process_environment_is_not_returned(self):
+        main = _load_main()
+        import asyncio
+        detail = asyncio.run(main.get_process_detail(os.getpid()))
+        self.assertNotIn("environ", detail)
+
+    def test_cross_site_websocket_origin_is_rejected(self):
+        main = _load_main()
+
+        class FakeSocket:
+            headers = {"host": "monitor.example", "origin": "https://evil.example"}
+
+        self.assertFalse(main._websocket_origin_allowed(FakeSocket()))
+        FakeSocket.headers["origin"] = "https://monitor.example"
+        self.assertTrue(main._websocket_origin_allowed(FakeSocket()))
+
+    def test_private_probe_targets_are_rejected(self):
+        main = _load_main()
+        for host in ("127.0.0.1", "169.254.169.254", "10.0.0.1", "::1"):
+            self.assertIsNotNone(main._reject_ssrf_target(host, 80), host)
+
+    def test_log_search_is_literal_not_attacker_regex(self):
+        src = BACKEND.read_text()
+        self.assertIn("re.compile(re.escape(search), re.IGNORECASE)", src)
+        self.assertNotIn("re.compile(search, re.IGNORECASE)", src)
+
+    def test_dhclient_release_flag_is_preserved(self):
+        src = BACKEND.read_text()
+        self.assertIn("await _sudo_cmd([path, *args], timeout=25.0)", src)
+        self.assertNotIn("await _sudo_cmd([path, *args[1:]], timeout=25.0)", src)
+
+
 class VirshArgvContract(unittest.TestCase):
     """P2-13: sudoers policy and runtime argv must stay in sync."""
 
