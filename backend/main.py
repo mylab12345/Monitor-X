@@ -10,6 +10,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -59,30 +60,57 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def _env_number(name: str, default, *, minimum=None, maximum=None):
+    """Read a bounded numeric setting without making the app unbootable.
+
+    Environment files are operator-edited input. A typo, infinity, or NaN used
+    to raise during module import (or poison asyncio timeout calculations).
+    Invalid values now fall back to the documented default and emit a warning.
+    """
+    raw = os.environ.get(name)
+    value = default
+    if raw is not None:
+        try:
+            value = type(default)(raw)
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("value must be finite")
+        except (TypeError, ValueError):
+            logger.warning("Invalid %s=%r; using default %s", name, raw, default)
+            value = default
+    if minimum is not None and value < minimum:
+        logger.warning("%s=%s is below %s; clamping", name, value, minimum)
+        value = minimum
+    if maximum is not None and value > maximum:
+        logger.warning("%s=%s is above %s; clamping", name, value, maximum)
+        value = maximum
+    return value
+
+
 # Runtime tuning. Core telemetry stays responsive while slower host integrations
 # are cached independently (see _cached_optional below).
-MONITORX_HOST = os.environ.get("MONITORX_HOST", "127.0.0.1")
-STATS_INTERVAL = max(float(os.environ.get("MONITORX_STATS_INTERVAL", "2")), 0.5)
-PROCESS_STATS_LIMIT = max(int(os.environ.get("MONITORX_PROCESS_LIMIT", "30")), 1)
-PROCESS_STATS_TTL = max(float(os.environ.get("MONITORX_PROCESS_TTL", "5")), 1.0)
-NETWORK_CONNECTIONS_TTL = max(float(os.environ.get("MONITORX_CONNECTIONS_TTL", "10")), 1.0)
+MONITORX_HOST = os.environ.get("MONITORX_HOST", "127.0.0.1").strip() or "127.0.0.1"
+MONITORX_PORT = _env_number("MONITORX_PORT", 8080, minimum=1, maximum=65535)
+STATS_INTERVAL = _env_number("MONITORX_STATS_INTERVAL", 2.0, minimum=0.5, maximum=3600.0)
+PROCESS_STATS_LIMIT = _env_number("MONITORX_PROCESS_LIMIT", 30, minimum=1, maximum=10_000)
+PROCESS_STATS_TTL = _env_number("MONITORX_PROCESS_TTL", 5.0, minimum=1.0, maximum=3600.0)
+NETWORK_CONNECTIONS_TTL = _env_number("MONITORX_CONNECTIONS_TTL", 10.0, minimum=1.0, maximum=3600.0)
 MONITORX_AUTH_TOKEN = os.environ.get("MONITORX_AUTH_TOKEN", "").strip()
 AUTH_COOKIE_NAME = "monitorx_auth"
 AUTH_EXEMPT_PATHS = {"/api/health", "/api/auth/login", "/api/auth/logout"}
 MAX_DIAGNOSTIC_OUTPUT = 100_000
 # Browser sessions are short-lived random ids mapped to an expiry, never the
 # shared secret itself. See _issue_session/_session_valid below.
-SESSION_TTL_SECONDS = max(int(os.environ.get("MONITORX_SESSION_TTL", str(12 * 3600))), 60)
-MAX_SESSIONS = max(int(os.environ.get("MONITORX_MAX_SESSIONS", "4096")), 16)
+SESSION_TTL_SECONDS = _env_number("MONITORX_SESSION_TTL", 12 * 3600, minimum=60, maximum=30 * 86400)
+MAX_SESSIONS = _env_number("MONITORX_MAX_SESSIONS", 4096, minimum=16, maximum=100_000)
 LOGIN_WINDOW_SECONDS = 60.0
 LOGIN_MAX_FAILURES = 5
 LOGIN_BLOCK_SECONDS = 30.0
-MAX_WEBSOCKET_CONNECTIONS = max(int(os.environ.get("MONITORX_MAX_WEBSOCKETS", "100")), 1)
-MAX_CONSOLE_CONNECTIONS = max(int(os.environ.get("MONITORX_MAX_CONSOLES", "4")), 1)
+MAX_WEBSOCKET_CONNECTIONS = _env_number("MONITORX_MAX_WEBSOCKETS", 100, minimum=1, maximum=10_000)
+MAX_CONSOLE_CONNECTIONS = _env_number("MONITORX_MAX_CONSOLES", 4, minimum=1, maximum=100)
 COOKIE_SECURE = os.environ.get("MONITORX_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes"}
 # Optional hardware integrations must never hold up the first dashboard frame.
 # A later telemetry frame fills them in once available.
-OPTIONAL_COLLECTOR_TIMEOUT = max(float(os.environ.get("MONITORX_OPTIONAL_TIMEOUT", "2")), 0.5)
+OPTIONAL_COLLECTOR_TIMEOUT = _env_number("MONITORX_OPTIONAL_TIMEOUT", 2.0, minimum=0.5, maximum=120.0)
 
 # Global state tracking for rate calculations
 # Network/disk rates are derived from a previous sample; serialize snapshots.
@@ -261,9 +289,27 @@ async def _ensure_libvirt_rw_conn():
             return None, str(exc)
 
 
+def _bind_is_loopback(host: str) -> bool:
+    """Return whether a configured HTTP bind is restricted to this machine."""
+    candidate = host.strip().strip("[]").rstrip(".").lower()
+    if candidate == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start and deterministically stop background telemetry resources."""
+    # Host-control endpoints are intentionally convenient without auth only on
+    # loopback. Fail closed for wildcard/LAN binds instead of merely logging a
+    # warning that can be missed during unattended startup.
+    if not MONITORX_AUTH_TOKEN and not _bind_is_loopback(MONITORX_HOST):
+        raise RuntimeError(
+            "MONITORX_AUTH_TOKEN is required when MONITORX_HOST is not loopback"
+        )
     init_operations_store()
     broadcast_task = asyncio.create_task(broadcast_stats(), name="monitorx-broadcast")
     logger.info("Monitoring Dashboard started")
@@ -2206,10 +2252,10 @@ async def vm_action_log(limit: int = Query(20, ge=1, le=_VM_ACTION_LOG_LIMIT)):
 # * The feature is read-only by design: nothing here can modify a guest.
 # ==============================================================================
 
-INSIGHTS_SSH_TIMEOUT = max(float(os.environ.get("MONITORX_INSIGHTS_SSH_TIMEOUT", "12")), 3.0)
-INSIGHTS_CACHE_TTL = max(float(os.environ.get("MONITORX_INSIGHTS_TTL", "5")), 1.0)
-INSIGHTS_OVERVIEW_TTL = max(float(os.environ.get("MONITORX_INSIGHTS_OVERVIEW_TTL", "10")), 2.0)
-INSIGHTS_SSH_CONCURRENCY = min(max(int(os.environ.get("MONITORX_INSIGHTS_CONCURRENCY", "6")), 1), 32)
+INSIGHTS_SSH_TIMEOUT = _env_number("MONITORX_INSIGHTS_SSH_TIMEOUT", 12.0, minimum=3.0, maximum=300.0)
+INSIGHTS_CACHE_TTL = _env_number("MONITORX_INSIGHTS_TTL", 5.0, minimum=1.0, maximum=3600.0)
+INSIGHTS_OVERVIEW_TTL = _env_number("MONITORX_INSIGHTS_OVERVIEW_TTL", 10.0, minimum=2.0, maximum=3600.0)
+INSIGHTS_SSH_CONCURRENCY = _env_number("MONITORX_INSIGHTS_CONCURRENCY", 6, minimum=1, maximum=32)
 INSIGHTS_MAX_OUTPUT = 512 * 1024          # bytes read per guest command
 INSIGHTS_MAX_ERROR = 4096                 # stderr retained for diagnostics
 INSIGHTS_MAX_PROCESSES = 800
@@ -2336,21 +2382,53 @@ def _load_insights_configs() -> Dict[str, Dict[str, Any]]:
 
 
 async def _save_insights_configs(configs: Dict[str, Dict[str, Any]]) -> None:
-    """Atomically persist the profile store with 0600 permissions."""
+    """Atomically persist the profile store with 0600 permissions.
+
+    Write and fsync a same-directory temporary file before replacing the live
+    store. A crash can therefore leave either the old or new complete JSON,
+    never a truncated profile database.
+    """
     path = _insights_config_path()
     _ensure_state_dir()
-    payload = json.dumps(configs, indent=2, sort_keys=True)
+    payload = json.dumps(configs, indent=2, sort_keys=True).encode("utf-8")
 
     def _write() -> None:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        fd = None
         try:
+            fd = os.open(
+                temp_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
             os.fchmod(fd, 0o600)
-            os.write(fd, payload.encode("utf-8"))
+            view = memoryview(payload)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short write while saving Insights profiles")
+                view = view[written:]
             os.fsync(fd)
-        finally:
             os.close(fd)
+            fd = None
+            os.replace(temp_path, path)
+            _harden_file_mode(path)
+            # Persist the rename itself where the platform supports directory
+            # fsync (Linux, MonitorX's target platform).
+            with suppress(OSError):
+                dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+        finally:
+            if fd is not None:
+                os.close(fd)
+            with suppress(FileNotFoundError):
+                temp_path.unlink()
 
-    await asyncio.get_running_loop().run_in_executor(None, _write)
+    await asyncio.to_thread(_write)
 
 
 def _ssh_binary() -> str:
@@ -2412,7 +2490,13 @@ async def _run_insights_ssh(config: Dict[str, Any], remote_command) -> Dict[str,
     """
     argv = _vm_insights_ssh_argv(config, remote_command)
     proc = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        # SSH may invoke helper processes. A dedicated process group lets a
+        # timeout reap the whole tree, preventing descendants from retaining
+        # pipe file descriptors after the request/event loop has ended.
+        start_new_session=True,
     )
 
     async def _collect():
@@ -2441,11 +2525,17 @@ async def _run_insights_ssh(config: Dict[str, Any], remote_command) -> Dict[str,
         }
     except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
         with suppress(ProcessLookupError):
-            proc.kill()
+            os.killpg(proc.pid, signal.SIGKILL)
         # communicate() closes both pipe transports as well as reaping the
-        # process; wait() alone leaves transports alive after loop shutdown.
-        with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        # process. Shield cleanup from request cancellation; descendants in
+        # the process group have already been killed, so their inherited pipe
+        # descriptors cannot keep this wait alive.
+        with suppress(asyncio.TimeoutError, asyncio.CancelledError):
+            await asyncio.shield(asyncio.wait_for(proc.communicate(), timeout=3.0))
+        transport = getattr(proc, "_transport", None)
+        if transport is not None:
+            transport.close()
+            await asyncio.sleep(0)
         if isinstance(exc, asyncio.CancelledError):
             raise
         return {
@@ -4219,7 +4309,7 @@ _HEALTH_HISTORY = collections.deque(maxlen=60)
 # lets the hub load instantly on repeat visits; callers that need fresh data
 # pass refresh=1. The lock coalesces concurrent scans so a burst of tab
 # switches cannot stampede the host with parallel subprocess runs.
-HEALTH_SCAN_TTL = max(float(os.environ.get("MONITORX_HEALTH_TTL", "10")), 1.0)
+HEALTH_SCAN_TTL = _env_number("MONITORX_HEALTH_TTL", 10.0, minimum=1.0, maximum=3600.0)
 _health_scan_cache: Dict[str, Any] = {"data": None, "stored_at": 0.0}
 _health_scan_lock = asyncio.Lock()
 DMESG_BIN = shutil.which("dmesg") or "/usr/bin/dmesg"
@@ -4376,8 +4466,9 @@ async def list_services():
         raise HTTPException(status_code=503, detail="systemd is not available in this environment (systemctl not found).")
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Unexpected failure while listing systemd services")
+        raise HTTPException(status_code=500, detail="Could not list system services.")
 
 
 @app.post("/api/services/{service_name}/{action}")
@@ -5338,8 +5429,11 @@ async def troubleshoot_logs(
             "service": service,
             "logs": parsed_logs
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Unexpected failure while reading system logs")
+        raise HTTPException(status_code=500, detail="Could not read system logs.")
 
 
 async def _require_public_probe_target(host: str, port: int = 443) -> None:
@@ -6677,8 +6771,11 @@ async def run_command(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    # Secure default: localhost only. Set MONITORX_HOST=0.0.0.0 explicitly
-    # when a reverse proxy/authenticated preview needs a network bind.
-    if MONITORX_HOST != "127.0.0.1" and not MONITORX_AUTH_TOKEN:
-        logger.warning("⚠️ Binding to %s without MONITORX_AUTH_TOKEN is insecure!", MONITORX_HOST)
-    uvicorn.run(app, host=MONITORX_HOST, port=int(os.environ.get("MONITORX_PORT", "8080")))
+    # Secure default: localhost only. Set both MONITORX_HOST and an auth token
+    # when a reverse proxy/authenticated deployment needs a network bind.
+    if not MONITORX_AUTH_TOKEN and not _bind_is_loopback(MONITORX_HOST):
+        raise SystemExit(
+            "Refusing non-loopback bind without MONITORX_AUTH_TOKEN. "
+            "Configure a strong token or bind to 127.0.0.1."
+        )
+    uvicorn.run(app, host=MONITORX_HOST, port=MONITORX_PORT)

@@ -32,7 +32,7 @@ fi
 
 "$VENV_DIR/bin/python3" -m pip install --upgrade pip -q
 
-echo '[3/4] Installing pinned Python dependencies...'
+echo '[3/4] Installing bounded Python dependencies...'
 "$VENV_DIR/bin/python3" -m pip install -r "$SCRIPT_DIR/requirements.txt" -q
 
 echo '[4/4] Making the optional system libvirt bindings visible to the environment...'

@@ -264,6 +264,20 @@ class ConfigStoreTests(unittest.TestCase):
         main._insights_config_path().write_text("{not json")
         self.assertEqual(main._load_insights_configs(), {})
 
+    def test_atomic_save_leaves_no_temporary_files(self):
+        import asyncio
+
+        asyncio.run(main._save_insights_configs({
+            "vm-atomic": {
+                "host": "10.2.2.2", "port": 22,
+                "user": "root", "identity_file": None,
+            }
+        }))
+        path = main._insights_config_path()
+        leftovers = list(path.parent.glob(f".{path.name}.*.tmp"))
+        self.assertEqual(leftovers, [])
+        self.assertEqual(main._load_insights_configs()["vm-atomic"]["host"], "10.2.2.2")
+
 
 class ApiTests(unittest.TestCase):
     """Endpoint behaviour with the stub ssh binary standing in for a guest."""

@@ -49,12 +49,17 @@ docker-compose.yml  Local container deployment
 
 ## Verify
 
+Install the test-only dependencies, then run both suites:
+
 ```bash
-python -m pytest
-node tests/smoke-services.js
-node tests/smoke-rootstorage-processes.js
-node tests/smoke-vm-insights.js
+.venv/bin/python -m pip install -r requirements-dev.txt
+npm ci
+.venv/bin/python -m pytest
+npm test
 ```
+
+`package-lock.json` is committed so the browser smoke tests use a reproducible
+jsdom dependency graph. Runtime installations do not require Node.js.
 
 ## Security
 

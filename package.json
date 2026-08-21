@@ -1,0 +1,17 @@
+{
+  "name": "monitor-x",
+  "version": "2.5.0",
+  "private": true,
+  "description": "Local-first Linux monitoring dashboard",
+  "scripts": {
+    "test": "npm run test:smoke",
+    "test:smoke": "node tests/smoke-services.js && node tests/smoke-rootstorage-processes.js && node tests/smoke-vm-insights.js",
+    "check:syntax": "node --check frontend/js/app.js && node --check frontend/js/nasa-enhance.js && node --check frontend/js/nexus-hud.js && node --check frontend/js/operations-center.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}

@@ -1,0 +1,5 @@
+# Test-only dependencies. Install after requirements.txt.
+-r requirements.txt
+pytest>=8.3,<10
+# FastAPI 0.141+/Starlette 1.x moved TestClient to the maintained httpx2 API.
+httpx2>=2.12,<3

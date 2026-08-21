@@ -112,6 +112,50 @@ class StateFileSecurity(unittest.TestCase):
         self.assertEqual(Path(main.OPERATIONS_DB).stat().st_mode & 0o777, 0o600)
 
 
+class RuntimeConfiguration(unittest.TestCase):
+    """Malformed environment values must not crash or weaken startup."""
+
+    def test_numeric_environment_values_are_bounded(self):
+        main = _load_main()
+        os.environ["MONITORX_TEST_NUMBER"] = "NaN"
+        try:
+            self.assertEqual(
+                main._env_number("MONITORX_TEST_NUMBER", 7.0, minimum=1.0),
+                7.0,
+            )
+            os.environ["MONITORX_TEST_NUMBER"] = "999"
+            self.assertEqual(
+                main._env_number("MONITORX_TEST_NUMBER", 7, maximum=50),
+                50,
+            )
+        finally:
+            os.environ.pop("MONITORX_TEST_NUMBER", None)
+
+    def test_only_loopback_binds_may_run_without_auth(self):
+        main = _load_main()
+        for host in ("127.0.0.1", "::1", "[::1]", "localhost"):
+            self.assertTrue(main._bind_is_loopback(host), host)
+        for host in ("0.0.0.0", "::", "192.168.1.20", "monitor.example"):
+            self.assertFalse(main._bind_is_loopback(host), host)
+
+    def test_lifespan_refuses_unauthenticated_network_bind(self):
+        import asyncio
+
+        main = _load_main()
+        old_host, old_token = main.MONITORX_HOST, main.MONITORX_AUTH_TOKEN
+        main.MONITORX_HOST, main.MONITORX_AUTH_TOKEN = "0.0.0.0", ""
+
+        async def start():
+            async with main.lifespan(main.app):
+                self.fail("unsafe application startup unexpectedly succeeded")
+
+        try:
+            with self.assertRaisesRegex(RuntimeError, "MONITORX_AUTH_TOKEN"):
+                asyncio.run(start())
+        finally:
+            main.MONITORX_HOST, main.MONITORX_AUTH_TOKEN = old_host, old_token
+
+
 class SignalShadowing(unittest.TestCase):
     """P1-4: the `signal` parameter shadowed the `signal` module."""
 

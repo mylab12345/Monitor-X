@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Optional local configuration. Keep secrets in .env (ignored by git); see
@@ -9,6 +11,10 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
         [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
         key="${line%%=*}"
         value="${line#*=}"
+        if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            printf 'Ignoring invalid variable name in .env: %s\n' "$key" >&2
+            continue
+        fi
         # Do not overwrite an explicitly exported environment variable.
         if [[ -z "${!key+x}" ]]; then
             value="${value#\"}"; value="${value%\"}"

@@ -2,10 +2,12 @@
 # advisories; 0.141.x accepts a patched starlette (>=1.3.1) with no source
 # changes required here.
 fastapi>=0.141.0,<0.142
-starlette>=1.3.1
-uvicorn[standard]>=0.30.1
-websockets>=12.0
-psutil>=5.9.8
+starlette>=1.3.1,<1.7
+# Upper bounds keep unattended rebuilds from absorbing breaking major/API
+# changes; Dependabot can advance each boundary with the test suite in view.
+uvicorn[standard]>=0.30.1,<0.53
+websockets>=12.0,<18
+psutil>=5.9.8,<8
 defusedxml>=0.7.1,<0.8
 # jinja2/aiofiles removed: Jinja2Templates was imported but never rendered
 # anything (every response is JSON or a directly-read static index.html), and
