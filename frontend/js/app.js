@@ -1090,15 +1090,20 @@ function switchToTroubleshoot() {
     runFullHealthScan();
 }
 
-async function runFullHealthScan() {
+async function runFullHealthScan(force = false) {
     const btn = document.getElementById('run-full-scan-btn');
-    btn.disabled = true;
-    btn.textContent = '⏳ Scanning System...';
+    // Only show the "scanning" state when we actually triggered a fresh scan;
+    // a cached load resolves instantly so the button should not flicker.
+    if (force && btn) btn.textContent = '⏳ Scanning System...';
+    if (btn) btn.disabled = true;
 
     try {
-        const res = await fetch(`${API_BASE}/api/troubleshoot/health-check`);
+        // The backend caches scans briefly so returning to the hub loads
+        // instantly; force=true bypasses the cache (Run Scan button, after fixes).
+        const res = await fetch(`${API_BASE}/api/troubleshoot/health-check${force ? '?refresh=1' : ''}`);
         if (!res.ok) throw new Error('Health check failed');
         healthData = await res.json();
+        renderHealthCachedFlag(healthData);
 
         updateHealthGauge(healthData.health_score);
         renderHealthChecks(healthData.checks);
@@ -1341,7 +1346,8 @@ async function remediateAction(action, target = null, opts = {}) {
 async function refreshAfterFix() {
     if (state.currentTab === 'troubleshoot') {
         loadFixHistory();
-        await runFullHealthScan();
+        // A fix just changed the host state, so bypass the cache and re-scan.
+        await runFullHealthScan(true);
     } else {
         fetchStats();
     }
@@ -1524,6 +1530,23 @@ function healthSummaryText(healthData) {
         return `${summary.warning} warning${plural} need attention. System Health Index: ${healthData.health_score}.`;
     }
     return 'All system checks passing — no issues detected.';
+}
+
+/* Show whether the shown scan was served from the backend's short TTL cache
+   (instant loads) or freshly computed. Keeps the user informed that a cached
+   snapshot may lag the live host by a few seconds. */
+function renderHealthCachedFlag(data) {
+    const badge = document.getElementById('health-cache-badge');
+    if (!badge) return;
+    if (data && data.cached) {
+        badge.textContent = '⚡ Cached (just now)';
+        badge.className = 'health-cache-badge cached';
+        badge.title = 'Shown from a snapshot taken within the last few seconds for instant loading. Click "Run Diagnostic Scan" for a fresh scan.';
+    } else {
+        badge.textContent = '🟢 Fresh scan';
+        badge.className = 'health-cache-badge fresh';
+        badge.title = 'This scan was computed live just now.';
+    }
 }
 
 function updateHealthGauge(score) {
@@ -3764,7 +3787,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Troubleshoot Scan
-    document.getElementById('run-full-scan-btn').addEventListener('click', runFullHealthScan);
+    document.getElementById('run-full-scan-btn').addEventListener('click', () => runFullHealthScan(true));
 
     // Auto-Fix Engine controls
     document.getElementById('fix-all-btn')?.addEventListener('click', () => runFixAll());
@@ -3796,7 +3819,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('refresh-btn').addEventListener('click', () => {
         if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
         fetchStats();
-        if (state.currentTab === 'troubleshoot') runFullHealthScan();
+        if (state.currentTab === 'troubleshoot') runFullHealthScan(true);
         showToast('Refreshed data', 'info');
     });
 

@@ -133,6 +133,47 @@ The 45 Bandit-low items are primarily broad exception handling in best-effort ha
 
 Docker and ShellCheck binaries were not present in the audit environment, so `docker compose config` and ShellCheck could not be executed. Compose syntax and shell scripts were manually reviewed; Python and JavaScript runtime tests passed.
 
+## Follow-up hardening and performance pass (2026-08-21)
+
+- **Troubleshoot Hub health scan is now cached.** A full scan runs a dozen-plus
+  subprocess diagnostics, so repeat visits reused a fresh snapshot within
+  `MONITORX_HEALTH_TTL` seconds (default 10). `?refresh=1` forces a live scan;
+  the "Run Diagnostic Scan" button and post-fix re-scans force refresh, while
+  returning to the hub uses the cache for instant loads. Concurrent requests
+  are coalesced behind a lock so a burst of tab switches cannot stampede the
+  host with parallel subprocess runs. The scan never silently serves stale
+  data: the response reports `cached`/`cached_age_ms` and the UI shows a badge.
+- **The scanner is now failure-isolated end to end.** An unexpected exception
+  in the process-state walk (the only previously unguarded sensor read) is
+  caught, and a top-level guard returns a well-formed degraded scan instead of
+  a 500, so a single sensor/subprocess glitch can no longer blank the hub.
+- **`pip-audit` re-run:** no known vulnerabilities in `requirements.txt` or
+  transitive runtime deps. (The environment's build-tool `setuptools` reports
+  advisory IDs, but setuptools is not a runtime dependency of this application.)
+
+## Auto-Fix Engine expansion (2026-08-21)
+
+Six more remediation tools were added to the Troubleshoot Hub, all following
+the existing security model (argv-only, non-interactive sudo, bounded
+timeouts, reversible, owner/input-guarded):
+
+- **stop_service / disable_service** — systemctl `stop`/`disable` for a target
+  unit, reusing the existing validated service-action path and sudo policy.
+- **clear_swap** — cycles swap off/on to reclaim used swap, but only executes
+  when the swapped-out pages fit in available RAM with >=512 MiB headroom,
+  refusing otherwise to avoid an OOM kill.
+- **fstrim** — `fstrim -av` to TRIM unused storage blocks on SSDs.
+- **tune_swappiness** — runtime `vm.swappiness=10` (not persisted).
+- **raise_fd_limits** — runtime `fs.file-max` raise (capped at 20,000,000)
+  offered directly on the File-Descriptor-Pressure check.
+
+The health scanner now attaches fixes for swap pressure (clear_swap), storage
+(fstrim), and file-descriptor pressure (raise_fd_limits). The installer's
+sudoers policy (`systemd/install-service.sh`) was extended with
+`MONITORX_SYSCTL` and `MONITORX_MAINTENANCE` aliases (the latter only when the
+corresponding tool is present). `pip-audit` still reports no known
+vulnerabilities.
+
 ## Residual operational requirements
 
 - Keep MonitorX private or behind a trusted HTTPS reverse proxy. Use a long random token.

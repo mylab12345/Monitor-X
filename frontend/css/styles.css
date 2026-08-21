@@ -751,6 +751,29 @@ canvas {
     color: var(--text-dim);
 }
 
+/* Scan freshness badge (Troubleshoot Hub header) */
+.health-cache-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+}
+.health-cache-badge.cached {
+    color: var(--accent, #38c6ff);
+    background: color-mix(in srgb, var(--accent, #38c6ff) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent, #38c6ff) 40%, transparent);
+    opacity: 1;
+}
+.health-cache-badge.fresh {
+    color: var(--success, #2ee6a8);
+    background: color-mix(in srgb, var(--success, #2ee6a8) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--success, #2ee6a8) 35%, transparent);
+    opacity: 1;
+}
+
 /* Health Index trend sparkline (Troubleshoot Hub header) */
 .health-trend-block {
     display: flex;

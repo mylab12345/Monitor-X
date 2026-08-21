@@ -33,6 +33,7 @@ Copy `.env.example` to `.env` for local settings. Common variables:
 - `MONITORX_AUTH_TOKEN` — required by Docker Compose and for any network exposure
 - `MONITORX_COOKIE_SECURE` — set `true` when served through trusted HTTPS
 - `MONITORX_CONNECTIVITY_TARGET` — optional explicit host for outbound health probes (disabled by default)
+- `MONITORX_HEALTH_TTL` — seconds the Troubleshoot Hub reuses a fresh health scan before re-running diagnostics (default: `10`). Raising it makes the hub load faster; lowering it returns fresher results.
 - `MONITORX_STATE_DIR` — directory for local state and audit data
 
 ## Project layout
