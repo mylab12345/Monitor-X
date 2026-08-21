@@ -100,12 +100,33 @@ VIRSH_BIN="$(command -v virsh || true)"
 SUDOERS_DEST="/etc/sudoers.d/monitorx-systemctl"
 SUDOERS_VM_DEST="/etc/sudoers.d/monitorx-virsh"
 echo "[2/4] Installing limited service-control policy at $SUDOERS_DEST..."
-cat <<EOF | sudo tee "$SUDOERS_DEST" > /dev/null
-# Managed by MonitorX. Required for dashboard Start/Stop/Restart controls.
-Cmnd_Alias MONITORX_SYSTEMCTL = $SYSTEMCTL_BIN --no-ask-password start *.service, $SYSTEMCTL_BIN --no-ask-password stop *.service, $SYSTEMCTL_BIN --no-ask-password restart *.service, $SYSTEMCTL_BIN --no-ask-password reload *.service, $SYSTEMCTL_BIN --no-ask-password enable *.service, $SYSTEMCTL_BIN --no-ask-password disable *.service
+# Additional maintenance tools used by the Auto-Fix Engine: SSD TRIM and safe
+# swap reclaim. fstrim/swapoff/swapon are argv-constrained; the maintenance
+# alias is only emitted for tools that exist on this host.
+FSTRIM_BIN="$(command -v fstrim || true)"
+SWAPOFF_BIN="$(command -v swapoff || true)"
+SWAPON_BIN="$(command -v swapon || true)"
+MAINT_CMDS=""
+if [ -n "$FSTRIM_BIN" ]; then MAINT_CMDS="${MAINT_CMDS:+$MAINT_CMDS, }$FSTRIM_BIN -av"; fi
+if [ -n "$SWAPOFF_BIN" ]; then MAINT_CMDS="${MAINT_CMDS:+$MAINT_CMDS, }$SWAPOFF_BIN -a"; fi
+if [ -n "$SWAPON_BIN" ]; then MAINT_CMDS="${MAINT_CMDS:+$MAINT_CMDS, }$SWAPON_BIN -a"; fi
+
+SUDOERS_BODY="Cmnd_Alias MONITORX_SYSTEMCTL = $SYSTEMCTL_BIN --no-ask-password start *.service, $SYSTEMCTL_BIN --no-ask-password stop *.service, $SYSTEMCTL_BIN --no-ask-password restart *.service, $SYSTEMCTL_BIN --no-ask-password reload *.service, $SYSTEMCTL_BIN --no-ask-password enable *.service, $SYSTEMCTL_BIN --no-ask-password disable *.service
 Cmnd_Alias MONITORX_REMEDIATION = $SYSCTL_BIN -w vm.drop_caches=3, $JOURNALCTL_BIN --vacuum-time=2d, $DMESG_BIN -C, $DMESG_BIN -c, $DMESG_BIN --clear, $JOURNALCTL_BIN --rotate, $JOURNALCTL_BIN --vacuum-time=1s
-$CURRENT_USER ALL=(root) NOPASSWD: MONITORX_SYSTEMCTL, MONITORX_REMEDIATION
-EOF
+"
+SUDOERS_BODY="${SUDOERS_BODY}Cmnd_Alias MONITORX_SYSCTL = $SYSCTL_BIN -w vm.swappiness=*, $SYSCTL_BIN -w fs.file-max=*
+"
+if [ -n "$MAINT_CMDS" ]; then
+  SUDOERS_BODY="${SUDOERS_BODY}Cmnd_Alias MONITORX_MAINTENANCE = $MAINT_CMDS
+"
+fi
+SUDOERS_BODY="${SUDOERS_BODY}$CURRENT_USER ALL=(root) NOPASSWD: MONITORX_SYSTEMCTL, MONITORX_REMEDIATION, MONITORX_SYSCTL"
+if [ -n "$MAINT_CMDS" ]; then
+  SUDOERS_BODY="${SUDOERS_BODY}, MONITORX_MAINTENANCE"
+fi
+SUDOERS_BODY="${SUDOERS_BODY}
+"
+printf '%s' "$SUDOERS_BODY" | sudo tee "$SUDOERS_DEST" > /dev/null
 sudo chmod 440 "$SUDOERS_DEST"
 sudo visudo -cf "$SUDOERS_DEST"
 

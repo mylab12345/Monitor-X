@@ -4212,6 +4212,16 @@ JOURNALCTL_BIN = shutil.which("journalctl") or "/usr/bin/journalctl"
 # Rolling history of System Health Index snapshots (one per scan) so the hub
 # can show whether the host is improving or degrading over time.
 _HEALTH_HISTORY = collections.deque(maxlen=60)
+
+# Short-lived cache for the Troubleshoot Hub health scan. A single scan runs a
+# dozen or more subprocess reads (systemctl, dmesg, journalctl, timedatectl,
+# ...), so on a real host it can take seconds. Serving a TTL-fresh snapshot
+# lets the hub load instantly on repeat visits; callers that need fresh data
+# pass refresh=1. The lock coalesces concurrent scans so a burst of tab
+# switches cannot stampede the host with parallel subprocess runs.
+HEALTH_SCAN_TTL = max(float(os.environ.get("MONITORX_HEALTH_TTL", "10")), 1.0)
+_health_scan_cache: Dict[str, Any] = {"data": None, "stored_at": 0.0}
+_health_scan_lock = asyncio.Lock()
 DMESG_BIN = shutil.which("dmesg") or "/usr/bin/dmesg"
 # Reject option-like names, path separators, colons and traversal-like '..'.
 SERVICE_NAME_PATTERN = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9@_.-]*\.service$")
@@ -4387,7 +4397,60 @@ async def control_service(service_name: str, action: str):
 # ==============================================================================
 
 @app.get("/api/troubleshoot/health-check")
-async def troubleshoot_health_check():
+async def troubleshoot_health_check(refresh: bool = Query(False)):
+    """System Health scan served from a short TTL cache for instant loads.
+
+    A full scan launches many subprocess diagnostics, so repeat visits to the
+    Troubleshoot Hub reuse a snapshot taken within ``HEALTH_SCAN_TTL`` seconds.
+    Pass ``?refresh=1`` to force a brand-new scan (used by the "Run Diagnostic
+    Scan" button and immediately after applying fixes).
+    """
+    async with _health_scan_lock:
+        now = time.monotonic()
+        cached = _health_scan_cache.get("data")
+        if (
+            not refresh
+            and cached is not None
+            and now - _health_scan_cache.get("stored_at", 0.0) < HEALTH_SCAN_TTL
+        ):
+            response = dict(cached)
+            response["cached"] = True
+            response["cached_age_ms"] = int(
+                (now - _health_scan_cache.get("stored_at", 0.0)) * 1000
+            )
+            return response
+
+        try:
+            result = await _do_health_scan()
+        except Exception:
+            # A single sensor/subprocess glitch must never hard-fail the whole
+            # hub. Fall back to a well-formed, degraded scan so the UI can keep
+            # rendering and surface the failure instead of a blank page.
+            logger.exception("Health scan failed")
+            result = {
+                "health_score": 0,
+                "summary": {"critical": 1, "warning": 0, "ok": 0},
+                "timestamp": datetime.now().isoformat(),
+                "checks": [{
+                    "id": "scan_error",
+                    "category": "Scanner",
+                    "name": "Health Scan Error",
+                    "status": "critical",
+                    "value": "Scan could not be completed",
+                    "message": "The health scanner hit an unexpected error. Please retry the scan.",
+                    "remediation": "Retry the diagnostic scan. If the failure persists, check the MonitorX logs.",
+                    "fix": None,
+                }],
+            }
+        _health_scan_cache["data"] = result
+        _health_scan_cache["stored_at"] = time.monotonic()
+
+    result["cached"] = False
+    result["cached_age_ms"] = 0
+    return result
+
+
+async def _do_health_scan() -> Dict[str, Any]:
     """
     Comprehensive automated system health diagnostic scanner.
     Evaluates CPU, Load, RAM, Swap, Disk Space, Inodes, Services, Zombies,
@@ -4453,6 +4516,11 @@ async def troubleshoot_health_check():
         {"action": "clear_pagecache", "label": "⚡ Clear RAM Cache", "level": "warning", "sudo": True, "target": None},
         {"action": "system_cleanup", "label": "🧹 Run System Cleanup", "level": "warning", "sudo": True, "target": None},
     ]
+    # When swap is meaningfully used, offer to reclaim it (guarded against OOM).
+    if swap_pct > 20.0 and mem["swap_used"] > 0:
+        memory_fixes.append(
+            {"action": "clear_swap", "label": "🔁 Reclaim Swap", "level": "warning", "sudo": True, "target": None}
+        )
     if mem_pct > 90.0 or avail_mb < 500:
         health_score -= 20
         checks.append({
@@ -4528,6 +4596,7 @@ async def troubleshoot_health_check():
                 {"action": "clean_tmp", "label": "🧹 Clean Stale Temp Files", "level": "warning", "sudo": True, "target": None},
                 {"action": "rotate_logs", "label": "🔄 Force Log Rotation", "level": "info", "sudo": True, "target": None},
                 {"action": "autoremove_packages", "label": "🗑️ Auto-Remove Orphan Packages", "level": "info", "sudo": True, "target": None},
+                {"action": "fstrim", "label": "🗃️ TRIM Unused Storage Blocks", "level": "info", "sudo": True, "target": None},
             ],
         })
     elif disk_warning:
@@ -4548,6 +4617,7 @@ async def troubleshoot_health_check():
                 {"action": "clean_package_cache", "label": "📦 Clean Package Cache", "level": "warning", "sudo": True, "target": None},
                 {"action": "clean_tmp", "label": "🧹 Clean Stale Temp Files", "level": "warning", "sudo": True, "target": None},
                 {"action": "rotate_logs", "label": "🔄 Force Log Rotation", "level": "info", "sudo": True, "target": None},
+                {"action": "fstrim", "label": "🗃️ TRIM Unused Storage Blocks", "level": "info", "sudo": True, "target": None},
             ],
         })
     else:
@@ -4620,7 +4690,12 @@ async def troubleshoot_health_check():
     # 5. Zombie & Disk-Sleep (D State) Processes
     # Full-table scan on purpose: the top-N process view sorts by CPU, which
     # drops the ~0% CPU zombies off the end of the list on busy hosts.
-    state_counts = await _scan_process_states()
+    try:
+        state_counts = await _scan_process_states()
+    except Exception:
+        # A failed /proc walk must never take down the whole health scan.
+        logger.debug("Process-state scan failed; treating as clean", exc_info=True)
+        state_counts = {}
     zombies = state_counts.get("zombie", 0)
     d_states = state_counts.get("uninterruptible sleep", 0) + state_counts.get("stopped", 0)
 
@@ -4858,9 +4933,9 @@ async def troubleshoot_health_check():
                     "status": "warning",
                     "value": f"{allocated:,} / {max_fds:,} fds ({fd_pct:.0f}%)",
                     "message": "The host is using a large share of its file-descriptor table; runaway processes should be inspected.",
-                    "remediation": "Run 'lsof -n | awk \'{print $1}\' | sort | uniq -c | sort -rn | head' in terminal to identify processes with excessive open file handles. Restart the leaking process or service, or increase open file limits in '/etc/security/limits.conf'.",
+                    "remediation": "Use the auto-fix button below to raise the system-wide file-descriptor ceiling for immediate headroom, then run 'lsof -n | awk \'{print $1}\' | sort | uniq -c | sort -rn | head' to identify processes with excessive open file handles. Restart the leaking process or service, or increase per-process limits in '/etc/security/limits.conf'.",
                     "action": "view_processes",
-                    "fix": None,
+                    "fix": {"action": "raise_fd_limits", "label": "🔧 Raise File-Descriptor Limit", "level": "warning", "sudo": True, "target": None},
                 })
             else:
                 checks.append({
@@ -5652,6 +5727,48 @@ FIX_ACTION_META = {
         "sudo": True,
         "description": "Runs a conservative whole-system cleanup in one action: vacuums journal logs, cleans stale temp files, cleans the package manager cache, forces log rotation, and drops clean RAM caches. It never uninstalls packages or restarts workloads.",
     },
+    "stop_service": {
+        "label": "Stop service",
+        "category": "Services",
+        "level": "warning",
+        "sudo": True,
+        "description": "Stops the target systemd service unit. Useful for stopping a runaway or resource-hung service before inspecting or fixing it.",
+    },
+    "disable_service": {
+        "label": "Disable service on boot",
+        "category": "Services",
+        "level": "warning",
+        "sudo": True,
+        "description": "Disables the target systemd service so it no longer starts automatically at boot. Reversible with the 'Enable service' fix.",
+    },
+    "clear_swap": {
+        "label": "Reclaim swap memory",
+        "category": "Memory",
+        "level": "warning",
+        "sudo": True,
+        "description": "Turns swap off and back on to reclaim used swap space. Only executes when enough free RAM is available to safely hold the swapped-out pages, preventing an OOM kill.",
+    },
+    "fstrim": {
+        "label": "TRIM unused storage blocks",
+        "category": "Storage",
+        "level": "info",
+        "sudo": True,
+        "description": "Runs `fstrim -av` to inform the drive of unused blocks (SSD TRIM). Frees reclaimable flash blocks and can improve performance; fully safe and reversible.",
+    },
+    "tune_swappiness": {
+        "label": "Lower swap usage tendency (swappiness)",
+        "category": "Memory",
+        "level": "info",
+        "sudo": True,
+        "description": "Sets `vm.swappiness` to 10 so the kernel prefers keeping frequently used pages in RAM instead of swapping them out. Reversible and runtime-only (not persisted).",
+    },
+    "raise_fd_limits": {
+        "label": "Raise file-descriptor limit",
+        "category": "Processes",
+        "level": "warning",
+        "sudo": True,
+        "description": "Raises the system-wide file-descriptor ceiling (`fs.file-max`) when the host is under file-descriptor pressure. Runtime-only and reversible.",
+    },
 }
 
 # Aliases accepted by the remediate endpoint for backwards compatibility.
@@ -6174,6 +6291,129 @@ async def _fix_system_cleanup(target: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
+async def _fix_clear_swap(target: Optional[str] = None) -> Dict[str, Any]:
+    """Reclaim swap by cycling it off/on, but only when it is safe.
+
+    Turning swap off requires the swapped-out pages to fit in RAM; if they do
+    not, the kernel may OOM-kill processes. We read swap usage and available
+    memory first and refuse to proceed unless enough free memory is present.
+    """
+    try:
+        mem = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+    except Exception as e:
+        return {"success": False, "message": f"Could not read memory/swap stats: {e}"}
+    if swap.total <= 0:
+        return {"success": False, "message": "No swap space is configured on this host."}
+    if swap.used == 0:
+        return {"success": False, "message": "Swap is already empty; nothing to reclaim."}
+    # Safety margin: we need the used swap bytes to fit in available RAM with
+    # headroom (>= 512 MiB spare) or the swapoff risks OOM.
+    spare = mem.available - swap.used
+    if spare < 512 * 1024 * 1024:
+        return {
+            "success": False,
+            "message": (f"Refusing to cycle swap: {swap.used // (1024*1024)} MiB in swap "
+                        f"but only {max(0, mem.available // (1024*1024))} MiB RAM available. "
+                        "Not enough headroom to safely swap off; free memory first."),
+        }
+
+    swapoff = shutil.which("swapoff")
+    swapon = shutil.which("swapon")
+    if not swapoff or not swapon:
+        return {"success": False, "message": "swapoff/swapon utilities not found."}
+    if os.geteuid() != 0:
+        cmd_off = ["sudo", "-n", swapoff, "-a"]
+        cmd_on = ["sudo", "-n", swapon, "-a"]
+    else:
+        cmd_off = [swapoff, "-a"]
+        cmd_on = [swapon, "-a"]
+
+    try:
+        rc, _, err = await _run_cmd(cmd_off, timeout=30.0)
+        if rc != 0:
+            return {"success": False, "message": f"swapoff failed: {err.decode().strip() or 'unknown error'}"}
+        rc_on, _, _ = await _run_cmd(cmd_on, timeout=30.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Swap cycle timed out"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+    if rc_on != 0:
+        return {"success": False, "message": "Swap was turned off but could not be re-enabled."}
+    return {"success": True, "message": "Swap reclaimed successfully (cycled off and back on)."}
+
+
+async def _fix_fstrim(target: Optional[str] = None) -> Dict[str, Any]:
+    """Issue TRIM to all mounted filesystems that support it (SSDs)."""
+    fstrim = shutil.which("fstrim")
+    if not fstrim:
+        return {"success": False, "message": "fstrim utility not found."}
+    cmd = [fstrim, "-av"]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n", *cmd]
+    try:
+        rc, stdout, stderr = await _run_cmd(cmd, timeout=60.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "fstrim timed out after 60s"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if rc == 0:
+        return {"success": True, "message": stdout.decode().strip() or "TRIM completed successfully."}
+    return {"success": False, "message": stderr.decode().strip() or "fstrim failed."}
+
+
+async def _fix_tune_swappiness(target: Optional[str] = None) -> Dict[str, Any]:
+    """Lower vm.swappiness at runtime so the kernel swaps less aggressively."""
+    value = 10
+    if target and target.isdigit() and 0 <= int(target) <= 100:
+        value = int(target)
+    cmd = [SYSCTL_BIN, "-w", f"vm.swappiness={value}"]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n", *cmd]
+    try:
+        rc, stdout, stderr = await _run_cmd(cmd, timeout=10.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Swappiness tuning timed out"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if rc == 0:
+        return {"success": True, "message": f"vm.swappiness set to {value}."}
+    return {"success": False, "message": stderr.decode().strip() or "Could not adjust vm.swappiness."}
+
+
+async def _fix_raise_fd_limits(target: Optional[str] = None) -> Dict[str, Any]:
+    """Raise the system-wide file-descriptor ceiling when under pressure.
+
+    The new ceiling is the larger of 20% above the current maximum or the
+    current allocation + 64k, whichever frees headroom, and is capped so we
+    never set an absurd value on a tiny box.
+    """
+    try:
+        with open("/proc/sys/fs/file-nr") as fh:
+            parts = fh.read().split()
+        allocated, max_fds = int(parts[0]), int(parts[2])
+    except Exception:
+        return {"success": False, "message": "Could not read /proc/sys/fs/file-nr."}
+
+    current_max = max_fds or allocated + 65536
+    target_max = max(int(current_max * 1.2), allocated + 65536)
+    target_max = min(target_max, 20_000_000)  # hard safety cap
+
+    cmd = [SYSCTL_BIN, "-w", f"fs.file-max={target_max}"]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n", *cmd]
+    try:
+        rc, stdout, stderr = await _run_cmd(cmd, timeout=10.0)
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "File-descriptor limit raise timed out"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    if rc == 0:
+        return {"success": True, "message": f"fs.file-max raised to {target_max:,}."}
+    return {"success": False, "message": stderr.decode().strip() or "Could not raise fs.file-max."}
+
+
 FIX_EXECUTORS = {
     "clear_pagecache": _fix_clear_pagecache,
     "vacuum_journal": _fix_vacuum_journal,
@@ -6195,6 +6435,12 @@ FIX_EXECUTORS = {
     "reset_network_manager": _fix_reset_network_manager,
     "renew_dhcp_lease": _fix_renew_dhcp_lease,
     "system_cleanup": _fix_system_cleanup,
+    "stop_service": lambda t: _fix_service_action("stop", t),
+    "disable_service": lambda t: _fix_service_action("disable", t),
+    "clear_swap": _fix_clear_swap,
+    "fstrim": _fix_fstrim,
+    "tune_swappiness": _fix_tune_swappiness,
+    "raise_fd_limits": _fix_raise_fd_limits,
 }
 
 
@@ -6287,6 +6533,9 @@ async def troubleshoot_fix_capabilities():
         "zypper": have("zypper"),
         "nmcli": have("nmcli"),
         "dhclient": have("dhclient"),
+        "swapoff": have("swapoff"),
+        "swapon": have("swapon"),
+        "fstrim": have("fstrim"),
         "sudo": bool(sudo),
     }
     elevated = is_root or has_sudo
@@ -6315,6 +6564,12 @@ async def troubleshoot_fix_capabilities():
         "reset_network_manager": service_policy and bins["systemctl"],
         "renew_dhcp_lease": elevated and dhcp_available,
         "system_cleanup": elevated and (bins["journalctl"] or bins["find"] or package_manager_available or bins["logrotate"] or bins["sysctl"]),
+        "stop_service": service_policy and bins["systemctl"],
+        "disable_service": service_policy and bins["systemctl"],
+        "clear_swap": elevated and bins["swapoff"] and bins["swapon"],
+        "fstrim": elevated and bins["fstrim"],
+        "tune_swappiness": elevated and bins["sysctl"],
+        "raise_fd_limits": elevated and bins["sysctl"],
     }
     return {
         "is_root": is_root,

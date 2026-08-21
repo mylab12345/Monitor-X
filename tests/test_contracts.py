@@ -142,6 +142,27 @@ class RuntimeSmoke(unittest.TestCase):
         self.assertNotIn("pods", frame)
         self.assertIn("processes", frame)
 
+    def test_auto_fix_engine_registers_all_actions(self):
+        """Every advertised fix action must be executable by the remediate
+        endpoint (registered in FIX_ACTION_META and FIX_EXECUTORS)."""
+        main = self.main
+        meta = set(main.FIX_ACTION_META.keys())
+        executors = set(main.FIX_EXECUTORS.keys())
+        self.assertEqual(meta, executors)
+        # New maintenance tools from the Auto-Fix expansion must stay wired.
+        for action in ("stop_service", "disable_service", "clear_swap",
+                       "fstrim", "tune_swappiness", "raise_fd_limits"):
+            self.assertIn(action, meta)
+            self.assertIn(action, executors)
+            # Levels are audited against the auth gate: only non-critical
+            # actions may run without authentication here.
+            self.assertNotEqual(main.FIX_ACTION_META[action]["level"], "critical")
+        # An unregistered action is rejected, never silently accepted.
+        self.assertEqual(
+            self.client.post("/api/troubleshoot/remediate", json={"action": "not-a-fix"}).status_code,
+            400,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
